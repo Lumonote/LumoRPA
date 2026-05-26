@@ -1,15 +1,23 @@
-/target
-/dist
-/.cargo-home
-*.db
-*.db-wal
-*.db-shm
-.DS_Store
-*.log
-*.swp
-.idea/
+### AL ###
+#Template for AL projects for Dynamics 365 Business Central
+#launch.json folder
 .vscode/
-node_modules/
-.envrc
-.env
-.env.local
+#Cache folder
+.alcache/
+#Symbols folder
+.alpackages/
+#Snapshots folder
+.snapshots/
+#Testing Output folder
+.output/
+#Extension App-file
+*.app
+#Rapid Application Development File
+rad.json
+#Translation Base-file
+*.g.xlf
+#License-files
+*.bclicense
+*.flf
+#Test results file
+TestResults.xml
