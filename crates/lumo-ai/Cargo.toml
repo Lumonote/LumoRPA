@@ -1,0 +1,27 @@
+[package]
+name = "lumo-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LumoRPA AI router (LLM/Vision/OCR) with BYOK adapters"
+
+[dependencies]
+lumo-core.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+parking_lot.workspace = true
+bytes = "1"
+dirs = "5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"

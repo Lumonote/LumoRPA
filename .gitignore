@@ -1,0 +1,15 @@
+/target
+/dist
+/.cargo-home
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+*.log
+*.swp
+.idea/
+.vscode/
+node_modules/
+.envrc
+.env
+.env.local

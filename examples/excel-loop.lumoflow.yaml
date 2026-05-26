@@ -1,0 +1,38 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: excel-loop
+  version: 0.1.0
+  name: Excel row-driven loop
+  description: |
+    Reads rows from an input workbook, transforms them, and writes a
+    summary row back to an output workbook. Demonstrates the
+    "one Excel row = one task" pattern that 影刀 made famous.
+  tags: [example, excel]
+
+spec:
+  inputs:
+    - { name: in_path,  type: file, default: "./examples/data/orders.xlsx" }
+    - { name: out_path, type: file, default: "./out/orders-summary.xlsx" }
+
+  steps:
+    - id: read
+      action: excel.read_rows
+      with:
+        file: "{{ inputs.in_path }}"
+        header: true
+
+    - id: log_count
+      action: control.log
+      with:
+        message: "read {{ steps.read.result | length }} rows"
+
+    # In M1 the for_each control wiring is still in progress; we keep the
+    # example single-shot so it works end-to-end today and just writes the
+    # first row to the summary file.
+    - id: write_first
+      action: excel.write_row
+      with:
+        file: "{{ inputs.out_path }}"
+        sheet: summary
+        row: "{{ steps.read.result[0] }}"

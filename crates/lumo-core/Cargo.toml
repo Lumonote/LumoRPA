@@ -1,0 +1,32 @@
+[package]
+name = "lumo-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LumoRPA execution core: Flow VM, Action trait, Registry"
+
+[dependencies]
+lumo-dsl.workspace = true
+lumo-storage.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+once_cell.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+lumo-actions = { path = "../lumo-actions" }

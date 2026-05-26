@@ -1,0 +1,31 @@
+[package]
+name = "lumo-actions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LumoRPA built-in actions (control/data/file/http/excel/browser)"
+
+[dependencies]
+lumo-core.workspace = true
+lumo-dsl.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+
+reqwest.workspace = true
+chromiumoxide.workspace = true
+calamine.workspace = true
+rust_xlsxwriter.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

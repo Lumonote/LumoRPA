@@ -1,0 +1,25 @@
+[package]
+name = "lumo-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LumoRPA reusable Skill packages (Claude-Code-style SKILL.md)"
+
+[dependencies]
+lumo-core.workspace = true
+lumo-dsl.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+dirs = "5"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

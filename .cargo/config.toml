@@ -1,0 +1,16 @@
+# LumoRPA cargo config
+# Prefer sparse index (Rust 1.68+) for faster resolution; use rsproxy mirror
+# as a fallback registry for slow links.
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+retry = 5

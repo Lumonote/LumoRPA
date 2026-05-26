@@ -1,0 +1,257 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1779697022591,
+  "projectRoot": "/Users/palmer/IdeaProjects/projectSync/AI/project/LumoRPA",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": "1.83",
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "examples"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "crates": {
+      "path": "crates",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1779697022565,
+      "keyFiles": []
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 4,
+      "lastAccessed": 1779697022570,
+      "keyFiles": [
+        "00-LumoRPA-Master-Report.md",
+        "01-Product-Design.md",
+        "02-Architecture-Design.md",
+        "03-Subsystems-Deep-Dive.md"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 6,
+      "lastAccessed": 1779697022572,
+      "keyFiles": [
+        "browser-scrape.lumoflow.yaml",
+        "control-flow.lumoflow.yaml",
+        "excel-loop.lumoflow.yaml",
+        "excel-smoke.lumoflow.yaml",
+        "hello-world.lumoflow.yaml"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1779697022574,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "crates/lumo-ai/tests/providers_wire.rs",
+      "accessCount": 13,
+      "lastAccessed": 1779709355077,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 7,
+      "lastAccessed": 1779709414386,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/cmd/providers.rs",
+      "accessCount": 5,
+      "lastAccessed": 1779701364587,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/src/config.rs",
+      "accessCount": 4,
+      "lastAccessed": 1779701361707,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/tests/router_smoke.rs",
+      "accessCount": 4,
+      "lastAccessed": 1779705005073,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/src/router.rs",
+      "accessCount": 3,
+      "lastAccessed": 1779702186119,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-dsl/src/template.rs",
+      "accessCount": 3,
+      "lastAccessed": 1779702879632,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 3,
+      "lastAccessed": 1779703283280,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/cmd/run.rs",
+      "accessCount": 3,
+      "lastAccessed": 1779703291028,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/src/lib.rs",
+      "accessCount": 3,
+      "lastAccessed": 1779704689386,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/src/provider.rs",
+      "accessCount": 3,
+      "lastAccessed": 1779709272105,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/src/registry.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779703292172,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1779703293101,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/src/loader.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779704140637,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/cmd/skills.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779704140741,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/src/model.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779704140843,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-skills/src/action.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779704140947,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-core/tests/control_flow.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779699463808,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-core/Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1779699464333,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/src/lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779699805467,
+      "type": "file"
+    },
+    {
+      "path": "examples/llm-summarize-orders.lumoflow.yaml",
+      "accessCount": 1,
+      "lastAccessed": 1779699807672,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/src/action.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779700877263,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1779701363236,
+      "type": "file"
+    },
+    {
+      "path": "examples/dump-xlsx.lumoflow.yaml",
+      "accessCount": 1,
+      "lastAccessed": 1779702525869,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1779703284427,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/cmd/mod.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779703287050,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/main.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779703288377,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-actions/src/data.rs",
+      "accessCount": 1,
+      "lastAccessed": 1779704478790,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

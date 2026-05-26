@@ -1,0 +1,35 @@
+[package]
+name = "lumo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LumoRPA command-line interface"
+default-run = "lumo"
+
+[[bin]]
+name = "lumo"
+path = "src/main.rs"
+
+[dependencies]
+lumo-dsl.workspace = true
+lumo-storage.workspace = true
+lumo-core.workspace = true
+lumo-actions.workspace = true
+lumo-ai.workspace = true
+lumo-skills.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+colored.workspace = true
+comfy-table.workspace = true
+indicatif.workspace = true
+chrono.workspace = true

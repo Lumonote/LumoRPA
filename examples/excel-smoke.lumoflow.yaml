@@ -1,0 +1,43 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: excel-create-and-read
+  version: 0.1.0
+  name: Excel create + read round-trip
+spec:
+  inputs:
+    - { name: file, type: file, default: "/tmp/lumo-smoke.xlsx" }
+
+  steps:
+    - id: w1
+      action: excel.write_row
+      with:
+        file: "{{ inputs.file }}"
+        sheet: data
+        row: { name: Alice, age: 30, city: Hangzhou }
+
+    - id: w2
+      action: excel.write_row
+      with:
+        file: "{{ inputs.file }}"
+        sheet: data
+        row: { name: Bob, age: 25, city: Shanghai }
+
+    - id: w3
+      action: excel.write_row
+      with:
+        file: "{{ inputs.file }}"
+        sheet: data
+        row: { name: Carol, age: 28, city: Beijing }
+
+    - id: read
+      action: excel.read_rows
+      with:
+        file: "{{ inputs.file }}"
+        sheet: data
+        header: true
+
+    - id: report
+      action: control.log
+      with:
+        message: "loaded {{ steps.read.result | length }} rows"
