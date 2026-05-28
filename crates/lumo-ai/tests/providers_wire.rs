@@ -6,7 +6,8 @@ use lumo_ai::{
     AiRouter,
 };
 use serde_json::json;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
 use wiremock::{
     matchers::{header, method, path},
     Mock, MockServer, ResponseTemplate,
@@ -16,9 +17,9 @@ use wiremock::{
 /// env var. Cargo runs tests in parallel by default; without this guard the
 /// `network_disabled_by_default_blocks_call` test would race other tests
 /// calling `allow_network()`.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+async fn env_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner())
+    LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
 
 fn allow_network() {
@@ -27,7 +28,7 @@ fn allow_network() {
 
 #[tokio::test]
 async fn openai_provider_round_trip() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     allow_network();
     let server = MockServer::start().await;
 
@@ -66,7 +67,7 @@ async fn openai_provider_round_trip() {
 
     let req = ChatRequest {
         model: "openai-test/gpt-4o-mini".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "ping".into() }],
+        messages: vec![ChatMessage::text(Role::User, "ping")],
         temperature: Some(0.1),
         max_tokens: Some(8),
         system: Some("be terse".into()),
@@ -80,7 +81,7 @@ async fn openai_provider_round_trip() {
 
 #[tokio::test]
 async fn openai_provider_propagates_api_error() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     allow_network();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -108,8 +109,10 @@ async fn openai_provider_propagates_api_error() {
     let router = AiRouter::from_config(&cfg);
     let req = ChatRequest {
         model: "openai-bad/gpt-4o-mini".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "ping".into() }],
-        temperature: None, max_tokens: None, system: None,
+        messages: vec![ChatMessage::text(Role::User, "ping")],
+        temperature: None,
+        max_tokens: None,
+        system: None,
     };
     let err = router.chat(req).await.expect_err("should fail");
     let msg = err.to_string();
@@ -118,7 +121,7 @@ async fn openai_provider_propagates_api_error() {
 
 #[tokio::test]
 async fn anthropic_provider_x_api_key_round_trip() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     allow_network();
     let server = MockServer::start().await;
 
@@ -158,7 +161,7 @@ async fn anthropic_provider_x_api_key_round_trip() {
 
     let req = ChatRequest {
         model: "claude-test/claude-opus-4-7".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "hi".into() }],
+        messages: vec![ChatMessage::text(Role::User, "hi")],
         temperature: None,
         max_tokens: Some(8),
         system: Some("be friendly".into()),
@@ -170,7 +173,7 @@ async fn anthropic_provider_x_api_key_round_trip() {
 
 #[tokio::test]
 async fn anthropic_provider_bearer_auth_with_beta() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     allow_network();
     let server = MockServer::start().await;
 
@@ -208,7 +211,7 @@ async fn anthropic_provider_bearer_auth_with_beta() {
 
     let req = ChatRequest {
         model: "claude-proxy/claude-opus-4-7[1m]".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "x".into() }],
+        messages: vec![ChatMessage::text(Role::User, "x")],
         temperature: None,
         max_tokens: Some(8),
         system: None,
@@ -220,7 +223,7 @@ async fn anthropic_provider_bearer_auth_with_beta() {
 
 #[tokio::test]
 async fn network_disabled_by_default_blocks_call() {
-    let _g = env_lock();
+    let _g = env_lock().await;
     std::env::remove_var("LUMO_ALLOW_LLM_NETWORK");
     let cfg = ProvidersConfig {
         active: Some("openai-ng".into()),
@@ -241,8 +244,10 @@ async fn network_disabled_by_default_blocks_call() {
     let router = AiRouter::from_config(&cfg);
     let req = ChatRequest {
         model: "openai-ng/gpt-4o-mini".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "p".into() }],
-        temperature: None, max_tokens: None, system: None,
+        messages: vec![ChatMessage::text(Role::User, "p")],
+        temperature: None,
+        max_tokens: None,
+        system: None,
     };
     let err = router.chat(req).await.expect_err("should refuse");
     assert!(err.to_string().contains("LUMO_ALLOW_LLM_NETWORK"));

@@ -1,11 +1,14 @@
 //! Per-step execution context.
 
 use crate::action::ActionRef;
+use crate::ai_hook::AiHookProvider;
+use crate::error::{CapKind, StepError};
 use crate::registry::ActionRegistry;
-use lumo_dsl::{Step, TemplateCtx};
+use lumo_dsl::{Capabilities, FlowAi, Step, TemplateCtx};
 use lumo_storage::Repo;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -13,7 +16,11 @@ pub struct StepCtx {
     pub run_id: String,
     pub flow_id: String,
     pub registry: ActionRegistry,
+    capabilities: Capabilities,
+    vault_names: Vec<String>,
     repo: Option<Repo>,
+    ai_provider: Option<Arc<dyn AiHookProvider>>,
+    flow_ai: Option<FlowAi>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -23,6 +30,18 @@ struct CtxInner {
     vars: Map<String, Value>,
     bindings: Map<String, Value>,
     log_buffer: Vec<String>,
+    next_seq: i64,
+    stats: RunStats,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunStats {
+    pub executed: usize,
+    pub ok: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub retried: usize,
+    pub caught: usize,
 }
 
 impl StepCtx {
@@ -32,37 +51,67 @@ impl StepCtx {
         registry: ActionRegistry,
         repo: Option<Repo>,
         inputs: Value,
+        capabilities: Capabilities,
+        vault_names: Vec<String>,
     ) -> Self {
         Self {
             run_id,
             flow_id,
             registry,
+            capabilities,
+            vault_names,
             repo,
+            ai_provider: None,
+            flow_ai: None,
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs,
                 steps: Map::new(),
                 vars: Map::new(),
                 bindings: Map::new(),
                 log_buffer: Vec::new(),
+                next_seq: 0,
+                stats: RunStats::default(),
             })),
         }
+    }
+
+    /// Attach the AI hook provider and flow-level AI policy. Called by
+    /// `FlowVm::run` when both are configured; otherwise AI hooks stay off
+    /// regardless of step-level `ai:` blocks.
+    pub fn with_ai(
+        mut self,
+        provider: Option<Arc<dyn AiHookProvider>>,
+        flow_ai: Option<FlowAi>,
+    ) -> Self {
+        self.ai_provider = provider;
+        self.flow_ai = flow_ai;
+        self
+    }
+
+    pub fn ai_provider(&self) -> Option<&Arc<dyn AiHookProvider>> {
+        self.ai_provider.as_ref()
+    }
+
+    pub fn flow_ai(&self) -> Option<&FlowAi> {
+        self.flow_ai.as_ref()
     }
 
     pub fn template_ctx(&self) -> TemplateCtx {
         let g = self.inner.lock();
         TemplateCtx {
-            inputs:   g.inputs.clone(),
-            steps:    Value::Object(g.steps.clone()),
-            vars:     Value::Object(g.vars.clone()),
+            inputs: g.inputs.clone(),
+            steps: Value::Object(g.steps.clone()),
+            vars: Value::Object(g.vars.clone()),
             bindings: Value::Object(g.bindings.clone()),
-            env:      env_snapshot(),
-            vault:    Vec::new(),
+            env: env_snapshot(),
+            vault: self.vault_names.clone(),
         }
     }
 
     pub fn record_step_output(&self, step_id: &str, output: &Value) {
         let mut g = self.inner.lock();
-        g.steps.insert(step_id.to_string(), serde_json::json!({ "result": output }));
+        g.steps
+            .insert(step_id.to_string(), serde_json::json!({ "result": output }));
     }
 
     pub fn set_var(&self, key: &str, value: Value) {
@@ -87,7 +136,6 @@ impl StepCtx {
 
     pub fn log(&self, line: impl Into<String>) {
         let line = line.into();
-        tracing::info!(target: "lumo.flow", "{}", line);
         self.inner.lock().log_buffer.push(line);
     }
 
@@ -95,15 +143,107 @@ impl StepCtx {
         self.registry.get(id)
     }
 
-    pub fn run_id(&self) -> &str { &self.run_id }
-    pub fn flow_id(&self) -> &str { &self.flow_id }
-    pub fn repo(&self) -> Option<&Repo> { self.repo.as_ref() }
+    pub fn next_step_seq(&self) -> i64 {
+        let mut g = self.inner.lock();
+        let seq = g.next_seq;
+        g.next_seq += 1;
+        seq
+    }
 
-    pub async fn run_block(
-        &mut self,
-        steps: &[Step],
-    ) -> Result<(), crate::ExecError> {
+    pub fn mark_step_state(&self, state: &str) {
+        let mut g = self.inner.lock();
+        g.stats.executed += 1;
+        match state {
+            "ok" => g.stats.ok += 1,
+            "failed" => g.stats.failed += 1,
+            "skipped" => g.stats.skipped += 1,
+            "retrying" => g.stats.retried += 1,
+            "caught" | "ai_healed" => {
+                g.stats.caught += 1;
+                g.stats.ok += 1;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn stats(&self) -> RunStats {
+        self.inner.lock().stats
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn flow_id(&self) -> &str {
+        &self.flow_id
+    }
+    pub fn repo(&self) -> Option<&Repo> {
+        self.repo.as_ref()
+    }
+
+    pub async fn run_block(&mut self, steps: &[Step]) -> Result<(), crate::ExecError> {
         crate::vm::run_block_inline(self, steps).await
+    }
+
+    pub fn resolve_vault_placeholders(&self, value: &Value) -> Result<Value, StepError> {
+        resolve_vault_value(value, &self.vault_names)
+    }
+
+    pub fn ensure_fs_read(&self, path: &Path) -> Result<(), StepError> {
+        ensure_path_allowed("fs.read", path, &self.capabilities.fs_read)
+    }
+
+    pub fn ensure_fs_write(&self, path: &Path) -> Result<(), StepError> {
+        ensure_path_allowed("fs.write", path, &self.capabilities.fs_write)
+    }
+
+    pub fn ensure_network_url(&self, url: &str) -> Result<(), StepError> {
+        let host = extract_host(url)
+            .ok_or_else(|| StepError::msg(format!("network URL has no host: {url}")))?;
+        if matches_any(&host, &self.capabilities.network) {
+            return Ok(());
+        }
+        Err(StepError::CapabilityDenied {
+            kind: CapKind::Network,
+            target: host,
+        })
+    }
+
+    pub fn ensure_llm(&self, model: &str) -> Result<(), StepError> {
+        let target = if model.trim().is_empty() { "*" } else { model };
+        if matches_any(target, &self.capabilities.llm) {
+            return Ok(());
+        }
+        Err(StepError::CapabilityDenied {
+            kind: CapKind::Llm,
+            target: target.to_string(),
+        })
+    }
+
+    pub fn ensure_mcp_server(&self, name: &str) -> Result<(), StepError> {
+        if matches_mcp_server(name, &self.capabilities.mcp) {
+            return Ok(());
+        }
+        Err(StepError::CapabilityDenied {
+            kind: CapKind::Mcp,
+            target: name.to_string(),
+        })
+    }
+
+    /// Capability gate for a specific `(server, tool)` pair.
+    ///
+    /// Allow list syntax:
+    /// - `"*"`              → all servers, all tools
+    /// - `"server"`         → all tools on the named server
+    /// - `"server:tool"`    → exact tool
+    /// - `"server:tool_*"`  → wildcard tool on the named server
+    pub fn ensure_mcp_tool(&self, server: &str, tool: &str) -> Result<(), StepError> {
+        if matches_mcp_tool(server, tool, &self.capabilities.mcp) {
+            return Ok(());
+        }
+        Err(StepError::CapabilityDenied {
+            kind: CapKind::Mcp,
+            target: format!("{server}:{tool}"),
+        })
     }
 }
 
@@ -115,4 +255,222 @@ fn env_snapshot() -> Value {
         }
     }
     Value::Object(m)
+}
+
+fn ensure_path_allowed(kind: &str, path: &Path, grants: &[String]) -> Result<(), StepError> {
+    let candidate = normalize_path(path);
+    if grants
+        .iter()
+        .map(|g| expand_env_vars(g))
+        .any(|grant| path_matches(&candidate, &grant))
+    {
+        return Ok(());
+    }
+    let cap_kind = match kind {
+        "fs.read" => CapKind::FsRead,
+        "fs.write" => CapKind::FsWrite,
+        _ => unreachable!("ensure_path_allowed called with unsupported kind `{kind}`"),
+    };
+    Err(StepError::CapabilityDenied {
+        kind: cap_kind,
+        target: candidate.display().to_string(),
+    })
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let expanded = expand_env_vars(&path.to_string_lossy());
+    let p = PathBuf::from(expanded);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    }
+}
+
+fn path_matches(candidate: &Path, grant: &str) -> bool {
+    if grant == "*" || grant == "**" {
+        return true;
+    }
+    let candidate = candidate.to_string_lossy();
+    let grant = normalize_path(Path::new(grant));
+    let grant = grant.to_string_lossy();
+    if let Some(prefix) = grant.strip_suffix("/**") {
+        candidate == prefix || candidate.starts_with(&format!("{prefix}/"))
+    } else if grant.contains('*') {
+        wildcard_match(&candidate, &grant)
+    } else {
+        candidate == grant
+    }
+}
+
+fn matches_any(candidate: &str, grants: &[String]) -> bool {
+    grants.iter().any(|grant| {
+        let grant = expand_env_vars(grant);
+        grant == "*"
+            || grant == candidate
+            || grant.strip_prefix("*.").is_some_and(|suffix| {
+                candidate == suffix || candidate.ends_with(&format!(".{suffix}"))
+            })
+            || wildcard_match(candidate, &grant)
+    })
+}
+
+/// `capabilities.mcp` entry → server match (ignores any `:tool` suffix).
+fn matches_mcp_server(server: &str, grants: &[String]) -> bool {
+    grants.iter().any(|raw| {
+        let grant = expand_env_vars(raw);
+        let head = grant.split(':').next().unwrap_or(&grant);
+        head == "*" || head == server || wildcard_match(server, head)
+    })
+}
+
+/// `capabilities.mcp` entry → `(server, tool)` match. A grant without `:` allows
+/// every tool on the server; a `server:tool` grant gates per tool with wildcards.
+fn matches_mcp_tool(server: &str, tool: &str, grants: &[String]) -> bool {
+    grants.iter().any(|raw| {
+        let grant = expand_env_vars(raw);
+        let (head, tool_pat) = match grant.split_once(':') {
+            Some((h, t)) => (h, Some(t)),
+            None => (grant.as_str(), None),
+        };
+        let server_ok = head == "*" || head == server || wildcard_match(server, head);
+        if !server_ok {
+            return false;
+        }
+        match tool_pat {
+            None => true,
+            Some(pat) => pat == "*" || pat == tool || wildcard_match(tool, pat),
+        }
+    })
+}
+
+fn wildcard_match(candidate: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return candidate == pattern;
+    }
+    let mut rest = candidate;
+    if let Some(first) = parts.first() {
+        if !first.is_empty() {
+            let Some(stripped) = rest.strip_prefix(first) else {
+                return false;
+            };
+            rest = stripped;
+        }
+    }
+    for part in parts.iter().skip(1).take(parts.len().saturating_sub(2)) {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(pos) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[pos + part.len()..];
+    }
+    if let Some(last) = parts.last() {
+        last.is_empty() || rest.ends_with(last)
+    } else {
+        true
+    }
+}
+
+fn expand_env_vars(input: &str) -> String {
+    let mut out = input.to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        out = out.replace("${HOME}", &home).replace("$HOME", &home);
+    }
+    out
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = after_scheme.split('/').next()?.split('@').next_back()?;
+    let host = host_port.split(':').next()?.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+fn resolve_vault_value(value: &Value, names: &[String]) -> Result<Value, StepError> {
+    match value {
+        Value::String(s) => Ok(Value::String(resolve_vault_string(s, names)?)),
+        Value::Array(items) => Ok(Value::Array(
+            items
+                .iter()
+                .map(|v| resolve_vault_value(v, names))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Object(map) => {
+            let mut out = Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), resolve_vault_value(v, names)?);
+            }
+            Ok(Value::Object(out))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+fn resolve_vault_string(src: &str, names: &[String]) -> Result<String, StepError> {
+    let mut out = String::new();
+    let mut rest = src;
+    while let Some(start) = rest.find("${{ vault.") {
+        out.push_str(&rest[..start]);
+        let token_rest = &rest[start + 4..];
+        let Some(end) = token_rest.find("}}") else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let expr = token_rest[..end].trim();
+        let resolved = resolve_vault_expr(expr, names)?;
+        out.push_str(&resolved);
+        rest = &token_rest[end + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn resolve_vault_expr(expr: &str, names: &[String]) -> Result<String, StepError> {
+    let path = expr
+        .strip_prefix("vault.")
+        .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
+    let mut parts = path.split('.');
+    let name = parts
+        .next()
+        .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
+    if !names.iter().any(|n| n == name) {
+        return Err(StepError::msg(format!(
+            "vault `{name}` is not declared in spec.vault"
+        )));
+    }
+    let key = parts.collect::<Vec<_>>().join("_");
+    let env_key = if key.is_empty() {
+        format!("LUMO_VAULT_{}", sanitize_env(name))
+    } else {
+        format!("LUMO_VAULT_{}_{}", sanitize_env(name), sanitize_env(&key))
+    };
+    std::env::var(&env_key).map_err(|_| {
+        StepError::msg(format!(
+            "vault value `{expr}` is missing; set environment variable {env_key}"
+        ))
+    })
+}
+
+fn sanitize_env(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

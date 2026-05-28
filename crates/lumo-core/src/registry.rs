@@ -8,7 +8,9 @@ pub struct ActionRegistry {
 }
 
 impl ActionRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn register<A: crate::action::Action>(&mut self, action: A) {
         let id = action.id().to_string();

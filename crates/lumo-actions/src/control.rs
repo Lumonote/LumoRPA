@@ -1,8 +1,9 @@
 //! Control-flow actions.
 
 use async_trait::async_trait;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use lumo_core::error::StepError;
+use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -14,6 +15,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(ForAction);
     r.register(ForEachAction);
     r.register(TryAction);
+    r.register(ParallelAction);
     r.register(FailAction);
 }
 
@@ -21,25 +23,50 @@ pub fn register(r: &mut ActionRegistry) {
 
 pub struct LogAction;
 #[derive(Deserialize)]
-struct LogIn { #[serde(default)] message: String, #[serde(default)] level: Option<String> }
+struct LogIn {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    level: Option<String>,
+}
 
 #[async_trait]
 impl Action for LogAction {
-    fn id(&self) -> &'static str { "control.log" }
-    fn summary(&self) -> &'static str { "Write a message to the run log" }
+    fn id(&self) -> &'static str {
+        "control.log"
+    }
+    fn summary(&self) -> &'static str {
+        "Write a message to the run log"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" },
+                    "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let LogIn { message, level } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("log input invalid: {e}")))?;
         let level = level.unwrap_or_else(|| "info".into());
         match level.as_str() {
             "warn" => tracing::warn!(target: "lumo.flow", "{}", message),
-            "error"=> tracing::error!(target: "lumo.flow", "{}", message),
-            "debug"=> tracing::debug!(target: "lumo.flow", "{}", message),
-            _      => tracing::info!(target: "lumo.flow", "{}", message),
+            "error" => tracing::error!(target: "lumo.flow", "{}", message),
+            "debug" => tracing::debug!(target: "lumo.flow", "{}", message),
+            _ => tracing::info!(target: "lumo.flow", "{}", message),
         }
         ctx.log(&message);
         println!("[log] {message}");
-        Ok(ActionResult::null())
+        Ok(ActionResult::from(serde_json::json!({
+            "message": message,
+            "level": level
+        })))
     }
 }
 
@@ -47,12 +74,33 @@ impl Action for LogAction {
 
 pub struct SetVarAction;
 #[derive(Deserialize)]
-struct SetVarIn { name: String, value: Value }
+struct SetVarIn {
+    name: String,
+    value: Value,
+}
 
 #[async_trait]
 impl Action for SetVarAction {
-    fn id(&self) -> &'static str { "control.set_var" }
-    fn summary(&self) -> &'static str { "Set a flow variable" }
+    fn id(&self) -> &'static str {
+        "control.set_var"
+    }
+    fn summary(&self) -> &'static str {
+        "Set a flow variable"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "value": {}
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SetVarIn { name, value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("set_var input invalid: {e}")))?;
@@ -65,12 +113,29 @@ impl Action for SetVarAction {
 
 pub struct SleepAction;
 #[derive(Deserialize)]
-struct SleepIn { ms: u64 }
+struct SleepIn {
+    ms: u64,
+}
 
 #[async_trait]
 impl Action for SleepAction {
-    fn id(&self) -> &'static str { "control.sleep" }
-    fn summary(&self) -> &'static str { "Sleep for N milliseconds" }
+    fn id(&self) -> &'static str {
+        "control.sleep"
+    }
+    fn summary(&self) -> &'static str {
+        "Sleep for N milliseconds"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["ms"],
+                "properties": { "ms": { "type": "integer" } },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SleepIn { ms } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("sleep input invalid: {e}")))?;
@@ -85,12 +150,29 @@ impl Action for SleepAction {
 
 pub struct IfAction;
 #[derive(Deserialize, Default)]
-struct IfIn { #[serde(default)] cond: Value }
+struct IfIn {
+    #[serde(default)]
+    cond: Value,
+}
 
 #[async_trait]
 impl Action for IfAction {
-    fn id(&self) -> &'static str { "control.if" }
-    fn summary(&self) -> &'static str { "Conditional branch (use do: / else:)" }
+    fn id(&self) -> &'static str {
+        "control.if"
+    }
+    fn summary(&self) -> &'static str {
+        "Conditional branch (use do: / else:)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "cond": {} },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let IfIn { cond } = serde_json::from_value(input).unwrap_or_default();
         let truthy = is_truthy(&cond);
@@ -107,18 +189,45 @@ pub struct ForAction;
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct ForIn {
-    #[serde(default)] from: i64,
+    #[serde(default)]
+    from: i64,
     to: i64,
-    #[serde(default = "default_step_i64")] step: i64,
-    #[serde(default = "default_bind")] bind: String,
+    #[serde(default = "default_step_i64")]
+    step: i64,
+    #[serde(default = "default_bind")]
+    bind: String,
 }
-fn default_step_i64() -> i64 { 1 }
-fn default_bind() -> String { "index".into() }
+fn default_step_i64() -> i64 {
+    1
+}
+fn default_bind() -> String {
+    "index".into()
+}
 
 #[async_trait]
 impl Action for ForAction {
-    fn id(&self) -> &'static str { "control.for" }
-    fn summary(&self) -> &'static str { "Numeric loop (use do:)" }
+    fn id(&self) -> &'static str {
+        "control.for"
+    }
+    fn summary(&self) -> &'static str {
+        "Numeric loop (use do:)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["to"],
+                "properties": {
+                    "from": { "type": "integer" },
+                    "to": { "type": "integer" },
+                    "step": { "type": "integer" },
+                    "bind": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let cfg: ForIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("for input invalid: {e}")))?;
@@ -135,13 +244,38 @@ impl Action for ForAction {
 pub struct ForEachAction;
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct ForEachIn { #[serde(default)] r#in: Value, #[serde(default = "default_item_bind")] bind: String }
-fn default_item_bind() -> String { "item".into() }
+struct ForEachIn {
+    #[serde(default)]
+    r#in: Value,
+    #[serde(default = "default_item_bind")]
+    bind: String,
+}
+fn default_item_bind() -> String {
+    "item".into()
+}
 
 #[async_trait]
 impl Action for ForEachAction {
-    fn id(&self) -> &'static str { "control.for_each" }
-    fn summary(&self) -> &'static str { "Iterate over a list (use do:)" }
+    fn id(&self) -> &'static str {
+        "control.for_each"
+    }
+    fn summary(&self) -> &'static str {
+        "Iterate over a list (use do:)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["in"],
+                "properties": {
+                    "in": { "type": "array" },
+                    "bind": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let _cfg: ForEachIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("for_each input invalid: {e}")))?;
@@ -155,8 +289,49 @@ pub struct TryAction;
 
 #[async_trait]
 impl Action for TryAction {
-    fn id(&self) -> &'static str { "control.try" }
-    fn summary(&self) -> &'static str { "Try/catch/finally (use do: / catch: / finally:)" }
+    fn id(&self) -> &'static str {
+        "control.try"
+    }
+    fn summary(&self) -> &'static str {
+        "Try/catch/finally (use do: / catch: / finally:)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        Ok(ActionResult::null())
+    }
+}
+
+// ─── control.parallel ──────────────────────────────────────────────────────
+
+pub struct ParallelAction;
+
+#[async_trait]
+impl Action for ParallelAction {
+    fn id(&self) -> &'static str {
+        "control.parallel"
+    }
+    fn summary(&self) -> &'static str {
+        "Parallel block marker (M1 runs sequentially)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
         Ok(ActionResult::null())
     }
@@ -166,15 +341,36 @@ impl Action for TryAction {
 
 pub struct FailAction;
 #[derive(Deserialize, Default)]
-struct FailIn { #[serde(default)] message: String }
+struct FailIn {
+    #[serde(default)]
+    message: String,
+}
 
 #[async_trait]
 impl Action for FailAction {
-    fn id(&self) -> &'static str { "control.fail" }
-    fn summary(&self) -> &'static str { "Explicitly fail the current flow with a message" }
+    fn id(&self) -> &'static str {
+        "control.fail"
+    }
+    fn summary(&self) -> &'static str {
+        "Explicitly fail the current flow with a message"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "message": { "type": "string" } },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let FailIn { message } = serde_json::from_value(input).unwrap_or_default();
-        Err(StepError::UserFail(if message.is_empty() { "user fail".into() } else { message }))
+        Err(StepError::UserFail(if message.is_empty() {
+            "user fail".into()
+        } else {
+            message
+        }))
     }
 }
 

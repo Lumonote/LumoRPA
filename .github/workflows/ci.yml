@@ -37,6 +37,15 @@ jobs:
         run: cargo test --workspace --locked --exclude lumo-actions -- --nocapture
       - name: Test (lumo-actions, non-browser modules)
         run: cargo test -p lumo-actions --locked --lib -- --nocapture
+      - name: CLI smoke
+        shell: bash
+        run: |
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" validate examples/hello-world.lumoflow.yaml
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" validate examples/control-flow.lumoflow.yaml
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" validate examples/excel-loop.lumoflow.yaml
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" validate examples/skill-driver.lumoflow.yaml
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" run --no-store examples/hello-world.lumoflow.yaml
+          cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" run --no-store examples/skill-driver.lumoflow.yaml
 
   fmt-clippy:
     runs-on: ubuntu-latest

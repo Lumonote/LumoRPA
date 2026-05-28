@@ -6,6 +6,10 @@ pub mod data;
 pub mod excel;
 pub mod file;
 pub mod http;
+pub mod mcp;
+pub mod selector_stats;
+pub mod selectors;
+pub mod vision;
 
 use lumo_core::ActionRegistry;
 
@@ -17,4 +21,5 @@ pub fn register_all(registry: &mut ActionRegistry) {
     http::register(registry);
     excel::register(registry);
     browser::register(registry);
+    mcp::register(registry);
 }

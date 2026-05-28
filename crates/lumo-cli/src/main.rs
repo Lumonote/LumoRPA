@@ -35,12 +35,18 @@ enum Cmd {
     Run(cmd::run::Args),
     /// Inspect previous runs
     Runs(cmd::runs::Args),
-    /// Show built-in actions
+    /// Show available actions
     Actions(cmd::actions::Args),
     /// Manage LLM provider profiles (cc-switch style)
     Providers(cmd::providers::Args),
     /// Manage reusable Skills (Claude-Code-style SKILL.md)
     Skills(cmd::skills::Args),
+    /// Start a webhook HTTP server that dispatches POSTs to flows
+    Serve(cmd::serve::Args),
+    /// Run as a Model Context Protocol (MCP) server over stdio
+    Mcp(cmd::mcp::Args),
+    /// Generate a flow YAML draft from a natural-language prompt
+    Copilot(cmd::copilot::Args),
 }
 
 #[tokio::main]
@@ -51,17 +57,20 @@ async fn main() -> anyhow::Result<()> {
     let home = cli
         .home
         .clone()
-        .or_else(|| dirs_home())
+        .or_else(dirs_home)
         .unwrap_or_else(|| PathBuf::from(".lumorpa"));
 
     match cli.cmd {
-        Cmd::Init(a)      => cmd::init::run(a).await,
-        Cmd::Validate(a)  => cmd::validate::run(a).await,
-        Cmd::Run(a)       => cmd::run::run(home, a).await,
-        Cmd::Runs(a)      => cmd::runs::run(home, a).await,
-        Cmd::Actions(a)   => cmd::actions::run(a).await,
+        Cmd::Init(a) => cmd::init::run(a).await,
+        Cmd::Validate(a) => cmd::validate::run(home, a).await,
+        Cmd::Run(a) => cmd::run::run(home, a).await,
+        Cmd::Runs(a) => cmd::runs::run(home, a).await,
+        Cmd::Actions(a) => cmd::actions::run(home, a).await,
         Cmd::Providers(a) => cmd::providers::run(home, a).await,
-        Cmd::Skills(a)    => cmd::skills::run(home, a).await,
+        Cmd::Skills(a) => cmd::skills::run(home, a).await,
+        Cmd::Serve(a) => cmd::serve::run(home, a).await,
+        Cmd::Mcp(a) => cmd::mcp::run(home, a).await,
+        Cmd::Copilot(a) => cmd::copilot::run(home, a).await,
     }
 }
 

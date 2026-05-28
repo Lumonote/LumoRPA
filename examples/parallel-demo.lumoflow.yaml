@@ -1,0 +1,54 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: examples/parallel-demo
+  name: parallel-demo
+  description: |
+    Demonstrates control.parallel branches. Each branch sleeps in parallel so the
+    total elapsed time is roughly max(branch_durations), not sum.
+spec:
+  steps:
+    - id: announce
+      action: control.log
+      with: { message: "starting 3 parallel branches" }
+
+    - id: scrape_in_parallel
+      action: control.parallel
+      branches:
+        # Branch A: simulate fetching dataset A.
+        - - id: a_wait
+            action: control.sleep
+            with: { ms: 200 }
+          - id: a_log
+            action: control.log
+            with: { message: "branch A finished" }
+          - id: a_store
+            action: control.set_var
+            with: { name: a_done, value: true }
+
+        # Branch B: simulate fetching dataset B.
+        - - id: b_wait
+            action: control.sleep
+            with: { ms: 200 }
+          - id: b_log
+            action: control.log
+            with: { message: "branch B finished" }
+          - id: b_store
+            action: control.set_var
+            with: { name: b_done, value: true }
+
+        # Branch C: simulate a third independent task.
+        - - id: c_wait
+            action: control.sleep
+            with: { ms: 200 }
+          - id: c_log
+            action: control.log
+            with: { message: "branch C finished" }
+          - id: c_store
+            action: control.set_var
+            with: { name: c_done, value: true }
+
+    - id: joined
+      action: control.log
+      with:
+        message: "all branches joined · a={{ vars.a_done }} b={{ vars.b_done }} c={{ vars.c_done }}"

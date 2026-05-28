@@ -1,15 +1,8 @@
-# LumoRPA cargo config
-# Prefer sparse index (Rust 1.68+) for faster resolution; use rsproxy mirror
-# as a fallback registry for slow links.
-
-[registries.rsproxy]
-index = "sparse+https://rsproxy.cn/index/"
-
-[source.crates-io]
-replace-with = "rsproxy-sparse"
-
-[source.rsproxy-sparse]
-registry = "sparse+https://rsproxy.cn/index/"
+# LumoRPA cargo config.
+#
+# Keep the repository-level config neutral so contributors and CI use the
+# standard crates.io sparse index. If a local mirror is needed, configure it in
+# ~/.cargo/config.toml instead of forcing every checkout through one endpoint.
 
 [net]
 git-fetch-with-cli = true

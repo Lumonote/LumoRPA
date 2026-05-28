@@ -1,6 +1,8 @@
 use clap::Args as ClapArgs;
 use comfy_table::{presets::UTF8_FULL, Table};
-use lumo_core::ActionRegistry;
+use std::path::PathBuf;
+
+use super::build_action_registry;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -9,9 +11,8 @@ pub struct Args {
     pub show: Option<String>,
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
-    let mut registry = ActionRegistry::new();
-    lumo_actions::register_all(&mut registry);
+pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
+    let registry = build_action_registry(&home, None);
 
     if let Some(id) = args.show {
         let action = registry

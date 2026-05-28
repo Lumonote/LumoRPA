@@ -84,8 +84,8 @@
 | S-08 | 锚点定位 | ✅ |
 | S-09 | OCR 文本匹配定位 | 🟦 |
 | S-10 | 图像模板匹配 | ✅ |
-| S-11 | **Vision-LLM 自愈选择器**（OmniParser + UI-TARS） | 🟦 | ★ |
-| S-12 | Set-of-Mark Prompt 兜底 | 🟦 | ★ |
+| S-11 | **Vision-LLM 自愈选择器**（OmniParser + UI-TARS） | ✅ | ★ |
+| S-12 | Set-of-Mark Prompt 兜底 | ✅ | ★ |
 | S-13 | 选择器命中可视化（Inspector 高亮） | ✅ |
 | S-14 | 选择器健康分（运行时打分，长期偏移预警） | 🟧 | ★ |
 

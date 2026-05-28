@@ -3,11 +3,10 @@ kind: Flow
 metadata:
   id: llm-summarize-orders
   version: 0.1.0
-  name: LLM-driven Excel row processing
+  name: LLM 驱动的 Excel 行处理
   description: |
-    Reads each row from an Excel workbook, asks an LLM to summarize it
-    in one Chinese sentence, and writes the result back to a summary
-    workbook. Demonstrates control.for_each + ai.chat + excel.write_row.
+    读取 Excel 每一行，调用 LLM 用一句中文总结，并把结果写回汇总工作簿。
+    演示 control.for_each + ai.chat + excel.write_row 的组合。
   tags: [example, llm, excel, for_each]
 
 spec:
@@ -24,6 +23,7 @@ spec:
 
   capabilities:
     llm: ["*"]
+    fs.read: ["./examples/data/**"]
     fs.write: ["${HOME}/**", "/tmp/**"]
 
   steps:

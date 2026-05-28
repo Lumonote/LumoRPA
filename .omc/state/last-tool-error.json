@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"export LUMO_HOME=/tmp/lumo-home\\n./target/debug/lumo run /tmp/lumo-skills-test/skill-driver.yaml -i who=palmer 2>&1\",\"description\":\"Run driver flow that calls skill.invoke\"}",
-  "error": "Exit code 1\n  ! No provider profiles configured. Run `lumo providers init` to seed defaults, then `lumo providers list`.\n[log] hello, palmer!\nError: step `invoke_roundtrip` failed: skill `json-roundtrip`: step `load` failed: json parse error: EOF while parsing a value at line 1 column 0\n\nCaused by:\n    skill `json-roundtrip`: step `load` failed: json parse error: EOF while parsing a value at line 1 column 0",
-  "timestamp": "2026-05-25T10:20:52.565Z",
-  "retry_count": 1
-}

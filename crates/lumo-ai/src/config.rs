@@ -101,13 +101,15 @@ pub struct ProviderProfile {
 
 impl ProviderProfile {
     pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(k) = &self.api_key { return Some(k.clone()); }
+        if let Some(k) = &self.api_key {
+            return Some(k.clone());
+        }
         if let Some(env) = &self.api_key_env {
             return std::env::var(env).ok();
         }
         // Fallback to well-known env var by kind.
         match self.kind.as_str() {
-            "openai"    => std::env::var("OPENAI_API_KEY").ok(),
+            "openai" => std::env::var("OPENAI_API_KEY").ok(),
             "anthropic" => std::env::var("ANTHROPIC_AUTH_TOKEN")
                 .ok()
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
@@ -117,7 +119,9 @@ impl ProviderProfile {
 
     pub fn redacted(&self) -> Self {
         let mut c = self.clone();
-        if c.api_key.is_some() { c.api_key = Some("***".into()); }
+        if c.api_key.is_some() {
+            c.api_key = Some("***".into());
+        }
         c
     }
 }
@@ -138,7 +142,9 @@ impl ProvidersConfig {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let p = path.as_ref();
-        if !p.exists() { return Ok(Self::default()); }
+        if !p.exists() {
+            return Ok(Self::default());
+        }
         let s = std::fs::read_to_string(p)?;
         let cfg: ProvidersConfig = toml::from_str(&s)?;
         Ok(cfg)
@@ -182,12 +188,17 @@ impl ProvidersConfig {
                     api_key: None,
                     api_key_env: Some("ANTHROPIC_AUTH_TOKEN".into()),
                     default_model: Some("claude-opus-4-7".into()),
-                    models: vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into(), "claude-haiku-4-5-20251001".into()],
+                    models: vec![
+                        "claude-opus-4-7".into(),
+                        "claude-sonnet-4-6".into(),
+                        "claude-haiku-4-5-20251001".into(),
+                    ],
                     headers: Default::default(),
                     reasoning_effort: None,
                     notes: Some(
                         "Anthropic Messages API. Set ANTHROPIC_AUTH_TOKEN \
-                         (Bearer) or ANTHROPIC_API_KEY (x-api-key); both work.".into()
+                         (Bearer) or ANTHROPIC_API_KEY (x-api-key); both work."
+                            .into(),
                     ),
                 },
                 ProviderProfile {
@@ -245,7 +256,9 @@ impl ProvidersConfig {
     }
 
     pub fn use_(&mut self, name: &str) -> Result<(), ConfigError> {
-        if self.get(name).is_none() { return Err(ConfigError::NotFound(name.into())); }
+        if self.get(name).is_none() {
+            return Err(ConfigError::NotFound(name.into()));
+        }
         self.active = Some(name.to_string());
         Ok(())
     }

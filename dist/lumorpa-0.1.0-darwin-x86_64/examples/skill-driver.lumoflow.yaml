@@ -1,0 +1,27 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: skill-driver
+  version: 0.1.0
+spec:
+  inputs:
+    - { name: who, type: string, default: lumorpa }
+  steps:
+    - id: invoke_greet
+      action: skill.invoke
+      with:
+        name: greet
+        inputs:
+          who: "{{ inputs.who }}"
+
+    - id: invoke_roundtrip
+      action: skill.invoke
+      with:
+        name: json-roundtrip
+        inputs:
+          payload: { kind: order, total: 42 }
+
+    - id: log_outputs
+      action: control.log
+      with:
+        message: "greet => {{ steps.invoke_greet.result.outputs }} | roundtrip => {{ steps.invoke_roundtrip.result.outputs }}"

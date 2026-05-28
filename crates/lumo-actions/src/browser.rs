@@ -6,14 +6,19 @@
 use async_trait::async_trait;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use lumo_core::error::StepError;
+use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+
+use crate::selectors::{clear_marker, resolve_element, MultiSelector};
+use crate::vision::resolve_via_vision;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(LaunchAction);
@@ -24,10 +29,9 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(ExtractAction);
 }
 
-// ─── Browser session singleton (per-process) ────────────────────────────────
-// We keep a *process-global* browser session for M1 — simple to reason about,
-// and matches the "one Studio, one Chrome" mental model. In M3 we'll move
-// this into StepCtx so each worker has its own session.
+// ─── Browser sessions ────────────────────────────────────────────────────────
+// Sessions are keyed by flow run id, so repeated or concurrent runs don't share
+// the same active page.
 
 struct Session {
     browser: Browser,
@@ -35,18 +39,23 @@ struct Session {
     page: Mutex<Option<Page>>,
 }
 
-static SESSION: once_cell::sync::OnceCell<Arc<Mutex<Option<Arc<Session>>>>> =
-    once_cell::sync::OnceCell::new();
+type SessionMap = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
-fn slot() -> Arc<Mutex<Option<Arc<Session>>>> {
-    SESSION.get_or_init(|| Arc::new(Mutex::new(None))).clone()
+static SESSIONS: once_cell::sync::OnceCell<SessionMap> = once_cell::sync::OnceCell::new();
+
+fn sessions() -> SessionMap {
+    SESSIONS
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
 }
 
-async fn ensure_session(headless: bool) -> Result<Arc<Session>, StepError> {
+async fn ensure_session(run_id: &str, headless: bool) -> Result<Arc<Session>, StepError> {
     {
-        let lock = slot();
+        let lock = sessions();
         let g = lock.lock();
-        if let Some(s) = g.clone() { return Ok(s); }
+        if let Some(s) = g.get(run_id).cloned() {
+            return Ok(s);
+        }
     }
     let cfg = if headless {
         BrowserConfig::builder().build()
@@ -55,21 +64,32 @@ async fn ensure_session(headless: bool) -> Result<Arc<Session>, StepError> {
     }
     .map_err(|e| StepError::msg(format!("chrome cfg: {e}")))?;
 
-    let (browser, mut handler) = Browser::launch(cfg).await
+    let (browser, mut handler) = Browser::launch(cfg)
+        .await
         .map_err(|e| StepError::msg(format!("chrome launch: {e}")))?;
-    let handle = tokio::spawn(async move {
-        while let Some(_evt) = handler.next().await {}
+    let handle = tokio::spawn(async move { while let Some(_evt) = handler.next().await {} });
+    let session = Arc::new(Session {
+        browser,
+        _handler: handle,
+        page: Mutex::new(None),
     });
-    let session = Arc::new(Session { browser, _handler: handle, page: Mutex::new(None) });
     {
-        let lock = slot();
-        *lock.lock() = Some(session.clone());
+        let lock = sessions();
+        lock.lock().insert(run_id.to_string(), session.clone());
     }
     Ok(session)
 }
 
+fn session_for_run(run_id: &str) -> Result<Arc<Session>, StepError> {
+    let lock = sessions();
+    let session = lock.lock().get(run_id).cloned();
+    session.ok_or_else(|| StepError::msg("browser not launched"))
+}
+
 fn current_page(s: &Session) -> Result<Page, StepError> {
-    s.page.lock().clone()
+    s.page
+        .lock()
+        .clone()
         .ok_or_else(|| StepError::msg("no browser page open; call `browser.open` first"))
 }
 
@@ -77,17 +97,38 @@ fn current_page(s: &Session) -> Result<Page, StepError> {
 
 pub struct LaunchAction;
 #[derive(Deserialize, Default)]
-struct LaunchIn { #[serde(default = "default_true")] headless: bool }
-fn default_true() -> bool { true }
+struct LaunchIn {
+    #[serde(default = "default_true")]
+    headless: bool,
+}
+fn default_true() -> bool {
+    true
+}
 
 #[async_trait]
 impl Action for LaunchAction {
-    fn id(&self) -> &'static str { "browser.launch" }
-    fn summary(&self) -> &'static str { "Launch (or attach to) a Chromium browser session" }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+    fn id(&self) -> &'static str {
+        "browser.launch"
+    }
+    fn summary(&self) -> &'static str {
+        "Launch (or attach to) a Chromium browser session"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "headless": { "type": "boolean" } },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let LaunchIn { headless } = serde_json::from_value(input).unwrap_or_default();
-        let _ = ensure_session(headless).await?;
-        Ok(ActionResult::from(serde_json::json!({ "ok": true, "headless": headless })))
+        let _ = ensure_session(ctx.run_id(), headless).await?;
+        Ok(ActionResult::from(
+            serde_json::json!({ "ok": true, "headless": headless }),
+        ))
     }
 }
 
@@ -97,12 +138,26 @@ pub struct CloseAction;
 
 #[async_trait]
 impl Action for CloseAction {
-    fn id(&self) -> &'static str { "browser.close" }
-    fn summary(&self) -> &'static str { "Close the current browser session" }
-    async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
-        let lock = slot();
+    fn id(&self) -> &'static str {
+        "browser.close"
+    }
+    fn summary(&self) -> &'static str {
+        "Close the current browser session"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        let lock = sessions();
         let mut g = lock.lock();
-        if let Some(s) = g.take() {
+        if let Some(s) = g.remove(ctx.run_id()) {
             *s.page.lock() = None;
             drop(s);
         }
@@ -120,24 +175,141 @@ struct OpenIn {
     headless: bool,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default)]
+    wait_for: Option<String>,
 }
-fn default_timeout_ms() -> u64 { 30_000 }
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Inline schema fragment for the `selectors:` object used by browser actions.
+/// Kept here so each action's static schema can reference it without
+/// duplicating the property list.
+fn multi_selector_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": { "type": "string" },
+            "data_testid": { "type": "string" },
+            "css": { "type": "string" },
+            "aria_label": { "type": "string" },
+            "text_includes": { "type": "string" },
+            "xpath": { "type": "string" }
+        }
+    })
+}
+
+/// Reconcile the back-compat `selector: String` field with the new
+/// `selectors: { ... }` object. If both are absent, error out — every action
+/// requires at least one strategy.
+fn build_selector(
+    css_string: Option<String>,
+    spec: Option<MultiSelector>,
+) -> Result<MultiSelector, StepError> {
+    let mut out = spec.unwrap_or_default();
+    if let Some(css) = css_string {
+        if out.css.is_none() && !css.is_empty() {
+            out.css = Some(css);
+        }
+    }
+    if out.is_empty() {
+        return Err(StepError::msg(
+            "browser action requires `selector:` (CSS) or `selectors: { ... }` with at least one strategy",
+        ));
+    }
+    Ok(out)
+}
+
+/// Resolve with DOM strategies first; on `SelectorNotFound`, fall through to
+/// the Vision-LLM router (S-11/S-12) when the step provides:
+///
+/// * an `AiHookProvider` on the context (router configured + flow opted in),
+/// * a natural-language `prompt:` describing the target.
+///
+/// Without either, vision is skipped and the original DOM failure surfaces
+/// — so back-compat with M1 stays intact. The strategy name returned
+/// becomes `vision_bbox` / `vision_som` so step output records *which*
+/// fingerprint kept the flow alive.
+async fn resolve_with_vision_fallback(
+    ctx: &lumo_core::StepCtx,
+    page: &chromiumoxide::Page,
+    spec: &MultiSelector,
+    prompt: Option<&str>,
+    model: Option<&str>,
+    timeout_ms: u64,
+) -> Result<(chromiumoxide::Element, &'static str), StepError> {
+    match resolve_element(page, spec, timeout_ms).await {
+        Ok(pair) => Ok(pair),
+        Err(dom_err) => {
+            let (Some(provider), Some(prompt)) = (ctx.ai_provider(), prompt) else {
+                return Err(dom_err);
+            };
+            let prompt = prompt.trim();
+            if prompt.is_empty() {
+                return Err(dom_err);
+            }
+            tracing::warn!(
+                target: "lumo::vision",
+                "DOM resolve failed for `{}`; trying vision fallback: {dom_err}",
+                spec.first_hint()
+            );
+            resolve_via_vision(page, provider, prompt, model, timeout_ms).await
+        }
+    }
+}
 
 #[async_trait]
 impl Action for OpenAction {
-    fn id(&self) -> &'static str { "browser.open" }
-    fn summary(&self) -> &'static str { "Navigate to a URL (launching browser if needed)" }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let OpenIn { url, headless, timeout_ms } = serde_json::from_value(input)
+    fn id(&self) -> &'static str {
+        "browser.open"
+    }
+    fn summary(&self) -> &'static str {
+        "Navigate to a URL (launching browser if needed)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string" },
+                    "headless": { "type": "boolean" },
+                    "timeout_ms": { "type": "integer" },
+                    "wait_for": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let OpenIn {
+            url,
+            headless,
+            timeout_ms,
+            wait_for,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.open input invalid: {e}")))?;
-        let s = ensure_session(headless).await?;
+        ctx.ensure_network_url(&url)?;
+        let s = ensure_session(ctx.run_id(), headless).await?;
         let page = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
             s.browser.new_page(url.as_str()),
-        ).await
-            .map_err(|_| StepError::msg(format!("timeout opening {url}")))?
-            .map_err(|e| StepError::msg(format!("new_page: {e}")))?;
+        )
+        .await
+        .map_err(|_| StepError::msg(format!("timeout opening {url}")))?
+        .map_err(|e| StepError::msg(format!("new_page: {e}")))?;
         let _ = page.wait_for_navigation().await;
+        if let Some(selector) = wait_for {
+            tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                page.find_element(&selector),
+            )
+            .await
+            .map_err(|_| StepError::SelectorNotFound(selector.clone()))?
+            .map_err(|_| StepError::SelectorNotFound(selector.clone()))?;
+        }
         *s.page.lock() = Some(page);
         Ok(ActionResult::from(serde_json::json!({ "url": url })))
     }
@@ -147,27 +319,82 @@ impl Action for OpenAction {
 
 pub struct ClickAction;
 #[derive(Deserialize)]
-struct ClickIn { selector: String, #[serde(default = "default_timeout_ms")] timeout_ms: u64 }
+struct ClickIn {
+    /// Single CSS selector (back-compat). Either this or `selectors` must be set.
+    #[serde(default)]
+    selector: Option<String>,
+    /// Multi-strategy selector spec. The runner tries fingerprints in cost
+    /// order and surfaces which one matched in the step output.
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    /// Natural-language target description. When DOM strategies fail and an
+    /// AI hook provider is attached, the Vision-LLM (S-11/S-12) uses this
+    /// prompt to locate the element by sight.
+    #[serde(default)]
+    prompt: Option<String>,
+    /// Optional model override for the vision fallback. Empty ⇒ inherit
+    /// from `metadata.ai.model`.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
 
 #[async_trait]
 impl Action for ClickAction {
-    fn id(&self) -> &'static str { "browser.click" }
-    fn summary(&self) -> &'static str { "Click the first element matching a CSS selector" }
+    fn id(&self) -> &'static str {
+        "browser.click"
+    }
+    fn summary(&self) -> &'static str {
+        "Click the first element matching a CSS selector or multi-strategy selectors"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string" },
+                    "selectors": multi_selector_schema(),
+                    "prompt": { "type": "string" },
+                    "model": { "type": "string" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ClickIn { selector, timeout_ms } = serde_json::from_value(input)
+        let ClickIn {
+            selector,
+            selectors,
+            prompt,
+            model,
+            timeout_ms,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.click input invalid: {e}")))?;
-        let s = {
-            let lock = slot();
-            let g = lock.lock();
-            g.clone().ok_or_else(|| StepError::msg("browser not launched"))?
-        };
+        let spec = build_selector(selector, selectors)?;
+        let s = session_for_run(_ctx.run_id())?;
         let page = current_page(&s)?;
-        let el = tokio::time::timeout(Duration::from_millis(timeout_ms), page.find_element(&selector)).await
-            .map_err(|_| StepError::msg(format!("timeout finding `{selector}`")))?
-            .map_err(|e| StepError::msg(format!("selector `{selector}`: {e}")))?;
-        el.click().await
-            .map_err(|e| StepError::msg(format!("click `{selector}`: {e}")))?;
-        Ok(ActionResult::from(serde_json::json!({ "selector": selector })))
+        let hint = spec.first_hint();
+        let (element, strategy) = resolve_with_vision_fallback(
+            _ctx,
+            &page,
+            &spec,
+            prompt.as_deref(),
+            model.as_deref(),
+            timeout_ms,
+        )
+        .await?;
+        element
+            .click()
+            .await
+            .map_err(|e| StepError::msg(format!("click `{hint}`: {e}")))?;
+        clear_marker(&page).await;
+        Ok(ActionResult::from(serde_json::json!({
+            "resolved_by": strategy,
+            "matched": hint,
+        })))
     }
 }
 
@@ -176,41 +403,90 @@ impl Action for ClickAction {
 pub struct TypeAction;
 #[derive(Deserialize)]
 struct TypeIn {
-    selector: String,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
     text: String,
     #[serde(default)]
     clear: bool,
+    /// Natural-language target description for vision fallback (S-11/S-12).
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
 
 #[async_trait]
 impl Action for TypeAction {
-    fn id(&self) -> &'static str { "browser.type" }
-    fn summary(&self) -> &'static str { "Type text into the first element matching a selector" }
+    fn id(&self) -> &'static str {
+        "browser.type"
+    }
+    fn summary(&self) -> &'static str {
+        "Type text into the first element matching a selector spec"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "selector": { "type": "string" },
+                    "selectors": multi_selector_schema(),
+                    "text": { "type": "string" },
+                    "clear": { "type": "boolean" },
+                    "prompt": { "type": "string" },
+                    "model": { "type": "string" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let TypeIn { selector, text, clear, timeout_ms } = serde_json::from_value(input)
+        let TypeIn {
+            selector,
+            selectors,
+            text,
+            clear,
+            prompt,
+            model,
+            timeout_ms,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.type input invalid: {e}")))?;
-        let s = {
-            let lock = slot();
-            let g = lock.lock();
-            g.clone().ok_or_else(|| StepError::msg("browser not launched"))?
-        };
+        let spec = build_selector(selector, selectors)?;
+        let s = session_for_run(_ctx.run_id())?;
         let page = current_page(&s)?;
-        let el = tokio::time::timeout(Duration::from_millis(timeout_ms), page.find_element(&selector)).await
-            .map_err(|_| StepError::msg(format!("timeout finding `{selector}`")))?
-            .map_err(|e| StepError::msg(format!("selector `{selector}`: {e}")))?;
+        let hint = spec.first_hint();
+        let (element, strategy) = resolve_with_vision_fallback(
+            _ctx,
+            &page,
+            &spec,
+            prompt.as_deref(),
+            model.as_deref(),
+            timeout_ms,
+        )
+        .await?;
         if clear {
-            let _ = el.focus().await;
-            let _ = page.evaluate(format!(
-                "document.querySelector({:?}).value = ''",
-                selector
-            )).await;
+            let _ = element.focus().await;
+            let _ = page
+                .evaluate("document.querySelector('[data-lumo-resolved=\"1\"]').value = ''")
+                .await;
         }
-        el.click().await.ok();
-        el.type_str(&text).await
+        element.click().await.ok();
+        element
+            .type_str(&text)
+            .await
             .map_err(|e| StepError::msg(format!("type: {e}")))?;
-        Ok(ActionResult::from(serde_json::json!({ "selector": selector, "typed": text.len() })))
+        clear_marker(&page).await;
+        Ok(ActionResult::from(serde_json::json!({
+            "resolved_by": strategy,
+            "matched": hint,
+            "typed": text.len(),
+        })))
     }
 }
 
@@ -225,6 +501,8 @@ struct ExtractIn {
     #[serde(default)]
     map: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
+    attr: Option<String>,
+    #[serde(default)]
     all: bool,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
@@ -232,32 +510,65 @@ struct ExtractIn {
 
 #[async_trait]
 impl Action for ExtractAction {
-    fn id(&self) -> &'static str { "browser.extract" }
-    fn summary(&self) -> &'static str { "Extract innerText (or a field map) from matching elements" }
+    fn id(&self) -> &'static str {
+        "browser.extract"
+    }
+    fn summary(&self) -> &'static str {
+        "Extract innerText (or a field map) from matching elements"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["selector"],
+                "properties": {
+                    "selector": { "type": "string" },
+                    "map": { "type": "object" },
+                    "attr": { "type": "string" },
+                    "all": { "type": "boolean" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ExtractIn { selector, map, all, timeout_ms } = serde_json::from_value(input)
+        let ExtractIn {
+            selector,
+            map,
+            attr,
+            all,
+            timeout_ms,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.extract input invalid: {e}")))?;
-        let s = {
-            let lock = slot();
-            let g = lock.lock();
-            g.clone().ok_or_else(|| StepError::msg("browser not launched"))?
-        };
+        let s = session_for_run(_ctx.run_id())?;
         let page = current_page(&s)?;
 
         // Build a JS function returning the extracted JSON shape, then evaluate.
         let map_json = serde_json::to_string(&map.unwrap_or_default()).unwrap_or("{}".into());
-        let js = format!(r#"
+        let attr_json = serde_json::to_string(&attr).unwrap_or("null".into());
+        let js = format!(
+            r#"
 (() => {{
   const sel = {sel};
   const all = {all};
   const map = {map};
+  const attr = {attr};
+  const read = (el, specAttr) => {{
+    if (!el) return null;
+    if (specAttr) return el.getAttribute(specAttr);
+    return el.innerText;
+  }};
   const pick = (el) => {{
     if (!el) return null;
-    if (Object.keys(map).length === 0) return el.innerText;
+    if (Object.keys(map).length === 0) return read(el, attr);
     const out = {{}};
     for (const [k, v] of Object.entries(map)) {{
-      const sub = el.querySelector(v);
-      out[k] = sub ? sub.innerText : null;
+      const subSelector = typeof v === 'string' ? v : v.selector;
+      const subAttr = typeof v === 'object' ? v.attr : null;
+      const sub = el.querySelector(subSelector);
+      out[k] = read(sub, subAttr);
     }}
     return out;
   }};
@@ -266,14 +577,34 @@ impl Action for ExtractAction {
   }}
   return pick(document.querySelector(sel));
 }})()
-"#, sel = serde_json::to_string(&selector).unwrap(), all = all, map = map_json);
+"#,
+            sel = serde_json::to_string(&selector).unwrap(),
+            all = all,
+            map = map_json,
+            attr = attr_json
+        );
 
-        let result: Value = tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js))
-            .await
-            .map_err(|_| StepError::msg(format!("timeout extracting `{selector}`")))?
-            .map_err(|e| StepError::msg(format!("extract eval: {e}")))?
-            .into_value()
-            .unwrap_or(Value::Null);
+        let result: Value =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js))
+                .await
+                .map_err(|_| StepError::ExtractFailed(format!("timeout extracting `{selector}`")))?
+                .map_err(|e| StepError::ExtractFailed(format!("extract eval `{selector}`: {e}")))?
+                .into_value()
+                .unwrap_or(Value::Null);
+        if result.is_null() {
+            return Err(StepError::ExtractFailed(format!(
+                "selector `{selector}` matched no element"
+            )));
+        }
+        if all {
+            if let Value::Array(a) = &result {
+                if a.is_empty() {
+                    return Err(StepError::ExtractFailed(format!(
+                        "selector `{selector}` matched no elements"
+                    )));
+                }
+            }
+        }
         Ok(ActionResult::from(result))
     }
 }

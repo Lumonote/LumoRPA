@@ -1,11 +1,12 @@
 use clap::Args as ClapArgs;
 use colored::Colorize;
-use lumo_ai::{ChatAction, ProvidersConfig, AiRouter};
-use lumo_core::{ActionRegistry, FlowVm, RunOptions};
-use lumo_skills::{register_skill_actions, SkillRegistry};
+use lumo_ai::ProvidersConfig;
+use lumo_core::{FlowVm, RunOptions};
+use lumo_dsl::Step;
 use lumo_storage::Repo;
 use std::path::PathBuf;
-use std::sync::Arc;
+
+use super::{build_action_registry, providers_path};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -14,6 +15,12 @@ pub struct Args {
     /// Inline input KEY=VALUE (repeatable)
     #[arg(short = 'i', long = "input", value_parser = parse_kv)]
     pub inputs: Vec<(String, String)>,
+    /// Merge inputs from a JSON object string
+    #[arg(long)]
+    pub input_json: Option<String>,
+    /// Merge inputs from a JSON file
+    #[arg(long)]
+    pub input_file: Option<PathBuf>,
     /// Don't persist run history
     #[arg(long)]
     pub no_store: bool,
@@ -31,26 +38,16 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
     let flow = lumo_dsl::parse_file(&args.flow)?;
     lumo_dsl::validate(&flow)?;
 
-    // ── Build AI router from ~/.lumorpa/providers.toml.
-    let providers_cfg = ProvidersConfig::load(ProvidersConfig::default_path())
-        .unwrap_or_default();
-    if providers_cfg.profiles.is_empty() {
+    let uses_ai = flow_uses_action(&flow.spec.steps, "ai.chat");
+    let providers_cfg = ProvidersConfig::load(providers_path(&home)).unwrap_or_default();
+    if uses_ai && providers_cfg.profiles.is_empty() {
         eprintln!(
             "  ! No provider profiles configured. \
              Run `lumo providers init` to seed defaults, \
              then `lumo providers list`."
         );
     }
-    let router = Arc::new(AiRouter::from_config(&providers_cfg));
-
-    let mut registry = ActionRegistry::new();
-    lumo_actions::register_all(&mut registry);
-    registry.register(ChatAction::new(router));
-
-    // Auto-load installed skills so flows can call `skill.invoke`.
-    let skill_reg = Arc::new(SkillRegistry::new());
-    let _ = skill_reg.load_dir(SkillRegistry::default_root());
-    register_skill_actions(&mut registry, skill_reg);
+    let registry = build_action_registry(&home, Some(&args.flow));
 
     let repo: Option<Repo> = if args.no_store {
         None
@@ -58,11 +55,7 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         Some(Repo::open(home.join("lumo.db"))?)
     };
 
-    let inputs: serde_json::Map<String, serde_json::Value> = args
-        .inputs
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::Value::String(v)))
-        .collect();
+    let inputs = merge_cli_inputs(args.input_json, args.input_file, args.inputs)?;
 
     let opts = RunOptions {
         inputs: serde_json::Value::Object(inputs),
@@ -74,12 +67,21 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
 
     println!();
     println!(
-        "{} run={} state={} steps={}/{} duration={}ms",
+        "{} run={} state={} steps_ok={} executed={} declared={} skipped={} retried={} caught={} failed={} duration={}ms",
         "✓".green().bold(),
         report.run_id,
-        if report.success { "ok".green() } else { "failed".red() },
+        if report.success {
+            "ok".green()
+        } else {
+            "failed".red()
+        },
         report.steps_ok,
+        report.steps_executed,
         report.steps_total,
+        report.steps_skipped,
+        report.steps_retried,
+        report.steps_caught,
+        report.steps_failed,
         report.duration_ms,
     );
     if let Some(out) = report.outputs {
@@ -88,4 +90,53 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn merge_cli_inputs(
+    input_json: Option<String>,
+    input_file: Option<PathBuf>,
+    pairs: Vec<(String, String)>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    if let Some(path) = input_file {
+        let raw = std::fs::read_to_string(&path)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("input file {} is not JSON: {e}", path.display()))?;
+        merge_input_object(&mut out, value, "--input-file")?;
+    }
+    if let Some(raw) = input_json {
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("--input-json is not JSON: {e}"))?;
+        merge_input_object(&mut out, value, "--input-json")?;
+    }
+    for (k, v) in pairs {
+        out.insert(k, parse_input_scalar(&v));
+    }
+    Ok(out)
+}
+
+fn merge_input_object(
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    value: serde_json::Value,
+    source: &str,
+) -> anyhow::Result<()> {
+    let serde_json::Value::Object(map) = value else {
+        anyhow::bail!("{source} must be a JSON object");
+    };
+    out.extend(map);
+    Ok(())
+}
+
+fn parse_input_scalar(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
+fn flow_uses_action(steps: &[Step], action_id: &str) -> bool {
+    steps.iter().any(|step| {
+        step.action == action_id
+            || step
+                .children()
+                .into_iter()
+                .any(|children| flow_uses_action(children, action_id))
+    })
 }

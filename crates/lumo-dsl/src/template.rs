@@ -22,11 +22,11 @@ pub struct TemplateCtx {
     #[serde(default)]
     pub inputs: Json,
     #[serde(default)]
-    pub steps:  Json,
+    pub steps: Json,
     #[serde(default)]
-    pub vars:   Json,
+    pub vars: Json,
     #[serde(default)]
-    pub env:    Json,
+    pub env: Json,
     /// Vault placeholders (`{{ vault.smtp.user }}`) render to the literal
     /// string `${{ vault.smtp.user }}` so that secrets never appear in
     /// step input snapshots, logs, or LLM prompts. The runtime substitutes
@@ -49,11 +49,14 @@ fn build_env() -> Environment<'static> {
     env.set_keep_trailing_newline(false);
     // Re-register `tojson` defensively so flows don't break across minijinja
     // versions / feature-flag matrices. `add_filter` overrides any builtin.
-    env.add_filter("tojson", |v: minijinja::Value| -> Result<String, minijinja::Error> {
-        serde_json::to_string(&v).map_err(|e| {
-            minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
-        })
-    });
+    env.add_filter(
+        "tojson",
+        |v: minijinja::Value| -> Result<String, minijinja::Error> {
+            serde_json::to_string(&v).map_err(|e| {
+                minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
+            })
+        },
+    );
     env
 }
 
@@ -87,7 +90,9 @@ fn render_inner(env: &Environment, input: &Json, ctx: &TemplateCtx) -> Result<Js
             Ok(Json::String(rendered))
         }
         Json::Array(arr) => Ok(Json::Array(
-            arr.iter().map(|v| render_inner(env, v, ctx)).collect::<Result<_, _>>()?,
+            arr.iter()
+                .map(|v| render_inner(env, v, ctx))
+                .collect::<Result<_, _>>()?,
         )),
         Json::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
@@ -103,21 +108,34 @@ fn render_inner(env: &Environment, input: &Json, ctx: &TemplateCtx) -> Result<Js
 /// True iff `s` is exactly one `{{ ... }}` block with no surrounding text.
 fn is_single_expression(s: &str) -> bool {
     let t = s.trim();
-    if !(t.starts_with("{{") && t.ends_with("}}")) { return false; }
+    if !(t.starts_with("{{") && t.ends_with("}}")) {
+        return false;
+    }
     let inner = &t[2..t.len() - 2];
-    if inner.contains("{{") || inner.contains("}}") { return false; }
-    if t.contains("{%") { return false; }
+    if inner.contains("{{") || inner.contains("}}") {
+        return false;
+    }
+    if t.contains("{%") {
+        return false;
+    }
     true
 }
 
 /// If `s` is exactly `{{ <ident.path> }}` (pure dotted lookup, no filters,
 /// no operators), return the path components.
 fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
-    if !is_single_expression(s) { return None; }
+    if !is_single_expression(s) {
+        return None;
+    }
     let t = s.trim();
     let inner = t[2..t.len() - 2].trim();
-    if inner.is_empty() { return None; }
-    if inner.chars().any(|c| !(c.is_alphanumeric() || c == '.' || c == '_')) {
+    if inner.is_empty() {
+        return None;
+    }
+    if inner
+        .chars()
+        .any(|c| !(c.is_alphanumeric() || c == '.' || c == '_'))
+    {
         return None;
     }
     Some(inner.split('.').map(|p| p.to_string()).collect())
@@ -126,16 +144,18 @@ fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
 /// Walk `path` against the template context's namespaces. The first segment
 /// must be one of: `inputs`, `steps`, `vars`, `env`, `row`, `item`, `index`.
 fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
-    if path.is_empty() { return None; }
+    if path.is_empty() {
+        return None;
+    }
     let head = &path[0];
     let root: Json = match head.as_str() {
         "inputs" => ctx.inputs.clone(),
-        "steps"  => ctx.steps.clone(),
-        "vars"   => ctx.vars.clone(),
-        "env"    => ctx.env.clone(),
-        "row"    => ctx.bindings.get("row").cloned().unwrap_or(Json::Null),
-        "item"   => ctx.bindings.get("item").cloned().unwrap_or(Json::Null),
-        "index"  => ctx.bindings.get("index").cloned().unwrap_or(Json::Null),
+        "steps" => ctx.steps.clone(),
+        "vars" => ctx.vars.clone(),
+        "env" => ctx.env.clone(),
+        "row" => ctx.bindings.get("row").cloned().unwrap_or(Json::Null),
+        "item" => ctx.bindings.get("item").cloned().unwrap_or(Json::Null),
+        "index" => ctx.bindings.get("index").cloned().unwrap_or(Json::Null),
         _ => return None,
     };
     let mut cur = root;
@@ -152,7 +172,7 @@ fn render_string(env: &Environment, src: &str, ctx: &TemplateCtx) -> Result<Stri
     // Replace vault placeholders BEFORE rendering so they survive untouched.
     // i.e. `{{ vault.smtp.user }}` -> literal `${{ vault.smtp.user }}` token.
     let pre = preprocess_vault(src, &ctx.vault);
-    let tmpl_ctx = Value::from_serialize(&serde_json::json!({
+    let tmpl_ctx = Value::from_serialize(serde_json::json!({
         "inputs": ctx.inputs,
         "steps":  ctx.steps,
         "vars":   ctx.vars,
@@ -173,5 +193,5 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
     // Crude but safe: `{{ vault.X.* }}` -> `${{ vault.X.* }}`
     // Real implementation in M2 will use a proper Jinja AST walk.
     src.replace("{{ vault.", "${{ vault.")
-       .replace("{{vault.", "${{vault.")
+        .replace("{{vault.", "${{vault.")
 }

@@ -24,12 +24,12 @@ pub enum LoadError {
 pub fn load_skill_file(path: impl AsRef<Path>) -> Result<Skill, LoadError> {
     let path = path.as_ref().to_path_buf();
     let raw = std::fs::read_to_string(&path)?;
-    let (fm_yaml, body) = split_frontmatter(&raw)
-        .ok_or_else(|| LoadError::Frontmatter { path: path.clone() })?;
+    let (fm_yaml, body) =
+        split_frontmatter(&raw).ok_or_else(|| LoadError::Frontmatter { path: path.clone() })?;
     let fm: SkillFrontmatter = serde_yaml::from_str(fm_yaml)?;
 
-    let yaml_block = extract_fenced_yaml(body)
-        .ok_or_else(|| LoadError::NoFlowBlock { path: path.clone() })?;
+    let yaml_block =
+        extract_fenced_yaml(body).ok_or_else(|| LoadError::NoFlowBlock { path: path.clone() })?;
     let mut flow = compose_flow(&fm, yaml_block)?;
     // Ensure parsed flow id matches frontmatter name for consistent routing.
     if flow.metadata.id != fm.name {
@@ -49,13 +49,17 @@ pub fn load_skill_file(path: impl AsRef<Path>) -> Result<Skill, LoadError> {
 pub fn load_skills_dir(root: impl AsRef<Path>) -> Result<Vec<Skill>, LoadError> {
     let root = root.as_ref();
     let mut out = Vec::new();
-    if !root.exists() { return Ok(out); }
+    if !root.exists() {
+        return Ok(out);
+    }
     walk(root, 0, 3, &mut out)?;
     Ok(out)
 }
 
 fn walk(dir: &Path, depth: u32, max: u32, out: &mut Vec<Skill>) -> Result<(), LoadError> {
-    if depth > max { return Ok(()); }
+    if depth > max {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
@@ -73,12 +77,18 @@ fn walk(dir: &Path, depth: u32, max: u32, out: &mut Vec<Skill>) -> Result<(), Lo
 
 fn split_frontmatter(s: &str) -> Option<(&str, &str)> {
     let s = s.strip_prefix("---")?;
-    let s = s.strip_prefix('\n').or_else(|| s.strip_prefix("\r\n")).unwrap_or(s);
+    let s = s
+        .strip_prefix('\n')
+        .or_else(|| s.strip_prefix("\r\n"))
+        .unwrap_or(s);
     let end = s.find("\n---")?;
     let fm = &s[..end];
     let mut rest = &s[end + 4..];
-    if rest.starts_with('\n') { rest = &rest[1..]; }
-    else if rest.starts_with("\r\n") { rest = &rest[2..]; }
+    if rest.starts_with('\n') {
+        rest = &rest[1..];
+    } else if rest.starts_with("\r\n") {
+        rest = &rest[2..];
+    }
     Some((fm, rest))
 }
 

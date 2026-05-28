@@ -34,6 +34,10 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn name(&self) -> &str { &self.frontmatter.name }
-    pub fn description(&self) -> Option<&str> { self.frontmatter.description.as_deref() }
+    pub fn name(&self) -> &str {
+        &self.frontmatter.name
+    }
+    pub fn description(&self) -> Option<&str> {
+        self.frontmatter.description.as_deref()
+    }
 }

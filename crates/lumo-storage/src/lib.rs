@@ -5,8 +5,8 @@
 //! without touching call sites.
 
 pub mod error;
-pub mod schema;
 pub mod repo;
+pub mod schema;
 pub mod types;
 
 pub use error::StorageError;

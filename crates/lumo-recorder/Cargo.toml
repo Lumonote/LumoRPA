@@ -4,13 +4,31 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "LumoRPA recorder (placeholder; impl in M2)"
+description = "LumoRPA recorder (browser + desktop AccessKit)"
 
 [dependencies]
 lumo-core.workspace = true
 lumo-dsl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+chromiumoxide.workspace = true
+chrono.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS: the focus probe shells out to `osascript` so we don't need objc
+# bindings here. Reserved for an `IOHIDCheckAccess` permission probe in a
+# follow-up patch.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

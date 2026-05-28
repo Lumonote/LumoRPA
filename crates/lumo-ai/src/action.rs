@@ -1,7 +1,11 @@
-use crate::{provider::{ChatMessage, ChatRequest, Role}, router::AiRouter};
+use crate::{
+    provider::{ChatMessage, ChatRequest, Role},
+    router::AiRouter,
+};
 use async_trait::async_trait;
-use lumo_core::{Action, ActionResult, StepCtx};
 use lumo_core::error::StepError;
+use lumo_core::{Action, ActionResult, StepCtx};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -12,7 +16,9 @@ pub struct ChatAction {
 }
 
 impl ChatAction {
-    pub fn new(router: Arc<AiRouter>) -> Self { Self { router } }
+    pub fn new(router: Arc<AiRouter>) -> Self {
+        Self { router }
+    }
 }
 
 #[derive(Deserialize)]
@@ -33,19 +39,44 @@ struct ChatIn {
 
 #[async_trait]
 impl Action for ChatAction {
-    fn id(&self) -> &'static str { "ai.chat" }
-    fn summary(&self) -> &'static str { "Send a chat prompt through the AI router" }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+    fn id(&self) -> &'static str {
+        "ai.chat"
+    }
+    fn summary(&self) -> &'static str {
+        "Send a chat prompt through the AI router"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "model": { "type": "string" },
+                    "system": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "temperature": { "type": "number" },
+                    "max_tokens": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let cfg: ChatIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("ai.chat input invalid: {e}")))?;
+        ctx.ensure_llm(&cfg.model)?;
         let req = ChatRequest {
             model: cfg.model,
             system: cfg.system,
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
-            messages: vec![ChatMessage { role: Role::User, content: cfg.prompt }],
+            messages: vec![ChatMessage::text(Role::User, cfg.prompt)],
         };
-        let resp = self.router.chat(req).await
+        let resp = self
+            .router
+            .chat(req)
+            .await
             .map_err(|e| StepError::msg(format!("ai.chat: {e}")))?;
         Ok(ActionResult::from(serde_json::json!({
             "content": resp.content,

@@ -34,6 +34,10 @@ CREATE INDEX IF NOT EXISTS idx_flow_runs_flow ON flow_runs(flow_id, started_at D
 
 CREATE TABLE IF NOT EXISTS step_runs (
   flow_run_id   TEXT NOT NULL,
+  seq           INTEGER NOT NULL,
+  path          TEXT NOT NULL,
+  parent_path   TEXT,
+  depth         INTEGER NOT NULL DEFAULT 0,
   step_id       TEXT NOT NULL,
   idx           INTEGER NOT NULL,
   state         TEXT NOT NULL,
@@ -44,9 +48,11 @@ CREATE TABLE IF NOT EXISTS step_runs (
   started_at    INTEGER,
   finished_at   INTEGER,
   span_id       TEXT,
-  PRIMARY KEY (flow_run_id, step_id, attempt),
+  PRIMARY KEY (flow_run_id, seq),
   FOREIGN KEY (flow_run_id) REFERENCES flow_runs(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_step_runs_flow_path
+  ON step_runs(flow_run_id, path);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   id            TEXT PRIMARY KEY,

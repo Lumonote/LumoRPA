@@ -8,6 +8,6 @@ pub mod template;
 pub mod validate;
 
 pub use ast::*;
-pub use parse::{parse_str, parse_file, ParseError};
-pub use template::{render, TemplateError, TemplateCtx};
+pub use parse::{parse_file, parse_str, ParseError};
+pub use template::{render, TemplateCtx, TemplateError};
 pub use validate::{validate, ValidationError};

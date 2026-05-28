@@ -4,13 +4,15 @@
 //! and durable step execution semantics inspired by Inngest/Temporal.
 
 pub mod action;
+pub mod ai_hook;
 pub mod ctx;
 pub mod error;
 pub mod registry;
 pub mod vm;
 
 pub use action::{Action, ActionResult};
-pub use ctx::StepCtx;
-pub use error::{ExecError, StepError};
+pub use ai_hook::{AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
+pub use ctx::{RunStats, StepCtx};
+pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use registry::ActionRegistry;
 pub use vm::{FlowVm, RunHandle, RunOptions, RunReport};

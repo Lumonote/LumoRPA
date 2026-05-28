@@ -1,8 +1,8 @@
 use crate::{
     config::{ProviderProfile, ProvidersConfig},
     provider::{
-        AnthropicProvider, ChatRequest, ChatResponse, LlmProvider,
-        OpenAiProvider, ProviderError, ProviderId,
+        AnthropicProvider, ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, ProviderError,
+        ProviderId,
     },
 };
 use std::sync::Arc;
@@ -22,7 +22,9 @@ pub struct AiRouter {
 }
 
 impl AiRouter {
-    pub fn builder() -> AiRouterBuilder { AiRouterBuilder::default() }
+    pub fn builder() -> AiRouterBuilder {
+        AiRouterBuilder::default()
+    }
 
     pub fn from_config(cfg: &ProvidersConfig) -> Self {
         let mut providers: Vec<Arc<dyn LlmProvider>> = Vec::new();
@@ -42,7 +44,9 @@ impl AiRouter {
     pub async fn chat(&self, mut req: ChatRequest) -> Result<ChatResponse, ProviderError> {
         let used_default = req.model.is_empty();
         if used_default {
-            if let Some(m) = &self.active_default_model { req.model = m.clone(); }
+            if let Some(m) = &self.active_default_model {
+                req.model = m.clone();
+            }
         }
         // 1. Explicit `name/...` prefix wins.
         if let Some((pname, _)) = req.model.split_once('/') {
@@ -71,19 +75,29 @@ impl AiRouter {
                 return p.chat(req).await;
             }
         }
-        Err(ProviderError::Other(format!("no provider for model `{}`", req.model)))
+        Err(ProviderError::Other(format!(
+            "no provider for model `{}`",
+            req.model
+        )))
     }
 
     pub fn provider_names(&self) -> Vec<String> {
-        self.providers.iter().map(|p| p.name().to_string()).collect()
+        self.providers
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
     }
-    pub fn active(&self) -> Option<&str> { self.active.as_deref() }
-    pub fn ids(&self) -> Vec<ProviderId> { self.providers.iter().map(|p| p.id()).collect() }
+    pub fn active(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+    pub fn ids(&self) -> Vec<ProviderId> {
+        self.providers.iter().map(|p| p.id()).collect()
+    }
 }
 
 fn build_provider(p: &ProviderProfile) -> Option<Arc<dyn LlmProvider>> {
     match p.kind.as_str() {
-        "openai"    => Some(Arc::new(OpenAiProvider::from_profile(p))),
+        "openai" => Some(Arc::new(OpenAiProvider::from_profile(p))),
         "anthropic" => Some(Arc::new(AnthropicProvider::from_profile(p))),
         other => {
             tracing::warn!("provider `{}`: unknown kind `{}`, skipping", p.name, other);
@@ -105,10 +119,12 @@ impl AiRouterBuilder {
         self
     }
     pub fn active(mut self, name: impl Into<String>) -> Self {
-        self.active = Some(name.into()); self
+        self.active = Some(name.into());
+        self
     }
     pub fn active_default_model(mut self, m: impl Into<String>) -> Self {
-        self.active_default_model = Some(m.into()); self
+        self.active_default_model = Some(m.into());
+        self
     }
     pub fn build(self) -> AiRouter {
         AiRouter {

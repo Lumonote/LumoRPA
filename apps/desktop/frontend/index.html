@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LumoRPA Studio</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- ─── Top bar ────────────────────────────────────────────── -->
+      <header class="topbar" data-tauri-drag-region>
+        <div class="brand" data-tauri-drag-region>
+          <div class="brand-mark" data-tauri-drag-region>L</div>
+          <div data-tauri-drag-region>
+            <strong data-tauri-drag-region>LumoRPA Studio</strong>
+            <span id="appMeta" data-tauri-drag-region>本地优先 · 流程即代码</span>
+          </div>
+        </div>
+
+        <nav class="tabs" aria-label="Primary">
+          <button class="tab is-active" data-view="design">设计</button>
+          <button class="tab" data-view="recorder">录制</button>
+          <button class="tab" data-view="runs">运行</button>
+          <button class="tab" data-view="models">模型</button>
+          <button class="tab" data-view="features">能力地图</button>
+          <button class="tab" data-view="settings">设置</button>
+        </nav>
+
+        <div class="topbar-right">
+          <div class="alpha-slider" title="整窗透明度（实时驱动 Tauri 窗口背景 alpha 0~255）">
+            <span>窗口</span>
+            <input id="windowAlphaTop" type="range" min="0" max="100" value="18" />
+          </div>
+          <div class="alpha-slider" title="面板透明度（CSS 层）">
+            <span>面板</span>
+            <input id="panelAlphaTop" type="range" min="20" max="100" value="62" />
+          </div>
+          <button class="icon" id="themeToggleBtn" title="切换深/浅主题">🌓</button>
+        </div>
+      </header>
+
+      <!-- ─── Workspace ───────────────────────────────────────────── -->
+      <main class="workspace">
+        <!-- LEFT: flows + action library -->
+        <aside class="left-rail">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>流程</h2>
+              <div style="display: flex; gap: 4px">
+                <button class="icon ghost" id="refreshFlowsBtn" title="刷新示例">↻</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <input class="path-input" id="flowPath" placeholder="输入 .lumoflow.yaml 路径" style="margin-bottom: 8px" />
+              <div class="flow-list" id="flowList"></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>指令</h2>
+              <button class="icon ghost" id="refreshActionsBtn" title="重载指令">↻</button>
+            </div>
+            <div class="panel-body">
+              <div class="search-box">
+                <input id="actionSearch" type="search" placeholder="搜索指令 / 拖到画布" />
+              </div>
+              <div id="actionLibrary"></div>
+            </div>
+          </section>
+        </aside>
+
+        <!-- CENTER: 3-way editor -->
+        <section class="panel editor-shell" id="designView">
+          <header class="editor-head">
+            <div>
+              <div class="flow-title" id="flowTitle">未选择流程</div>
+              <div class="flow-sub" id="flowSubtitle">从左侧示例载入，或直接在路径栏输入 .lumoflow.yaml</div>
+            </div>
+            <div class="view-switch" id="viewSwitch">
+              <button class="is-active" data-mode="steps">步骤</button>
+              <button data-mode="graph">图</button>
+              <button data-mode="tree">树</button>
+              <button data-mode="code">代码</button>
+            </div>
+          </header>
+
+          <div class="editor-toolbar">
+            <button id="loadFlowBtn">📂 载入</button>
+            <button id="validateBtn">✓ 校验</button>
+            <button class="primary" id="runBtn">▶ 运行</button>
+            <button id="runStepBtn" title="运行当前选中节点（影刀缺失，差异化能力）">▷ 单步</button>
+            <span class="spacer"></span>
+            <button id="saveFlowBtn">💾 保存</button>
+            <button class="ghost" id="resetInputBtn">重置输入</button>
+          </div>
+
+          <div class="editor-body">
+            <!-- Steps view (YingDao-style linear list, default) -->
+            <div class="view is-active" id="view-steps">
+              <div class="step-list" id="stepList">
+                <div class="prop-empty">尚未载入流程</div>
+              </div>
+            </div>
+
+            <!-- Graph view -->
+            <div class="view" id="view-graph">
+              <div class="graph-wrap">
+                <svg class="graph-svg" id="graphSvg">
+                  <defs>
+                    <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="strokeWidth" markerWidth="7" markerHeight="7" orient="auto">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+                    </marker>
+                  </defs>
+                  <g id="graphRoot"></g>
+                </svg>
+              </div>
+            </div>
+
+            <!-- Tree view -->
+            <div class="view" id="view-tree">
+              <div class="tree-wrap" id="treeRoot"></div>
+            </div>
+
+            <!-- Code view -->
+            <div class="view" id="view-code">
+              <div class="code-wrap">
+                <div class="code-gutter" id="codeGutter"></div>
+                <textarea class="code-edit" id="codeEditor" spellcheck="false" wrap="off"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Element / Image library (YingDao parity) -->
+          <section class="element-library" id="elementLibrary">
+            <header class="el-head">
+              <div class="el-tabs" id="elTabs">
+                <button class="is-active" data-el-tab="elements">🎯 元素库 <span class="el-count" id="elCountElements">0</span></button>
+                <button data-el-tab="images">🖼 图像库 <span class="el-count" id="elCountImages">0</span></button>
+                <button data-el-tab="datatables">📊 数据表格 <span class="el-count" id="elCountTables">0</span></button>
+              </div>
+              <div class="el-actions">
+                <input id="elSearch" type="search" placeholder="搜索元素 / 来源页面" />
+                <button id="elCaptureBtn" class="primary" title="跳到录制器抓取新元素">+ 捕获</button>
+                <button id="elClearBtn" class="ghost" title="清空当前分类">清空</button>
+              </div>
+            </header>
+            <div class="el-body" id="elBody"></div>
+          </section>
+        </section>
+
+        <!-- RIGHT: inspector + timeline -->
+        <aside class="right-rail" id="rightRail">
+          <section class="panel">
+            <div class="right-tabs" id="rightTabs">
+              <button class="is-active" data-section="inspector">属性</button>
+              <button data-section="inputs">输入</button>
+              <button data-section="outputs">输出</button>
+              <button data-section="capabilities">权限</button>
+            </div>
+            <div class="panel-body flush">
+              <div class="right-section is-active" id="rsInspector">
+                <div id="inspectorBody">
+                  <div class="prop-empty">选择一个节点查看属性</div>
+                </div>
+              </div>
+              <div class="right-section" id="rsInputs">
+                <div class="prop-form">
+                  <div class="prop-field">
+                    <label>输入 JSON</label>
+                    <textarea id="inputsJson" style="min-height: 200px">{}</textarea>
+                    <div class="hint">运行/单步前会把这段 JSON 作为 flow inputs 传入 VM。</div>
+                  </div>
+                </div>
+              </div>
+              <div class="right-section" id="rsOutputs">
+                <div class="prop-form">
+                  <div class="prop-field">
+                    <label>最近一次输出</label>
+                    <pre id="outputBox" style="margin: 0; background: var(--surface-soft); padding: 10px; border-radius: 8px; font-size: 11px; max-height: 280px; overflow: auto"></pre>
+                  </div>
+                </div>
+              </div>
+              <div class="right-section" id="rsCapabilities">
+                <div id="capabilitiesBody" class="prop-form">
+                  <div class="prop-empty">选择一个流后,此处显示 spec.capabilities 的当前声明,可一键添加白名单 (Se-01 / Se-02).</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Time-Travel · 执行时间线</h2>
+              <span id="timelineMeta" style="font-size: 11px; color: var(--muted)"></span>
+            </div>
+            <div class="panel-body flush">
+              <div class="timeline" id="timelineBlock">
+                <div class="timeline-head">
+                  <span id="timelineLabel">尚未运行</span>
+                  <span id="timelineCounts"></span>
+                </div>
+                <div class="timeline-track" id="timelineTrack"></div>
+                <div class="timeline-detail" id="timelineDetail"><span style="color: var(--muted); font-size: 11px">运行或单步执行后，每个 step 会出现在这里 — 拖到任意点回看其 input/output/error。</span></div>
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <!-- ─── Other views (full-width replacements) ─────────────── -->
+        <!-- These hide design view; controlled by tabs. -->
+        <section class="panel" id="recorderView" style="grid-column: 1 / -1; display: none">
+          <div class="panel-head">
+            <h2>录制器 · Recorder</h2>
+            <span style="font-size: 11px; color: var(--muted)">M2 接入 CDP / AccessKit · 当前为 NoopRecorder 占位</span>
+          </div>
+          <div class="panel-body">
+            <div class="recorder-shell">
+              <div class="recorder-pill" id="recorderPill"><span class="dot"></span><span id="recorderPillText">未录制</span></div>
+              <div class="recorder-controls">
+                <label class="prop-field" style="grid-template-columns: auto 1fr; grid-auto-flow: column">
+                  <span style="font-size: 11px; color: var(--muted)">来源：</span>
+                  <select id="recorderTarget" style="width: 160px">
+                    <option value="browser">浏览器 (CDP)</option>
+                    <option value="desktop">桌面 (AccessKit)</option>
+                    <option value="mixed">混合 (智能切换)</option>
+                  </select>
+                </label>
+                <button class="primary" id="recorderStartBtn">● 开始录制</button>
+                <button class="danger" id="recorderStopBtn" disabled>■ 停止</button>
+              </div>
+              <div class="note" id="recorderNote">
+                录制器目前接的是 <code>lumo-recorder::NoopRecorder</code>。设计文档 §1 已经详设了"CDP 事件 + AccessKit 桌面 + ActionBuffer 200ms 去抖 + 4 套元素指纹"的完整管线，进入 M2 阶段后会自动把当前面板替换为真实事件流。
+              </div>
+              <div class="recorder-live">
+                <div class="recorder-stat" id="recorderStatElapsed">
+                  <span class="label">已录制时长</span>
+                  <span class="value" id="recorderElapsed">00:00</span>
+                </div>
+                <div class="recorder-stat" id="recorderStatEvents">
+                  <span class="label">事件计数</span>
+                  <span class="value" id="recorderEvents">0</span>
+                </div>
+                <div class="recorder-stat" id="recorderStatBackend">
+                  <span class="label">后端</span>
+                  <span class="value" id="recorderBackend" style="font-size:13px">NoopRecorder</span>
+                </div>
+              </div>
+              <div class="recorder-stream" id="recorderStream">
+                <div class="head">▶ live event stream · stdout</div>
+                <div class="line muted">[idle] 点击 ● 开始录制 后会在此处实时输出捕获事件…</div>
+              </div>
+              <div class="recorder-patch" id="recorderPatch">
+                <div class="muted" style="padding:8px 10px">录制结束后此处会生成 LumoFlow YAML 草稿，可一键追加到当前打开的流程末尾。</div>
+              </div>
+              <div class="note">
+                <strong>差异化能力：</strong> 录制后会同步产出 <em>CSS / XPath / A11y path / Visual anchor</em> 四套指纹，运行时由 Self-Healing Router 按 Dijkstra 路径切换，影刀的"选择器一旦坏就靠人改"在 LumoRPA 中由 Vision-LLM 兜底自愈替代。
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="runsView" style="grid-column: 1 / -1; display: none">
+          <div class="panel-head">
+            <h2>运行历史 · 持久化于 lumo.db</h2>
+            <button id="refreshRunsBtn">↻ 刷新</button>
+          </div>
+          <div class="panel-body">
+            <div class="runs-grid">
+              <div class="scroll-y" id="runsList"></div>
+              <div class="scroll-y" id="runDetail" style="padding-right: 4px"><span style="color: var(--muted); font-size: 12px">选择一次运行查看 step 明细</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="modelsView" style="grid-column: 1 / -1; display: none">
+          <div class="panel-head">
+            <h2>模型源 · BYOK · cc-switch 兼容</h2>
+            <div style="display: flex; gap: 6px">
+              <button id="modelsInitBtn">⚡ 重置为默认 (openai/anthropic/deepseek/ollama)</button>
+              <button class="primary" id="newProviderBtn">+ 新增</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="display: grid; grid-template-columns: 320px 1fr; gap: 12px; height: 100%; min-height: 0">
+              <div class="scroll-y" id="providerList"></div>
+              <div class="scroll-y panel" id="providerEditor" style="border-radius: 12px; padding: 0">
+                <div class="panel-head">
+                  <h2 id="providerEditorTitle">编辑模型源</h2>
+                  <div style="display: flex; gap: 6px">
+                    <button id="testProviderBtn">🛰 测试连接</button>
+                    <button class="primary" id="saveProviderBtn">保存</button>
+                  </div>
+                </div>
+                <div class="provider-edit" id="providerEditBody">
+                  <div class="prop-empty">从左侧选择一个 profile，或点击右上角"+ 新增"</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="featuresView" style="grid-column: 1 / -1; display: none">
+          <div class="panel-head">
+            <h2>能力地图 · 设计文档落地度</h2>
+            <span style="font-size: 11px; color: var(--muted)">基于 docs/01-Product-Design.md 功能矩阵</span>
+          </div>
+          <div class="panel-body">
+            <div class="note" style="margin-bottom: 12px">
+              这一页对照设计文档列出所有功能模块的当前实现状态。<strong>ready</strong> = 已可在本地跑通；<strong>partial</strong> = 部分能力可用；<strong>planned</strong> = 当前里程碑未排期，但 DSL / 架构已为其预留接口。我们目标是"<em>影刀有的我们要做对，影刀没有的我们要做强</em>"。
+            </div>
+            <div class="feature-grid" id="featureGrid"></div>
+          </div>
+        </section>
+
+        <section class="panel" id="settingsView" style="grid-column: 1 / -1; display: none">
+          <div class="panel-head">
+            <h2>外观与运行环境</h2>
+          </div>
+          <div class="panel-body">
+            <div class="settings-grid">
+              <section class="panel">
+                <div class="panel-head"><h2>透明度</h2></div>
+                <div class="panel-body flush">
+                  <div class="slider-field" title="窗口背景 alpha — 0 = 完全透过，看到桌面壁纸 / 100 = 不透明">
+                    <span>整窗透明度</span>
+                    <input id="windowAlphaSlider" type="range" min="0" max="100" value="18" />
+                    <strong id="windowAlphaValue">18%</strong>
+                  </div>
+                  <div class="slider-field" title="WebView 内面板叠加层 alpha">
+                    <span>面板透明度</span>
+                    <input id="panelAlphaSlider" type="range" min="20" max="100" value="62" />
+                    <strong id="panelAlphaValue">62%</strong>
+                  </div>
+                  <div class="preset-row">
+                    <button data-preset="glass">🪟 玻璃</button>
+                    <button data-preset="frost" class="is-active">❄️ 磨砂</button>
+                    <button data-preset="solid">⬜ 实心</button>
+                    <button data-preset="invisible">👻 极简</button>
+                  </div>
+                  <div class="note" style="margin: 4px 14px 14px">两个滑块互不影响：第一个直接驱动 Tauri 窗口背景 alpha（0~255 全范围），第二个驱动 CSS 面板叠加层。预设按钮联动两条滑块。</div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head"><h2>主题</h2></div>
+                <div class="panel-body flush">
+                  <div class="theme-row">
+                    <button data-theme="auto" class="is-active">🖥 跟随系统</button>
+                    <button data-theme="light">☀️ 浅色</button>
+                    <button data-theme="dark">🌙 深色</button>
+                  </div>
+                  <div class="note" style="margin: 0 14px 14px">主题影响所有 token（前景/线/卡片/选中态），毛玻璃叠加层会自适应深浅。</div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head"><h2>运行环境</h2></div>
+                <div class="panel-body flush">
+                  <div class="kv-list" id="environmentBox"></div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head"><h2>本地 Skills</h2></div>
+                <div class="panel-body flush">
+                  <div class="kv-list" id="skillsBox"></div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- ─── Status bar ─────────────────────────────────────────── -->
+      <footer class="statusbar">
+        <span id="statusText">就绪</span>
+        <span class="pill" id="netPill" title="LUMO_ALLOW_LLM_NETWORK 是否开启"><span class="dot"></span>LLM 网络</span>
+        <span class="pill" id="activeProviderPill" title="当前激活的模型源"><span class="dot"></span>模型源</span>
+        <span class="pill" id="versionPill"><span class="dot"></span>v0.1</span>
+      </footer>
+    </div>
+
+    <div class="toast-stack" id="toastStack"></div>
+    <div class="ai-drawer-overlay" id="aiDrawerOverlay" hidden></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -10,6 +10,8 @@ use lumo_ai::{
 };
 use std::path::PathBuf;
 
+use super::providers_path;
+
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     #[command(subcommand)]
@@ -98,11 +100,14 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
     Ok((k.to_string(), v.to_string()))
 }
 
-pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
-    let path = ProvidersConfig::default_path();
+pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
+    let path = providers_path(&home);
 
     match args.sub {
-        Sub::Path => { println!("{}", path.display()); Ok(()) }
+        Sub::Path => {
+            println!("{}", path.display());
+            Ok(())
+        }
 
         Sub::Init { force } => {
             if path.exists() && !force {
@@ -130,7 +135,12 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
             }
             let mut t = Table::new();
             t.load_preset(UTF8_FULL).set_header(vec![
-                "active", "name", "kind", "base_url", "key", "default_model",
+                "active",
+                "name",
+                "kind",
+                "base_url",
+                "key",
+                "default_model",
             ]);
             for p in &cfg.profiles {
                 let is_active = cfg.active.as_deref() == Some(p.name.as_str());
@@ -146,9 +156,17 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
                     Cell::new(format!(
                         "{} ({})",
                         env,
-                        if resolved { "set".to_string() } else { "missing".to_string() }
+                        if resolved {
+                            "set".to_string()
+                        } else {
+                            "missing".to_string()
+                        }
                     ))
-                    .fg(if resolved { Color::Green } else { Color::Yellow })
+                    .fg(if resolved {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    })
                 } else {
                     Cell::new("-")
                 };
@@ -168,7 +186,9 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
 
         Sub::Show { name } => {
             let cfg = ProvidersConfig::load(&path)?;
-            let p = cfg.get(&name).ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
+            let p = cfg
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
             let red = p.redacted();
             println!("{}", toml::to_string_pretty(&red)?);
             Ok(())
@@ -182,10 +202,23 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
             Ok(())
         }
 
-        Sub::Add { name, kind, wire_api, base_url, api_key, api_key_env, default_model, reasoning_effort, headers, activate } => {
+        Sub::Add {
+            name,
+            kind,
+            wire_api,
+            base_url,
+            api_key,
+            api_key_env,
+            default_model,
+            reasoning_effort,
+            headers,
+            activate,
+        } => {
             let mut cfg = ProvidersConfig::load(&path)?;
             let mut hmap = std::collections::BTreeMap::new();
-            for (k, v) in headers { hmap.insert(k, v); }
+            for (k, v) in headers {
+                hmap.insert(k, v);
+            }
             let p = ProviderProfile {
                 name: name.clone(),
                 kind,
@@ -208,19 +241,48 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
             Ok(())
         }
 
-        Sub::Set { name, wire_api, base_url, api_key, api_key_env, default_model, reasoning_effort, headers, unset_headers } => {
+        Sub::Set {
+            name,
+            wire_api,
+            base_url,
+            api_key,
+            api_key_env,
+            default_model,
+            reasoning_effort,
+            headers,
+            unset_headers,
+        } => {
             let mut cfg = ProvidersConfig::load(&path)?;
             {
-                let prof = cfg.profiles.iter_mut().find(|p| p.name == name)
+                let prof = cfg
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.name == name)
                     .ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
-                if let Some(v) = wire_api          { prof.wire_api          = Some(v); }
-                if let Some(v) = base_url          { prof.base_url          = Some(v); }
-                if let Some(v) = api_key           { prof.api_key           = Some(v); }
-                if let Some(v) = api_key_env       { prof.api_key_env       = Some(v); }
-                if let Some(v) = default_model     { prof.default_model     = Some(v); }
-                if let Some(v) = reasoning_effort  { prof.reasoning_effort  = Some(v); }
-                for (k, v) in headers              { prof.headers.insert(k, v); }
-                for k in unset_headers             { prof.headers.remove(&k); }
+                if let Some(v) = wire_api {
+                    prof.wire_api = Some(v);
+                }
+                if let Some(v) = base_url {
+                    prof.base_url = Some(v);
+                }
+                if let Some(v) = api_key {
+                    prof.api_key = Some(v);
+                }
+                if let Some(v) = api_key_env {
+                    prof.api_key_env = Some(v);
+                }
+                if let Some(v) = default_model {
+                    prof.default_model = Some(v);
+                }
+                if let Some(v) = reasoning_effort {
+                    prof.reasoning_effort = Some(v);
+                }
+                for (k, v) in headers {
+                    prof.headers.insert(k, v);
+                }
+                for k in unset_headers {
+                    prof.headers.remove(&k);
+                }
             }
             cfg.save(&path)?;
             println!("{} {} updated", "✓".green().bold(), name);
@@ -237,8 +299,12 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
 
         Sub::Test { name, prompt } => {
             let cfg = ProvidersConfig::load(&path)?;
-            let prof = cfg.get(&name).ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
-            let model = prof.default_model.clone()
+            let prof = cfg
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
+            let model = prof
+                .default_model
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("profile `{name}` has no default_model"))?;
             let one_off = ProvidersConfig {
                 active: Some(name.clone()),
@@ -247,16 +313,21 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
             let router = AiRouter::from_config(&one_off);
             let req = ChatRequest {
                 model: format!("{name}/{model}"),
-                messages: vec![ChatMessage { role: Role::User, content: prompt }],
+                messages: vec![ChatMessage::text(Role::User, prompt)],
                 temperature: Some(0.0),
                 max_tokens: Some(64),
                 system: None,
             };
             match router.chat(req).await {
                 Ok(r) => {
-                    println!("{} model={} provider={} tokens={}↑/{}↓",
-                        "✓".green().bold(), r.model, r.provider,
-                        r.input_tokens, r.output_tokens);
+                    println!(
+                        "{} model={} provider={} tokens={}↑/{}↓",
+                        "✓".green().bold(),
+                        r.model,
+                        r.provider,
+                        r.input_tokens,
+                        r.output_tokens
+                    );
                     println!("---");
                     println!("{}", r.content);
                     Ok(())

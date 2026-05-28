@@ -3,11 +3,12 @@
 use clap::{Args as ClapArgs, Subcommand};
 use colored::Colorize;
 use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use lumo_ai::{AiRouter, ChatAction, ProvidersConfig};
-use lumo_core::{ActionRegistry, FlowVm, RunOptions};
+use lumo_core::{FlowVm, RunOptions};
 use lumo_skills::{loader::load_skill_file, register_skill_actions, SkillRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use super::{build_action_registry, run::merge_cli_inputs, skills_root};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -36,15 +37,20 @@ enum Sub {
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
-    let (k, v) = s.split_once('=').ok_or_else(|| format!("expected KEY=VALUE, got `{s}`"))?;
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got `{s}`"))?;
     Ok((k.into(), v.into()))
 }
 
-pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
-    let root = SkillRegistry::default_root();
+pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
+    let root = skills_root(&home);
 
     match args.sub {
-        Sub::Path => { println!("{}", root.display()); Ok(()) }
+        Sub::Path => {
+            println!("{}", root.display());
+            Ok(())
+        }
 
         Sub::List => {
             let reg = SkillRegistry::new();
@@ -54,7 +60,8 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
                 return Ok(());
             }
             let mut t = Table::new();
-            t.load_preset(UTF8_FULL).set_header(vec!["name", "description", "triggers", "steps"]);
+            t.load_preset(UTF8_FULL)
+                .set_header(vec!["name", "description", "triggers", "steps"]);
             for s in reg.all() {
                 let fm = &s.frontmatter;
                 t.add_row(vec![
@@ -72,9 +79,13 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
         Sub::Show { name } => {
             let reg = SkillRegistry::new();
             let _ = reg.load_dir(&root);
-            let s = reg.get(&name).ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
+            let s = reg
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
             println!("# {} @ {}", s.name(), s.source.display());
-            if let Some(d) = s.description() { println!("\n{d}"); }
+            if let Some(d) = s.description() {
+                println!("\n{d}");
+            }
             println!("\n--- flow ---");
             let yaml = serde_yaml::to_string(&s.flow).unwrap_or_default();
             println!("{yaml}");
@@ -87,13 +98,20 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
             std::fs::create_dir_all(&dest_dir)?;
             let dest = dest_dir.join("SKILL.md");
             std::fs::copy(&source, &dest)?;
-            println!("{} installed `{}` → {}", "✓".green().bold(), skill.name(), dest.display());
+            println!(
+                "{} installed `{}` → {}",
+                "✓".green().bold(),
+                skill.name(),
+                dest.display()
+            );
             Ok(())
         }
 
         Sub::Remove { name } => {
             let dir = root.join(&name);
-            if !dir.exists() { anyhow::bail!("not found: {name}"); }
+            if !dir.exists() {
+                anyhow::bail!("not found: {name}");
+            }
             std::fs::remove_dir_all(&dir)?;
             println!("removed: {name}");
             Ok(())
@@ -101,33 +119,44 @@ pub async fn run(_home: PathBuf, args: Args) -> anyhow::Result<()> {
 
         Sub::Run { name, inputs } => {
             let skill_reg = Arc::new(SkillRegistry::new());
-            skill_reg.load_dir(&root).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            let s = skill_reg.get(&name).ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
+            skill_reg
+                .load_dir(&root)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let s = skill_reg
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("not found: {name}"))?;
 
-            let providers_cfg = ProvidersConfig::load(ProvidersConfig::default_path()).unwrap_or_default();
-            let router = Arc::new(AiRouter::from_config(&providers_cfg));
-
-            let mut action_reg = ActionRegistry::new();
-            lumo_actions::register_all(&mut action_reg);
-            action_reg.register(ChatAction::new(router));
+            let mut action_reg = build_action_registry(&home, None);
             register_skill_actions(&mut action_reg, skill_reg.clone());
-
-            let inputs_json: serde_json::Map<String, serde_json::Value> = inputs.into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v))).collect();
+            let inputs_json = merge_cli_inputs(None, None, inputs)?;
 
             let vm = FlowVm::new(action_reg, None);
-            let report = vm.run(&s.flow, RunOptions {
-                inputs: serde_json::Value::Object(inputs_json),
-                trigger_kind: "skill-cli".into(),
-            }).await?;
+            let report = vm
+                .run(
+                    &s.flow,
+                    RunOptions {
+                        inputs: serde_json::Value::Object(inputs_json),
+                        trigger_kind: "skill-cli".into(),
+                    },
+                )
+                .await?;
 
             println!(
-                "{} skill={} state={} steps={}/{} duration={}ms",
+                "{} skill={} state={} steps_ok={} executed={} declared={} skipped={} retried={} caught={} failed={} duration={}ms",
                 "✓".green().bold(),
                 name,
-                if report.success { "ok".green() } else { "failed".red() },
+                if report.success {
+                    "ok".green()
+                } else {
+                    "failed".red()
+                },
                 report.steps_ok,
+                report.steps_executed,
                 report.steps_total,
+                report.steps_skipped,
+                report.steps_retried,
+                report.steps_caught,
+                report.steps_failed,
                 report.duration_ms,
             );
             if let Some(out) = report.outputs {

@@ -20,11 +20,15 @@ thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 once_cell.workspace = true
+sha2.workspace = true
+chrono.workspace = true
 
 reqwest.workspace = true
 chromiumoxide.workspace = true
 calamine.workspace = true
 rust_xlsxwriter.workspace = true
+base64 = "0.22"
+bytes = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

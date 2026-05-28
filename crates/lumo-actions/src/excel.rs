@@ -4,11 +4,13 @@
 
 use async_trait::async_trait;
 use calamine::{open_workbook_auto, Data, Reader};
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use lumo_core::error::StepError;
+use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use once_cell::sync::Lazy;
 use rust_xlsxwriter::Workbook;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub fn register(r: &mut ActionRegistry) {
@@ -27,59 +29,105 @@ struct ReadIn {
     #[serde(default)]
     limit: Option<usize>,
 }
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[async_trait]
 impl Action for ReadRowsAction {
-    fn id(&self) -> &'static str { "excel.read_rows" }
-    fn summary(&self) -> &'static str { "Read rows from a workbook; row 1 used as headers if header=true" }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ReadIn { file, sheet, header, limit } = serde_json::from_value(input)
+    fn id(&self) -> &'static str {
+        "excel.read_rows"
+    }
+    fn summary(&self) -> &'static str {
+        "Read rows from a workbook; row 1 used as headers if header=true"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                    "file": { "type": "string" },
+                    "sheet": { "type": "string" },
+                    "header": { "type": "boolean" },
+                    "limit": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let ReadIn {
+            file,
+            sheet,
+            header,
+            limit,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("excel.read_rows input invalid: {e}")))?;
+        ctx.ensure_fs_read(&file)?;
         let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
             let mut wb = open_workbook_auto(&file).map_err(|e| e.to_string())?;
             let sheet_name = match sheet {
                 Some(s) => s,
-                None => wb.sheet_names().first().cloned()
+                None => wb
+                    .sheet_names()
+                    .first()
+                    .cloned()
                     .ok_or_else(|| "workbook has no sheets".to_string())?,
             };
             let range = wb.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
             let mut out: Vec<Value> = Vec::new();
             let mut iter = range.rows();
             let headers: Vec<String> = if header {
-                iter.next().map(|r| header_row(r)).unwrap_or_default()
-            } else { Vec::new() };
+                iter.next().map(header_row).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             for (idx, row) in iter.enumerate() {
                 let mut obj = Map::new();
                 for (i, cell) in row.iter().enumerate() {
-                    let key = headers.get(i).cloned().unwrap_or_else(|| format!("col_{i}"));
+                    let key = headers
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("col_{i}"));
                     obj.insert(key, cell_to_json(cell));
                 }
                 obj.insert("_index".into(), Value::from(idx as i64));
                 out.push(Value::Object(obj));
-                if let Some(n) = limit { if out.len() >= n { break; } }
+                if let Some(n) = limit {
+                    if out.len() >= n {
+                        break;
+                    }
+                }
             }
             Ok(out)
-        }).await
-            .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-            .map_err(StepError::msg)?;
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
+        .map_err(StepError::msg)?;
         Ok(ActionResult::from(Value::Array(rows)))
     }
 }
 
 fn header_row(r: &[Data]) -> Vec<String> {
-    r.iter().enumerate().map(|(i, c)| match c {
-        Data::String(s) => s.clone(),
-        Data::Empty => format!("col_{i}"),
-        other => other.to_string(),
-    }).collect()
+    r.iter()
+        .enumerate()
+        .map(|(i, c)| match c {
+            Data::String(s) => s.clone(),
+            Data::Empty => format!("col_{i}"),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 fn cell_to_json(c: &Data) -> Value {
     match c {
         Data::Empty => Value::Null,
         Data::String(s) => Value::String(s.clone()),
-        Data::Float(f) => serde_json::Number::from_f64(*f).map(Value::Number).unwrap_or(Value::Null),
+        Data::Float(f) => serde_json::Number::from_f64(*f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         Data::Int(i) => Value::from(*i),
         Data::Bool(b) => Value::Bool(*b),
         Data::DateTime(dt) => Value::from(dt.as_f64()),
@@ -97,34 +145,87 @@ struct WriteRowIn {
     row: Value,
     #[serde(default)]
     headers: Option<Vec<String>>,
+    #[serde(default)]
+    replace_sheet: bool,
 }
 
 #[async_trait]
 impl Action for WriteRowAction {
-    fn id(&self) -> &'static str { "excel.write_row" }
-    fn summary(&self) -> &'static str { "Append a row to an .xlsx workbook (create if missing)" }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let WriteRowIn { file, sheet, row, headers } = serde_json::from_value(input)
+    fn id(&self) -> &'static str {
+        "excel.write_row"
+    }
+    fn summary(&self) -> &'static str {
+        "Append a row to an .xlsx workbook (create if missing)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["file", "row"],
+                "properties": {
+                    "file": { "type": "string" },
+                    "sheet": { "type": "string" },
+                    "row": {},
+                    "headers": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "replace_sheet": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let WriteRowIn {
+            file,
+            sheet,
+            row,
+            headers,
+            replace_sheet,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("excel.write_row input invalid: {e}")))?;
+        ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
 
         tokio::task::spawn_blocking(move || -> Result<usize, String> {
-            let mut existing_rows: Vec<Vec<Value>> = Vec::new();
+            let mut sheets: BTreeMap<String, Vec<Vec<Value>>> = BTreeMap::new();
             let mut col_headers: Vec<String> = headers.clone().unwrap_or_default();
 
             if file.exists() {
                 let mut wb = open_workbook_auto(&file).map_err(|e| e.to_string())?;
-                if let Ok(range) = wb.worksheet_range(&sheet) {
-                    let mut iter = range.rows();
-                    if col_headers.is_empty() {
-                        if let Some(h) = iter.next() { col_headers = header_row(h); }
-                    } else {
-                        iter.next();
-                    }
-                    for r in iter {
-                        existing_rows.push(r.iter().map(cell_to_json).collect());
+                for sheet_name in wb.sheet_names().to_vec() {
+                    if let Ok(range) = wb.worksheet_range(&sheet_name) {
+                        let rows = range
+                            .rows()
+                            .map(|r| r.iter().map(cell_to_json).collect::<Vec<_>>())
+                            .collect::<Vec<_>>();
+                        if sheet_name == sheet && col_headers.is_empty() {
+                            if let Some(h) = rows.first() {
+                                col_headers = h
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, v)| match v {
+                                        Value::String(s) if !s.is_empty() => s.clone(),
+                                        Value::Null => format!("col_{i}"),
+                                        other => other.to_string(),
+                                    })
+                                    .collect();
+                            }
+                        }
+                        sheets.insert(sheet_name, rows);
                     }
                 }
+            }
+            let mut existing_rows = if replace_sheet {
+                let _ = sheets.remove(&sheet);
+                Vec::new()
+            } else {
+                sheets.remove(&sheet).unwrap_or_default()
+            };
+            if !existing_rows.is_empty() {
+                existing_rows.remove(0);
             }
 
             let new_row: Vec<Value> = match &row {
@@ -138,29 +239,37 @@ impl Action for WriteRowAction {
                     if col_headers.is_empty() {
                         col_headers = m.keys().cloned().collect();
                     }
-                    col_headers.iter().map(|h| m.get(h).cloned().unwrap_or(Value::Null)).collect()
+                    col_headers
+                        .iter()
+                        .map(|h| m.get(h).cloned().unwrap_or(Value::Null))
+                        .collect()
                 }
                 _ => return Err(format!("row must be array or object, got {row}")),
             };
             existing_rows.push(new_row);
 
+            let mut target_rows = Vec::with_capacity(existing_rows.len() + 1);
+            target_rows.push(col_headers.iter().cloned().map(Value::String).collect());
+            target_rows.extend(existing_rows.clone());
+            sheets.insert(sheet.clone(), target_rows);
+
             let mut wb = Workbook::new();
-            let ws = wb.add_worksheet();
-            ws.set_name(&sheet).map_err(|e| e.to_string())?;
-            for (c, h) in col_headers.iter().enumerate() {
-                ws.write_string(0, c as u16, h).map_err(|e| e.to_string())?;
-            }
-            for (r, row) in existing_rows.iter().enumerate() {
-                for (c, v) in row.iter().enumerate() {
-                    write_cell(ws, (r + 1) as u32, c as u16, v).map_err(|e| e.to_string())?;
+            for (sheet_name, rows) in &sheets {
+                let ws = wb.add_worksheet();
+                ws.set_name(sheet_name).map_err(|e| e.to_string())?;
+                for (r, row) in rows.iter().enumerate() {
+                    for (c, v) in row.iter().enumerate() {
+                        write_cell(ws, r as u32, c as u16, v).map_err(|e| e.to_string())?;
+                    }
                 }
             }
             wb.save(&file).map_err(|e| e.to_string())?;
             Ok(existing_rows.len())
-        }).await
-            .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-            .map_err(StepError::msg)
-            .map(|n| ActionResult::from(serde_json::json!({ "rows": n })))
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
+        .map_err(StepError::msg)
+        .map(|n| ActionResult::from(serde_json::json!({ "rows": n })))
     }
 }
 
@@ -171,15 +280,27 @@ fn write_cell(
     v: &Value,
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
     match v {
-        Value::Null => { ws.write_blank(row, col, &rust_xlsxwriter::Format::default())?; }
-        Value::Bool(b) => { ws.write_boolean(row, col, *b)?; }
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() { ws.write_number(row, col, i as f64)?; }
-            else if let Some(f) = n.as_f64() { ws.write_number(row, col, f)?; }
-            else { ws.write_string(row, col, &n.to_string())?; }
+        Value::Null => {
+            ws.write_blank(row, col, &rust_xlsxwriter::Format::default())?;
         }
-        Value::String(s) => { ws.write_string(row, col, s)?; }
-        other => { ws.write_string(row, col, &other.to_string())?; }
+        Value::Bool(b) => {
+            ws.write_boolean(row, col, *b)?;
+        }
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                ws.write_number(row, col, i as f64)?;
+            } else if let Some(f) = n.as_f64() {
+                ws.write_number(row, col, f)?;
+            } else {
+                ws.write_string(row, col, n.to_string())?;
+            }
+        }
+        Value::String(s) => {
+            ws.write_string(row, col, s)?;
+        }
+        other => {
+            ws.write_string(row, col, other.to_string())?;
+        }
     }
     Ok(())
 }

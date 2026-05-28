@@ -14,6 +14,6 @@ pub mod loader;
 pub mod model;
 pub mod registry;
 
+pub use action::register_skill_actions;
 pub use model::{Skill, SkillFrontmatter};
 pub use registry::SkillRegistry;
-pub use action::register_skill_actions;

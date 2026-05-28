@@ -1,0 +1,32 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: browser-scrape
+  version: 0.1.0
+  name: 浏览器抓取示例
+  description: 无头打开 example.com，提取页面 H1 并写入日志。
+  tags: [example, browser]
+
+spec:
+  inputs:
+    - { name: url, type: string, default: "https://example.com" }
+
+  capabilities:
+    network: ["example.com"]
+
+  steps:
+    - id: open
+      action: browser.open
+      with: { url: "{{ inputs.url }}", headless: true }
+
+    - id: title
+      action: browser.extract
+      with: { selector: "h1" }
+
+    - id: report
+      action: control.log
+      with: { message: "h1 = {{ steps.title.result }}" }
+
+    - id: close
+      action: browser.close
+      with: {}

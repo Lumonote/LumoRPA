@@ -3,6 +3,8 @@ kind: Flow
 metadata:
   id: skill-driver
   version: 0.1.0
+  name: Skill 调用示例
+  description: 通过 skill.invoke 串联本地 skills（greet / json-roundtrip），演示 Skill 注册与调用闭环。
 spec:
   inputs:
     - { name: who, type: string, default: lumorpa }

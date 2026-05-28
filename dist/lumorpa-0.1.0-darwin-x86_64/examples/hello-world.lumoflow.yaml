@@ -1,0 +1,31 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: hello-world
+  version: 0.1.0
+  name: Hello, LumoRPA
+  description: Smoke test — prints a greeting using flow inputs.
+  tags: [example, smoke]
+
+spec:
+  inputs:
+    - { name: who, type: string, default: world }
+
+  steps:
+    - id: greet
+      action: control.log
+      with:
+        message: "hello, {{ inputs.who }} — powered by LumoRPA"
+
+    - id: think
+      action: control.sleep
+      with: { ms: 50 }
+
+    - id: store
+      action: control.set_var
+      with: { name: motto, value: "open · ai-native · flow-as-code" }
+
+    - id: echo
+      action: control.log
+      with:
+        message: "motto = {{ vars.motto }}"

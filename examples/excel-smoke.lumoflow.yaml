@@ -3,10 +3,14 @@ kind: Flow
 metadata:
   id: excel-create-and-read
   version: 0.1.0
-  name: Excel create + read round-trip
+  name: Excel 写入与回读
+  description: 写入若干行到 .xlsx，再读回校验，验证 excel.write_row / excel.read_rows 闭环。
 spec:
   inputs:
     - { name: file, type: file, default: "/tmp/lumo-smoke.xlsx" }
+  capabilities:
+    fs.read: ["/tmp/**"]
+    fs.write: ["/tmp/**"]
 
   steps:
     - id: w1
@@ -14,6 +18,7 @@ spec:
       with:
         file: "{{ inputs.file }}"
         sheet: data
+        replace_sheet: true
         row: { name: Alice, age: 30, city: Hangzhou }
 
     - id: w2

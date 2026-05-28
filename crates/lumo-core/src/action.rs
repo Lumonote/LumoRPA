@@ -11,8 +11,14 @@ pub struct ActionResult {
 }
 
 impl ActionResult {
-    pub fn null() -> Self { Self { output: Value::Null } }
-    pub fn from(v: Value) -> Self { Self { output: v } }
+    pub fn null() -> Self {
+        Self {
+            output: Value::Null,
+        }
+    }
+    pub fn from(v: Value) -> Self {
+        Self { output: v }
+    }
 }
 
 /// All actions implement this trait.
@@ -25,7 +31,9 @@ impl ActionResult {
 pub trait Action: Send + Sync + 'static {
     fn id(&self) -> &'static str;
 
-    fn summary(&self) -> &'static str { "" }
+    fn summary(&self) -> &'static str {
+        ""
+    }
 
     /// JSON schema for the `with:` block. Used by `lumo actions --show <id>`
     /// and by future Studio UIs to render forms.
@@ -35,11 +43,7 @@ pub trait Action: Send + Sync + 'static {
         &EMPTY
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut StepCtx,
-        input: Value,
-    ) -> Result<ActionResult, StepError>;
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError>;
 }
 
 pub type ActionRef = Arc<dyn Action>;

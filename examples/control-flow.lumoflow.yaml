@@ -3,8 +3,8 @@ kind: Flow
 metadata:
   id: control-flow-smoke
   version: 0.1.0
-  name: Control-flow smoke test
-  description: Exercises control.if / control.for / control.for_each / control.try.
+  name: 控制流冒烟测试
+  description: 演练 control.if / control.for / control.for_each / control.try 四种控制结构。
 
 spec:
   inputs:

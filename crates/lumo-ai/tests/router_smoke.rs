@@ -45,8 +45,10 @@ async fn explicit_profile_prefix_routes() {
     let (router, _s) = make_router("beta").await;
     let req = ChatRequest {
         model: "beta/anything".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "x".into() }],
-        temperature: None, max_tokens: None, system: None,
+        messages: vec![ChatMessage::text(Role::User, "x")],
+        temperature: None,
+        max_tokens: None,
+        system: None,
     };
     let r = router.chat(req).await.unwrap();
     assert_eq!(r.provider, "beta");
@@ -58,8 +60,10 @@ async fn empty_model_falls_back_to_active_default() {
     let (router, _s) = make_router("alpha").await;
     let req = ChatRequest {
         model: "".into(),
-        messages: vec![ChatMessage { role: Role::User, content: "x".into() }],
-        temperature: None, max_tokens: None, system: None,
+        messages: vec![ChatMessage::text(Role::User, "x")],
+        temperature: None,
+        max_tokens: None,
+        system: None,
     };
     let r = router.chat(req).await.unwrap();
     assert_eq!(r.provider, "alpha");
@@ -67,12 +71,17 @@ async fn empty_model_falls_back_to_active_default() {
 
 #[tokio::test]
 async fn unknown_model_errors() {
-    let cfg = ProvidersConfig { active: None, profiles: vec![] };
+    let cfg = ProvidersConfig {
+        active: None,
+        profiles: vec![],
+    };
     let router = AiRouter::from_config(&cfg);
     let req = ChatRequest {
         model: "vendor/anything".into(),
         messages: vec![],
-        temperature: None, max_tokens: None, system: None,
+        temperature: None,
+        max_tokens: None,
+        system: None,
     };
     assert!(router.chat(req).await.is_err());
 }
