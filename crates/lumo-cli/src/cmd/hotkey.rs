@@ -254,7 +254,7 @@ pub async fn run_hotkey_flow(
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = FlowVm::new(registry, repo);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow);
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "trigger".into(),

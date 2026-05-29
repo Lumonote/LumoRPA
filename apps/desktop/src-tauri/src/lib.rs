@@ -1292,6 +1292,15 @@ async fn execute_flow(
         Some(Repo::open(home.join("lumo.db")).map_err(|e| e.to_string())?)
     };
     let vm = FlowVm::new(registry, repo.clone());
+    // P0-1: attach AI hooks (heal / extract_visual / decide / diagnose) when the
+    // flow enables AI and providers are configured; otherwise the VM stays
+    // deterministic. Mirrors the CLI's `attach_ai_hooks`.
+    let ai = flow.metadata.ai.clone().unwrap_or_default();
+    let ai_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
+    let vm = match lumo_ai::build_hook_provider(&ai_cfg, ai.enabled, ai.budget.max_calls_per_run) {
+        Some(provider) => vm.with_ai_provider(provider),
+        None => vm,
+    };
     let report = vm
         .run(
             &flow,

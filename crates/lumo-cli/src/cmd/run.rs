@@ -62,7 +62,7 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         trigger_kind: "manual".into(),
     };
 
-    let vm = FlowVm::new(registry, repo);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow);
     let report = vm.run(&flow, opts).await?;
 
     println!();

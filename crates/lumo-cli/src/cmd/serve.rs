@@ -204,7 +204,7 @@ async fn webhook(
         Repo::open(state.home.join("lumo.db"))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
     );
-    let vm = FlowVm::new(registry, repo);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &state.home, &flow);
     let report = vm
         .run(
             &flow,
@@ -378,7 +378,7 @@ async fn run_cron_flow(flow_path: &Path, home: &Path) -> anyhow::Result<()> {
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = FlowVm::new(registry, repo);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow);
     vm.run(
         &flow,
         RunOptions {
@@ -578,7 +578,7 @@ async fn run_file_flow(
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = FlowVm::new(registry, repo);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow);
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "trigger".into(),

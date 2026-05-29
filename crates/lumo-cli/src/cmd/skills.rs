@@ -130,7 +130,7 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
             register_skill_actions(&mut action_reg, skill_reg.clone());
             let inputs_json = merge_cli_inputs(None, None, inputs)?;
 
-            let vm = FlowVm::new(action_reg, None);
+            let vm = super::attach_ai_hooks(FlowVm::new(action_reg, None), &home, &s.flow);
             let report = vm
                 .run(
                     &s.flow,

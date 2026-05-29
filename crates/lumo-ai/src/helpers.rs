@@ -348,6 +348,27 @@ impl AiHooks {
     }
 }
 
+/// P0-1: build the AI hook provider for a run from provider config + the flow's
+/// AI policy. Returns `None` (hooks stay off) when the flow disabled AI
+/// (`metadata.ai.enabled: false`) or no provider profiles are configured — so a
+/// flow that opts into `ai.mode` without any configured backend doesn't spin up
+/// doomed LLM calls. Runners attach the result via `FlowVm::with_ai_provider`.
+///
+/// This is the seam that was previously missing: `with_ai_provider` had zero
+/// callers, so the whole hook subsystem was dead at runtime.
+pub fn build_hook_provider(
+    cfg: &crate::config::ProvidersConfig,
+    flow_ai_enabled: bool,
+    max_calls_per_run: u32,
+) -> Option<Arc<dyn AiHookProvider>> {
+    if !flow_ai_enabled || cfg.profiles.is_empty() {
+        return None;
+    }
+    let router = Arc::new(AiRouter::from_config(cfg));
+    let budget = RunBudget::new(max_calls_per_run);
+    Some(Arc::new(AiHooks::new(router, budget)))
+}
+
 #[async_trait]
 impl AiHookProvider for AiHooks {
     async fn heal_selector(

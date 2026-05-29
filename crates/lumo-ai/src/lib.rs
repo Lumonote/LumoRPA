@@ -11,7 +11,9 @@ pub mod router;
 pub use action::ChatAction;
 pub use budget::RunBudget;
 pub use config::{ConfigError, ProviderProfile, ProvidersConfig};
-pub use helpers::{decide, diagnose, extract_visual, heal_selector, vision_locate, AiHooks};
+pub use helpers::{
+    build_hook_provider, decide, diagnose, extract_visual, heal_selector, vision_locate, AiHooks,
+};
 // Re-export the canonical hook types from lumo-core so external callers see
 // a single set of `HealedSelector`/`Decision` symbols.
 pub use lumo_core::ai_hook::{

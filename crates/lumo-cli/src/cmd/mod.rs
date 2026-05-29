@@ -12,7 +12,8 @@ pub mod skills;
 pub mod validate;
 
 use lumo_ai::{AiRouter, ChatAction, ProvidersConfig};
-use lumo_core::ActionRegistry;
+use lumo_core::{ActionRegistry, FlowVm};
+use lumo_dsl::Flow;
 use lumo_skills::{register_skill_actions, SkillRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +41,23 @@ pub(crate) fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> Ac
     let skill_reg = load_skill_registry(home, flow_path);
     register_skill_actions(&mut registry, skill_reg);
     registry
+}
+
+/// P0-1: attach the AI hook provider (selector heal / visual extract / decide /
+/// diagnose / vision-locate) to a freshly built VM based on the flow's
+/// `metadata.ai` policy and the configured providers. No-op when AI is disabled
+/// or no providers are configured.
+///
+/// This is the call that was missing: `FlowVm::with_ai_provider` previously had
+/// zero callers, so `effective_ai_mode` always resolved to `Off` and the entire
+/// AI-hooks subsystem was dead code at runtime.
+pub(crate) fn attach_ai_hooks(vm: FlowVm, home: &Path, flow: &Flow) -> FlowVm {
+    let ai = flow.metadata.ai.clone().unwrap_or_default();
+    let cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
+    match lumo_ai::build_hook_provider(&cfg, ai.enabled, ai.budget.max_calls_per_run) {
+        Some(provider) => vm.with_ai_provider(provider),
+        None => vm,
+    }
 }
 
 pub(crate) fn load_skill_registry(home: &Path, flow_path: Option<&Path>) -> Arc<SkillRegistry> {
