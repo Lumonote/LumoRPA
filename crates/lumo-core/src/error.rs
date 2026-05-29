@@ -20,6 +20,12 @@ pub enum ExecError {
     },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// P1-1: the run was cancelled via its `CancelToken` before completing.
+    #[error("run cancelled")]
+    Cancelled,
+    /// P1-1: a step exceeded the configured per-step timeout.
+    #[error("step `{step}` timed out after {ms}ms")]
+    Timeout { step: String, ms: u64 },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

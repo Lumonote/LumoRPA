@@ -10,9 +10,57 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use ulid::Ulid;
+
+/// Cooperative cancellation handle for a run (P1-1). Clone it, hand one clone to
+/// [`crate::FlowVm::with_cancel`], and call [`CancelToken::cancel`] from
+/// anywhere to ask the VM to stop: it checks before each step and interrupts an
+/// in-flight step via [`CancelToken::cancelled`].
+#[derive(Clone)]
+pub struct CancelToken {
+    flag: Arc<AtomicBool>,
+    tx: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            tx: Arc::new(tx),
+        }
+    }
+
+    /// Request cancellation. Idempotent; wakes anything awaiting [`Self::cancelled`].
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        let _ = self.tx.send(true);
+    }
+
+    /// Whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once cancelled. Race-free: re-checks the current value on
+    /// subscribe, so a `cancel()` that landed before this call still wakes it.
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut rx = self.tx.subscribe();
+        let _ = rx.wait_for(|&v| v).await;
+    }
+}
 
 #[derive(Clone)]
 pub struct StepCtx {
@@ -32,6 +80,12 @@ pub struct StepCtx {
     /// action rejects invocations past a fixed ceiling to stop runaway / cyclic
     /// recursion (stack overflow / OOM).
     skill_depth: u32,
+    /// P1-1: cooperative cancellation handle, seeded by the VM from
+    /// `FlowVm::with_cancel`. Checked before each step and used to interrupt an
+    /// in-flight step.
+    cancel: Option<CancelToken>,
+    /// P1-1: per-step timeout, seeded by the VM from `FlowVm::with_step_timeout`.
+    step_timeout: Option<Duration>,
     /// Persisted step sequence counter. Shared (via `Arc`) across parallel
     /// branch forks so the `step_runs (flow_run_id, seq)` primary key stays
     /// unique even when branches persist concurrently (P0-4).
@@ -92,6 +146,8 @@ impl StepCtx {
             ai_provider: None,
             flow_ai: None,
             skill_depth: 0,
+            cancel: None,
+            step_timeout: None,
             seq: Arc::new(AtomicI64::new(0)),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs,
@@ -143,6 +199,34 @@ impl StepCtx {
     pub fn with_skill_depth(mut self, depth: u32) -> Self {
         self.skill_depth = depth;
         self
+    }
+
+    /// Seed the run's cancellation handle (P1-1, set by the VM from `FlowVm`).
+    pub fn with_cancel(mut self, cancel: Option<CancelToken>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// Seed the per-step timeout (P1-1, set by the VM from `FlowVm`).
+    pub fn with_step_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.step_timeout = timeout;
+        self
+    }
+
+    /// Whether the run has been cancelled. The VM checks this before each step.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+    }
+
+    /// A clone of the run's cancel token, if one is attached. Cloned out so the
+    /// VM can await `cancelled()` without holding a borrow on the context.
+    pub fn cancel_token(&self) -> Option<CancelToken> {
+        self.cancel.clone()
+    }
+
+    /// The per-step timeout in force, if any.
+    pub fn step_timeout(&self) -> Option<Duration> {
+        self.step_timeout
     }
 
     pub fn template_ctx(&self) -> TemplateCtx {
@@ -238,6 +322,8 @@ impl StepCtx {
             ai_provider: self.ai_provider.clone(),
             flow_ai: self.flow_ai.clone(),
             skill_depth: self.skill_depth,
+            cancel: self.cancel.clone(),
+            step_timeout: self.step_timeout,
             seq: self.seq.clone(),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: g.inputs.clone(),

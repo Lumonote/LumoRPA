@@ -13,7 +13,7 @@
 use crate::{
     action::{ActionRef, ActionResult},
     ai_hook::AiHookProvider,
-    ctx::StepCtx,
+    ctx::{CancelToken, StepCtx},
     error::{ErrorKind, ExecError, StepError},
     registry::ActionRegistry,
 };
@@ -23,7 +23,7 @@ use lumo_storage::{FlowRunRow, Repo, StepRunRow};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::Instrument;
 use ulid::Ulid;
 
@@ -72,6 +72,10 @@ pub struct FlowVm {
     /// P0-5: when set, replaces `flow.spec.capabilities` for the run. Used by
     /// `skill.invoke` to clamp a sub-flow to the caller's sandbox.
     capability_override: Option<Capabilities>,
+    /// P1-1: cooperative cancellation handle for the run.
+    cancel: Option<CancelToken>,
+    /// P1-1: per-step timeout applied to every leaf action's execution.
+    step_timeout: Option<Duration>,
 }
 
 impl FlowVm {
@@ -82,6 +86,8 @@ impl FlowVm {
             ai_provider: None,
             skill_depth: 0,
             capability_override: None,
+            cancel: None,
+            step_timeout: None,
         }
     }
 
@@ -102,6 +108,20 @@ impl FlowVm {
     /// caller's capabilities clamped to the skill's declared set.
     pub fn with_capability_override(mut self, caps: Capabilities) -> Self {
         self.capability_override = Some(caps);
+        self
+    }
+
+    /// Attach a cancellation handle (P1-1). Hold a clone of the same
+    /// [`CancelToken`] elsewhere and call `cancel()` to stop the run.
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Set a per-step timeout (P1-1). Each leaf action that runs longer than
+    /// this fails the run with [`ExecError::Timeout`].
+    pub fn with_step_timeout(mut self, timeout: Duration) -> Self {
+        self.step_timeout = Some(timeout);
         self
     }
 
@@ -155,7 +175,9 @@ impl FlowVm {
             flow.spec.vault.clone(),
         )
         .with_ai(self.ai_provider.clone(), flow.metadata.ai.clone())
-        .with_skill_depth(self.skill_depth);
+        .with_skill_depth(self.skill_depth)
+        .with_cancel(self.cancel.clone())
+        .with_step_timeout(self.step_timeout);
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
@@ -170,6 +192,7 @@ impl FlowVm {
         }
 
         let ok = result.is_ok();
+        let cancelled = matches!(result, Err(ExecError::Cancelled));
         let outputs = if ok {
             Some(ctx.outputs_snapshot())
         } else {
@@ -181,7 +204,14 @@ impl FlowVm {
             // CLI / Studio can show "this run cost $0.012 / 1.2k tokens"
             // without re-scanning ai_calls every render.
             let _ = repo.rollup_run_cost(&run_id);
-            let _ = repo.finish_run(&run_id, if ok { "ok" } else { "failed" }, outputs.as_ref());
+            let state = if ok {
+                "ok"
+            } else if cancelled {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = repo.finish_run(&run_id, state, outputs.as_ref());
         }
         result?;
         let stats = ctx.stats();
@@ -223,6 +253,31 @@ async fn run_block_at(
     Ok(())
 }
 
+/// Outcome of running one action attempt under cancel/timeout limits (P1-1).
+enum StepOutcome {
+    Done(Result<ActionResult, StepError>),
+    Cancelled,
+    TimedOut,
+}
+
+/// Resolves when the (optional) cancel token fires; never resolves when no
+/// token is attached, so it idles harmlessly inside `select!`.
+async fn wait_cancel(cancel: &Option<CancelToken>) {
+    match cancel {
+        Some(c) => c.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Resolves after the (optional) per-step timeout elapses; never resolves when
+/// no timeout is set.
+async fn wait_timeout(limit: Option<Duration>) {
+    match limit {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn execute_step(
     ctx: &mut StepCtx,
     step: &Step,
@@ -231,6 +286,32 @@ async fn execute_step(
     parent_path: Option<String>,
     depth: i64,
 ) -> Result<(), ExecError> {
+    // P1-1: stop before doing any work (including `when` evaluation and
+    // control-flow recursion) if the run was cancelled. The first step to
+    // observe cancellation persists a `cancelled` row and aborts; the error
+    // propagates up so no further steps run.
+    if ctx.is_cancelled() {
+        let now = Utc::now();
+        persist_step(
+            ctx,
+            StepPersist {
+                step_id: &step.id,
+                path: &path,
+                parent_path: parent_path.as_deref(),
+                depth,
+                idx,
+                state: "cancelled",
+                attempt: 1,
+                input_hash: &[],
+                output: None,
+                error: Some("run cancelled".into()),
+                started_at: now,
+                finished_at: now,
+            },
+        );
+        return Err(ExecError::Cancelled);
+    }
+
     if let Some(cond) = &step.when {
         let rendered = render_string(ctx, cond)?;
         if !is_truthy_str(&rendered) {
@@ -337,7 +418,70 @@ async fn execute_step(
             "step.path" = %path,
             "flow.run_id" = %ctx.run_id(),
         );
-        match action.execute(ctx, try_input).instrument(exec_span).await {
+        // P1-1: run the action under the run's cancel token + per-step timeout.
+        // The future borrows `ctx` mutably, so resolve it inside its own scope
+        // and carry only an owned outcome out — freeing `ctx` for the persist
+        // calls below. `biased` makes cancel/timeout win deterministically.
+        let cancel = ctx.cancel_token();
+        let limit = ctx.step_timeout();
+        let outcome = {
+            let exec_fut = action.execute(ctx, try_input).instrument(exec_span);
+            tokio::pin!(exec_fut);
+            tokio::select! {
+                biased;
+                _ = wait_cancel(&cancel) => StepOutcome::Cancelled,
+                _ = wait_timeout(limit) => StepOutcome::TimedOut,
+                r = &mut exec_fut => StepOutcome::Done(r),
+            }
+        };
+        let exec_result = match outcome {
+            StepOutcome::Cancelled => {
+                persist_step(
+                    ctx,
+                    StepPersist {
+                        step_id: &step.id,
+                        path: &path,
+                        parent_path: parent_path.as_deref(),
+                        depth,
+                        idx,
+                        state: "cancelled",
+                        attempt: attempt as i64,
+                        input_hash: &input_hash,
+                        output: None,
+                        error: Some("run cancelled".into()),
+                        started_at,
+                        finished_at: Utc::now(),
+                    },
+                );
+                return Err(ExecError::Cancelled);
+            }
+            StepOutcome::TimedOut => {
+                let ms = limit.map(|d| d.as_millis() as u64).unwrap_or(0);
+                persist_step(
+                    ctx,
+                    StepPersist {
+                        step_id: &step.id,
+                        path: &path,
+                        parent_path: parent_path.as_deref(),
+                        depth,
+                        idx,
+                        state: "timeout",
+                        attempt: attempt as i64,
+                        input_hash: &input_hash,
+                        output: None,
+                        error: Some(format!("timed out after {ms}ms")),
+                        started_at,
+                        finished_at: Utc::now(),
+                    },
+                );
+                return Err(ExecError::Timeout {
+                    step: step.id.clone(),
+                    ms,
+                });
+            }
+            StepOutcome::Done(r) => r,
+        };
+        match exec_result {
             Ok(result) => {
                 let finished_at = Utc::now();
                 let _elapsed_ms = t0.elapsed().as_millis() as i64;

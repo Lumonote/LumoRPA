@@ -1,7 +1,7 @@
 use clap::Args as ClapArgs;
 use colored::Colorize;
 use lumo_ai::ProvidersConfig;
-use lumo_core::{FlowVm, RunOptions};
+use lumo_core::{CancelToken, ExecError, FlowVm, RunOptions};
 use lumo_dsl::Step;
 use lumo_storage::Repo;
 use std::path::PathBuf;
@@ -62,8 +62,30 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         trigger_kind: "manual".into(),
     };
 
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow);
-    let report = vm.run(&flow, opts).await?;
+    // P1-1: let Ctrl-C cancel the run cooperatively. The VM checks the token
+    // before each step and interrupts an in-flight one, persisting the run as
+    // `cancelled` rather than leaving it dangling as `running`.
+    let cancel = CancelToken::new();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\n  ! interrupt received — cancelling run…");
+                c.cancel();
+            }
+        });
+    }
+
+    let vm =
+        super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow).with_cancel(cancel);
+    let report = match vm.run(&flow, opts).await {
+        Ok(report) => report,
+        Err(ExecError::Cancelled) => {
+            eprintln!("{} run cancelled", "✗".red().bold());
+            std::process::exit(130); // 128 + SIGINT, the conventional Ctrl-C code
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     println!();
     println!(
