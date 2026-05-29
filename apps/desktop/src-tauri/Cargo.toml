@@ -33,3 +33,6 @@ serde_yaml.workspace = true
 tauri = { version = "2.3.1", features = ["macos-private-api"] }
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
