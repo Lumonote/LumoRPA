@@ -93,3 +93,73 @@ jobs:
             --ignore-filename-regex '(browser|vision|selectors)\.rs$|lumo-recorder/src' \
             --fail-under-lines 50 \
             --summary-only
+
+  cargo-deny:
+    name: cargo-deny (supply chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs advisories + bans + licenses + sources against deny.toml. The
+      # action manages the RUSTSEC advisory-db checkout/cache for us.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check all
+
+  msrv:
+    name: MSRV 1.83
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.83 (declared rust-version)
+        uses: dtolnay/rust-toolchain@1.83.0
+      - uses: Swatinem/rust-cache@v2
+      # Compile the shipped library/binary code on the pinned MSRV. The Tauri
+      # shell is excluded (its system-lib build is environment-specific, not a
+      # portability concern); dev-only test deps are out of the MSRV contract,
+      # so no --all-targets here.
+      - name: cargo check on MSRV
+        run: cargo check --workspace --locked --exclude lumorpa-desktop
+
+  cross-check:
+    name: cross check / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # aarch64 (ARM 服务器/麒麟等): a hard gate — toolchain is readily available.
+          - target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu
+            cc: aarch64-linux-gnu-gcc
+            best_effort: false
+          # loongarch64 (龙芯/信创): best-effort — the cross C toolchain and
+          # ring/libsqlite3-sys target support are still maturing on CI runners,
+          # so a red result here is informational, not blocking.
+          - target: loongarch64-unknown-linux-gnu
+            apt: gcc-14-loongarch64-linux-gnu
+            cc: loongarch64-linux-gnu-gcc-14
+            best_effort: true
+    continue-on-error: ${{ matrix.best_effort }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      # rusqlite (bundled SQLite) and ring (rustls) build C for the target, so
+      # the cross C compiler must be wired in via cc-crate's CC_<triple> env.
+      # Only the per-target var is set — clobbering host CC would break build
+      # scripts/proc-macros that compile for the runner itself.
+      - name: cargo check (cross, desktop excluded)
+        env:
+          TARGET: ${{ matrix.target }}
+          CROSS_CC: ${{ matrix.cc }}
+        run: |
+          underscore="${TARGET//-/_}"
+          export "CC_${underscore}=${CROSS_CC}"
+          export "CARGO_TARGET_$(echo "$underscore" | tr '[:lower:]' '[:upper:]')_LINKER=${CROSS_CC}"
+          cargo check --workspace --locked --exclude lumorpa-desktop --target "$TARGET"
