@@ -11,7 +11,7 @@ pub mod registry;
 pub mod vm;
 
 pub use action::{Action, ActionResult};
-pub use ai_hook::{AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
+pub use ai_hook::{AiCallUsage, AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
 pub use ctx::{clamp_capabilities, CancelToken, RunStats, StepCtx};
 pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use registry::{ActionRegistry, RunTeardown};

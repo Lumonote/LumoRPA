@@ -12,14 +12,14 @@
 
 use crate::{
     action::{ActionRef, ActionResult},
-    ai_hook::AiHookProvider,
+    ai_hook::{AiCallUsage, AiHookProvider},
     ctx::{CancelToken, StepCtx},
     error::{ErrorKind, ExecError, StepError},
     registry::ActionRegistry,
 };
 use chrono::Utc;
 use lumo_dsl::{AiMode, Capabilities, Flow, Step};
-use lumo_storage::{FlowRunRow, Repo, StepRunRow};
+use lumo_storage::{AiCallInsert, FlowRunRow, Repo, StepRunRow};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -486,6 +486,12 @@ async fn execute_step(
                 let finished_at = Utc::now();
                 let _elapsed_ms = t0.elapsed().as_millis() as i64;
                 ctx.record_step_output(&step.id, &result.output);
+                // P1-4: a successful action may have resolved an element via the
+                // `vision_locate` hook (the resolver has no `ctx` to book it
+                // itself); drain + record that spend, attributed to this step.
+                if let Some(provider) = ctx.ai_provider().cloned() {
+                    persist_ai_usage(ctx, &provider.take_usage());
+                }
                 if let Some(bind) = &step.bind {
                     ctx.set_var(bind, result.output.clone());
                 }
@@ -645,14 +651,18 @@ async fn run_if(
     let mut ai_trace: Option<Value> = None;
     let truthy = if need_ai {
         match try_ai_decide(ctx, step).await {
-            Ok(Some(decision)) => {
-                ai_trace = Some(serde_json::json!({
+            Ok(Some((decision, usage))) => {
+                let mut trace = serde_json::json!({
                     "used": true,
                     "helper": "decide",
                     "model": effective_ai_model(ctx, step),
                     "confidence": decision.confidence,
                     "reasoning": decision.reasoning,
-                }));
+                });
+                if let Some(agg) = ai_usage_aggregate(&usage) {
+                    trace["usage"] = agg;
+                }
+                ai_trace = Some(trace);
                 decision.result
             }
             _ => is_truthy(&cond),
@@ -1224,6 +1234,60 @@ fn input_type_matches(ty: &str, value: &Value) -> bool {
 
 // ─── AI hook dispatch ───────────────────────────────────────────────────────
 
+/// P1-4: persist one `ai_calls` ledger row per usage record the provider
+/// accumulated for the current step. Best-effort — a failed insert never blocks
+/// the run, and a run with no repo (e.g. ad-hoc `lumo run` without persistence)
+/// simply skips the write.
+fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
+    if usage.is_empty() {
+        return;
+    }
+    let Some(repo) = ctx.repo() else {
+        return;
+    };
+    let run_id = ctx.run_id();
+    let step_id = ctx.current_step_id();
+    for u in usage {
+        let _ = repo.record_ai_call(AiCallInsert {
+            flow_run_id: run_id,
+            step_id: step_id.as_deref(),
+            helper: &u.helper,
+            provider: &u.provider,
+            model: &u.model,
+            input_tokens: u.input_tokens as i64,
+            output_tokens: u.output_tokens as i64,
+            latency_ms: u.latency_ms,
+            cost_usd_micro: u.cost_usd_micro,
+        });
+    }
+}
+
+/// P1-4: fold a step's accumulated AI usage into the `{input_tokens,
+/// output_tokens, latency_ms, cost_usd_micro}` object attached to its `_ai`
+/// trace, so `steps.<id>._ai.usage` and the Studio timeline can show token/cost
+/// per hook. `None` when no metered calls were made.
+fn ai_usage_aggregate(usage: &[AiCallUsage]) -> Option<Value> {
+    if usage.is_empty() {
+        return None;
+    }
+    let mut input_tokens = 0i64;
+    let mut output_tokens = 0i64;
+    let mut latency_ms = 0i64;
+    let mut cost_usd_micro = 0i64;
+    for u in usage {
+        input_tokens += u.input_tokens as i64;
+        output_tokens += u.output_tokens as i64;
+        latency_ms += u.latency_ms;
+        cost_usd_micro += u.cost_usd_micro;
+    }
+    Some(serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "latency_ms": latency_ms,
+        "cost_usd_micro": cost_usd_micro,
+    }))
+}
+
 fn effective_ai_mode(ctx: &StepCtx, step: &Step) -> AiMode {
     if ctx.ai_provider().is_none() {
         return AiMode::Off;
@@ -1277,7 +1341,10 @@ async fn try_ai_recovery(
             let healed = provider
                 .heal_selector(&failed_selector, &prompt, None, model.as_deref())
                 .await?;
+            let mut usage = provider.take_usage();
             let Some(new_sel) = healed.css.clone().or_else(|| healed.xpath.clone()) else {
+                // Heal still cost an LLM call even though it gave nothing usable.
+                persist_ai_usage(ctx, &usage);
                 return Ok(None);
             };
             tracing::info!(
@@ -1291,13 +1358,19 @@ async fn try_ai_recovery(
                 obj.insert("selector".into(), Value::String(new_sel.clone()));
             }
             let result = action.execute(ctx, new_input).await?;
-            let trace = serde_json::json!({
+            // The healed re-run may itself trigger a vision hook; fold it in.
+            usage.extend(provider.take_usage());
+            persist_ai_usage(ctx, &usage);
+            let mut trace = serde_json::json!({
                 "used": true,
                 "helper": "heal_selector",
                 "model": model,
                 "confidence": healed.confidence,
                 "healed_selector": new_sel,
             });
+            if let Some(agg) = ai_usage_aggregate(&usage) {
+                trace["usage"] = agg;
+            }
             Ok(Some((result, trace)))
         }
         ErrorKind::ExtractFailed => {
@@ -1313,17 +1386,22 @@ async fn try_ai_recovery(
             let value = provider
                 .extract_visual(screenshot, &target, None, None, model.as_deref())
                 .await?;
+            let usage = provider.take_usage();
+            persist_ai_usage(ctx, &usage);
             tracing::info!(
                 "step `{}`: AI extract_visual produced value (image={})",
                 step.id,
                 used_image
             );
-            let trace = serde_json::json!({
+            let mut trace = serde_json::json!({
                 "used": true,
                 "helper": "extract_visual",
                 "model": model,
                 "multimodal": used_image,
             });
+            if let Some(agg) = ai_usage_aggregate(&usage) {
+                trace["usage"] = agg;
+            }
             Ok(Some((ActionResult::from(value), trace)))
         }
         _ => Ok(None),
@@ -1336,7 +1414,7 @@ async fn try_ai_recovery(
 async fn try_ai_decide(
     ctx: &mut StepCtx,
     step: &Step,
-) -> Result<Option<crate::ai_hook::Decision>, StepError> {
+) -> Result<Option<(crate::ai_hook::Decision, Vec<AiCallUsage>)>, StepError> {
     let Some(provider) = ctx.ai_provider().cloned() else {
         return Ok(None);
     };
@@ -1344,6 +1422,8 @@ async fn try_ai_decide(
     let prompt = effective_ai_prompt(step);
     let vars = ctx.vars_snapshot();
     let decision = provider.decide(&vars, &prompt, model.as_deref()).await?;
+    let usage = provider.take_usage();
+    persist_ai_usage(ctx, &usage);
     tracing::info!(
         "step `{}`: AI decide → {} (confidence {:.2}) — {}",
         step.id,
@@ -1351,7 +1431,7 @@ async fn try_ai_decide(
         decision.confidence,
         decision.reasoning
     );
-    Ok(Some(decision))
+    Ok(Some((decision, usage)))
 }
 
 /// Attach an LLM diagnostic when `metadata.ai.diagnose_on_failure: true`.
@@ -1363,15 +1443,49 @@ async fn maybe_diagnose(ctx: &StepCtx, step: &Step, error: &str) -> Option<Strin
         return None;
     }
     let model = effective_ai_model(ctx, step);
-    match provider
+    let outcome = provider
         .diagnose(&step.id, &step.action, error, model.as_deref())
-        .await
-    {
+        .await;
+    // diagnose has no `_ai` trace of its own, but it still spent budget — book it.
+    persist_ai_usage(ctx, &provider.take_usage());
+    match outcome {
         Ok(s) if !s.trim().is_empty() => Some(s),
         Ok(_) => None,
         Err(e) => {
             tracing::warn!("diagnose for step `{}` failed: {}", step.id, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(input: u32, output: u32, latency_ms: i64, cost: i64) -> AiCallUsage {
+        AiCallUsage {
+            helper: "heal_selector".into(),
+            provider: "p".into(),
+            model: "m".into(),
+            input_tokens: input,
+            output_tokens: output,
+            latency_ms,
+            cost_usd_micro: cost,
+        }
+    }
+
+    #[test]
+    fn ai_usage_aggregate_is_none_without_calls() {
+        assert!(ai_usage_aggregate(&[]).is_none());
+    }
+
+    #[test]
+    fn ai_usage_aggregate_sums_tokens_latency_and_cost() {
+        let agg = ai_usage_aggregate(&[usage(10, 20, 5, 100), usage(1, 2, 3, 7)])
+            .expect("some usage folds into a trace object");
+        assert_eq!(agg["input_tokens"], 11);
+        assert_eq!(agg["output_tokens"], 22);
+        assert_eq!(agg["latency_ms"], 8);
+        assert_eq!(agg["cost_usd_micro"], 107);
     }
 }

@@ -11,17 +11,22 @@
 
 use crate::budget::RunBudget;
 use crate::{
-    provider::{ChatMessage, ChatRequest, ImageAttachment, Role},
+    cost::cost_micro,
+    provider::{ChatMessage, ChatRequest, ChatResponse, ImageAttachment, Role},
     router::AiRouter,
 };
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::Bytes;
-use lumo_core::ai_hook::{AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
+use lumo_core::ai_hook::{
+    AiCallUsage, AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark,
+};
 use lumo_core::error::StepError;
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Maximum size (in bytes) of a screenshot we will base64-encode and ship to a
 /// vision model. Guards against accidentally inlining a multi-megabyte image
@@ -40,6 +45,27 @@ fn guard_image_size(label: &str, len: usize) -> Result<(), StepError> {
     Ok(())
 }
 
+/// P1-4: build the metered [`AiCallUsage`] record for a completed hook chat
+/// round-trip. `helper` is the insertion-point name written to the
+/// `ai_calls.helper` column; the cost is derived from the resolved
+/// provider/model and the response token counts.
+fn usage_of(helper: &str, resp: &ChatResponse, latency_ms: i64) -> AiCallUsage {
+    AiCallUsage {
+        helper: helper.to_string(),
+        provider: resp.provider.clone(),
+        model: resp.model.clone(),
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        latency_ms,
+        cost_usd_micro: cost_micro(
+            &resp.provider,
+            &resp.model,
+            resp.input_tokens,
+            resp.output_tokens,
+        ),
+    }
+}
+
 /// Insertion point ①. Note: P0 sends only text context to the LLM;
 /// `screenshot_png` is accepted for future multimodal upgrades.
 pub async fn heal_selector(
@@ -50,7 +76,7 @@ pub async fn heal_selector(
     prompt: &str,
     page_dom_excerpt: Option<&str>,
     model: Option<&str>,
-) -> Result<HealedSelector, StepError> {
+) -> Result<(HealedSelector, AiCallUsage), StepError> {
     budget
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
@@ -71,10 +97,12 @@ pub async fn heal_selector(
         max_tokens: Some(800),
         messages: vec![ChatMessage::text(Role::User, user)],
     };
+    let t0 = Instant::now();
     let resp = router
         .chat(req)
         .await
         .map_err(|e| StepError::msg(format!("ai.heal_selector: {e}")))?;
+    let usage = usage_of("heal_selector", &resp, t0.elapsed().as_millis() as i64);
 
     #[derive(Deserialize)]
     struct Out {
@@ -93,13 +121,16 @@ pub async fn heal_selector(
             resp.content
         ))
     })?;
-    Ok(HealedSelector {
-        css: out.css.filter(|s| !s.is_empty()),
-        xpath: out.xpath.filter(|s| !s.is_empty()),
-        bbox: None,
-        confidence: out.confidence.clamp(0.0, 1.0),
-        reasoning: out.reasoning,
-    })
+    Ok((
+        HealedSelector {
+            css: out.css.filter(|s| !s.is_empty()),
+            xpath: out.xpath.filter(|s| !s.is_empty()),
+            bbox: None,
+            confidence: out.confidence.clamp(0.0, 1.0),
+            reasoning: out.reasoning,
+        },
+        usage,
+    ))
 }
 
 /// Insertion point ②. `target_description` is the prompt; `schema` (optional)
@@ -114,7 +145,7 @@ pub async fn extract_visual(
     page_text_excerpt: Option<&str>,
     schema: Option<&Value>,
     model: Option<&str>,
-) -> Result<Value, StepError> {
+) -> Result<(Value, AiCallUsage), StepError> {
     budget
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
@@ -153,16 +184,19 @@ pub async fn extract_visual(
         max_tokens: Some(1500),
         messages: vec![msg],
     };
+    let t0 = Instant::now();
     let resp = router
         .chat(req)
         .await
         .map_err(|e| StepError::msg(format!("ai.extract_visual: {e}")))?;
-    parse_json_loose(&resp.content).map_err(|e| {
+    let usage = usage_of("extract_visual", &resp, t0.elapsed().as_millis() as i64);
+    let value: Value = parse_json_loose(&resp.content).map_err(|e| {
         StepError::msg(format!(
             "ai.extract_visual parse: {e}; raw: {}",
             resp.content
         ))
-    })
+    })?;
+    Ok((value, usage))
 }
 
 /// Insertion point ③. Returns `Decision { result, confidence, reasoning }`.
@@ -172,7 +206,7 @@ pub async fn decide(
     vars_snapshot: &Value,
     prompt: &str,
     model: Option<&str>,
-) -> Result<Decision, StepError> {
+) -> Result<(Decision, AiCallUsage), StepError> {
     budget
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
@@ -193,10 +227,12 @@ pub async fn decide(
         max_tokens: Some(400),
         messages: vec![ChatMessage::text(Role::User, user)],
     };
+    let t0 = Instant::now();
     let resp = router
         .chat(req)
         .await
         .map_err(|e| StepError::msg(format!("ai.decide: {e}")))?;
+    let usage = usage_of("decide", &resp, t0.elapsed().as_millis() as i64);
 
     #[derive(Deserialize)]
     struct Out {
@@ -208,11 +244,14 @@ pub async fn decide(
     }
     let out: Out = parse_json_loose(&resp.content)
         .map_err(|e| StepError::msg(format!("ai.decide parse: {e}; raw: {}", resp.content)))?;
-    Ok(Decision {
-        result: out.result,
-        confidence: out.confidence.clamp(0.0, 1.0),
-        reasoning: out.reasoning,
-    })
+    Ok((
+        Decision {
+            result: out.result,
+            confidence: out.confidence.clamp(0.0, 1.0),
+            reasoning: out.reasoning,
+        },
+        usage,
+    ))
 }
 
 /// Insertion point ⑤ (S-11/S-12). Vision-LLM grounding. The browser
@@ -228,7 +267,7 @@ pub async fn vision_locate(
     target_description: &str,
     marks: &[SoMMark],
     model: Option<&str>,
-) -> Result<LocatedTarget, StepError> {
+) -> Result<(LocatedTarget, AiCallUsage), StepError> {
     budget
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
@@ -276,10 +315,12 @@ pub async fn vision_locate(
         max_tokens: Some(400),
         messages: vec![msg],
     };
+    let t0 = Instant::now();
     let resp = router
         .chat(req)
         .await
         .map_err(|e| StepError::msg(format!("ai.vision_locate: {e}")))?;
+    let usage = usage_of("vision_locate", &resp, t0.elapsed().as_millis() as i64);
 
     #[derive(Deserialize, Default)]
     struct Out {
@@ -320,12 +361,15 @@ pub async fn vision_locate(
         .filter(|n| *n >= 0)
         .map(|n| n as u32)
         .filter(|n| marks.iter().any(|m| m.index == *n));
-    Ok(LocatedTarget {
-        bbox,
-        mark_index,
-        confidence: out.confidence.clamp(0.0, 1.0),
-        reasoning: out.reasoning,
-    })
+    Ok((
+        LocatedTarget {
+            bbox,
+            mark_index,
+            confidence: out.confidence.clamp(0.0, 1.0),
+            reasoning: out.reasoning,
+        },
+        usage,
+    ))
 }
 
 /// Insertion point ④. LLM diagnostic appended to a final-failure error message
@@ -338,7 +382,7 @@ pub async fn diagnose(
     action: &str,
     error: &str,
     model: Option<&str>,
-) -> Result<String, StepError> {
+) -> Result<(String, AiCallUsage), StepError> {
     budget
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
@@ -355,11 +399,13 @@ pub async fn diagnose(
         max_tokens: Some(200),
         messages: vec![ChatMessage::text(Role::User, user)],
     };
+    let t0 = Instant::now();
     let resp = router
         .chat(req)
         .await
         .map_err(|e| StepError::msg(format!("ai.diagnose: {e}")))?;
-    Ok(resp.content.trim().to_string())
+    let usage = usage_of("diagnose", &resp, t0.elapsed().as_millis() as i64);
+    Ok((resp.content.trim().to_string(), usage))
 }
 
 /// `AiHookProvider` impl wrapping a shared `AiRouter` + per-run `RunBudget`.
@@ -367,15 +413,33 @@ pub async fn diagnose(
 pub struct AiHooks {
     pub router: Arc<AiRouter>,
     pub budget: RunBudget,
+    /// P1-4: per-call usage accumulated across hook dispatches. The VM drains
+    /// it with [`AiHookProvider::take_usage`] after each call to write
+    /// `ai_calls` ledger rows (it owns the run/step context the hooks lack).
+    ///
+    /// One run shares a single `AiHooks` (the VM holds an `Arc`), so under
+    /// `control.parallel` concurrent branches drain the same buffer: run-level
+    /// totals stay exact (no record is dropped or double-counted), but a
+    /// record's `step_id` may be attributed to a sibling branch's step.
+    usage: Mutex<Vec<AiCallUsage>>,
 }
 
 impl AiHooks {
     pub fn new(router: Arc<AiRouter>, budget: RunBudget) -> Self {
-        Self { router, budget }
+        Self {
+            router,
+            budget,
+            usage: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn budget(&self) -> &RunBudget {
         &self.budget
+    }
+
+    /// Record one metered hook call into the accumulator.
+    fn push_usage(&self, usage: AiCallUsage) {
+        self.usage.lock().push(usage);
     }
 }
 
@@ -409,7 +473,7 @@ impl AiHookProvider for AiHooks {
         page_dom_excerpt: Option<&str>,
         model: Option<&str>,
     ) -> Result<HealedSelector, StepError> {
-        heal_selector(
+        let (healed, usage) = heal_selector(
             &self.router,
             &self.budget,
             None,
@@ -418,7 +482,9 @@ impl AiHookProvider for AiHooks {
             page_dom_excerpt,
             model,
         )
-        .await
+        .await?;
+        self.push_usage(usage);
+        Ok(healed)
     }
 
     async fn extract_visual(
@@ -429,7 +495,7 @@ impl AiHookProvider for AiHooks {
         schema: Option<&Value>,
         model: Option<&str>,
     ) -> Result<Value, StepError> {
-        extract_visual(
+        let (value, usage) = extract_visual(
             &self.router,
             &self.budget,
             screenshot_png,
@@ -438,7 +504,9 @@ impl AiHookProvider for AiHooks {
             schema,
             model,
         )
-        .await
+        .await?;
+        self.push_usage(usage);
+        Ok(value)
     }
 
     async fn decide(
@@ -447,7 +515,10 @@ impl AiHookProvider for AiHooks {
         prompt: &str,
         model: Option<&str>,
     ) -> Result<Decision, StepError> {
-        decide(&self.router, &self.budget, vars_snapshot, prompt, model).await
+        let (decision, usage) =
+            decide(&self.router, &self.budget, vars_snapshot, prompt, model).await?;
+        self.push_usage(usage);
+        Ok(decision)
     }
 
     async fn diagnose(
@@ -457,7 +528,10 @@ impl AiHookProvider for AiHooks {
         error: &str,
         model: Option<&str>,
     ) -> Result<String, StepError> {
-        diagnose(&self.router, &self.budget, step_id, action, error, model).await
+        let (text, usage) =
+            diagnose(&self.router, &self.budget, step_id, action, error, model).await?;
+        self.push_usage(usage);
+        Ok(text)
     }
 
     async fn vision_locate(
@@ -467,7 +541,7 @@ impl AiHookProvider for AiHooks {
         marks: &[SoMMark],
         model: Option<&str>,
     ) -> Result<LocatedTarget, StepError> {
-        vision_locate(
+        let (target, usage) = vision_locate(
             &self.router,
             &self.budget,
             screenshot_png,
@@ -475,7 +549,13 @@ impl AiHookProvider for AiHooks {
             marks,
             model,
         )
-        .await
+        .await?;
+        self.push_usage(usage);
+        Ok(target)
+    }
+
+    fn take_usage(&self) -> Vec<AiCallUsage> {
+        std::mem::take(&mut *self.usage.lock())
     }
 }
 

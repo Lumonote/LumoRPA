@@ -4,6 +4,7 @@
 pub mod action;
 pub mod budget;
 pub mod config;
+pub(crate) mod cost;
 pub mod helpers;
 pub mod provider;
 pub mod router;

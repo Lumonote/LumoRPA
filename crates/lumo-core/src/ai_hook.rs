@@ -65,6 +65,26 @@ pub struct LocatedTarget {
     pub reasoning: String,
 }
 
+/// P1-4: one billable AI hook round-trip, surfaced so the VM can write an
+/// `ai_calls` ledger row (it owns the run/step context the hooks lack) and
+/// fold tokens/latency into the step's `_ai` trace. Providers accumulate these
+/// internally and hand them over via [`AiHookProvider::take_usage`].
+#[derive(Debug, Clone)]
+pub struct AiCallUsage {
+    /// Which insertion point made the call (`heal_selector`, `extract_visual`,
+    /// `decide`, `vision_locate`, `diagnose`) — mirrors the `ai_calls.helper`
+    /// column and the `ai.chat` action's `"chat"` tag.
+    pub helper: String,
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub latency_ms: i64,
+    /// Pre-computed cost in micro-USD (1_000_000 = $1). The provider derives it
+    /// from `provider`/`model`/tokens so the cost table can stay in `lumo-ai`.
+    pub cost_usd_micro: i64,
+}
+
 #[async_trait]
 pub trait AiHookProvider: Send + Sync {
     async fn heal_selector(
@@ -112,4 +132,13 @@ pub trait AiHookProvider: Send + Sync {
         marks: &[SoMMark],
         model: Option<&str>,
     ) -> Result<LocatedTarget, StepError>;
+
+    /// P1-4: drain and return the [`AiCallUsage`] records accumulated since the
+    /// last drain. The VM calls this right after each hook dispatch to write
+    /// `ai_calls` ledger rows and fold tokens/latency into the step's `_ai`
+    /// trace. The default returns nothing, so providers that don't meter their
+    /// calls (test stubs, future no-cost backends) opt out for free.
+    fn take_usage(&self) -> Vec<AiCallUsage> {
+        Vec::new()
+    }
 }
