@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, RunTeardown, StepCtx};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -27,6 +27,9 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(ClickAction);
     r.register(TypeAction);
     r.register(ExtractAction);
+    // P1-2: reclaim any browser process left open by a run that failed (or
+    // forgot `browser.close`) once the VM finishes that run.
+    r.register_teardown(Arc::new(BrowserTeardown));
 }
 
 // ─── Browser sessions ────────────────────────────────────────────────────────
@@ -34,8 +37,13 @@ pub fn register(r: &mut ActionRegistry) {
 // the same active page.
 
 struct Session {
-    browser: Browser,
-    _handler: JoinHandle<()>,
+    /// The Chrome handle. Behind a tokio mutex because the graceful close/reap
+    /// path (`close`/`wait`/`kill`) needs `&mut Browser` and is async — the
+    /// guard is held across `.await`, which a sync mutex can't do safely.
+    browser: tokio::sync::Mutex<Browser>,
+    /// CDP event-pump task. Kept so teardown can `abort()` it instead of
+    /// leaving it detached until the socket happens to close.
+    handler: Mutex<Option<JoinHandle<()>>>,
     page: Mutex<Option<Page>>,
 }
 
@@ -69,8 +77,8 @@ async fn ensure_session(run_id: &str, headless: bool) -> Result<Arc<Session>, St
         .map_err(|e| StepError::msg(format!("chrome launch: {e}")))?;
     let handle = tokio::spawn(async move { while let Some(_evt) = handler.next().await {} });
     let session = Arc::new(Session {
-        browser,
-        _handler: handle,
+        browser: tokio::sync::Mutex::new(browser),
+        handler: Mutex::new(Some(handle)),
         page: Mutex::new(None),
     });
     {
@@ -91,6 +99,59 @@ fn current_page(s: &Session) -> Result<Page, StepError> {
         .lock()
         .clone()
         .ok_or_else(|| StepError::msg("no browser page open; call `browser.open` first"))
+}
+
+// ─── session teardown (P1-2) ──────────────────────────────────────────────────
+
+/// Force-close and reap the browser session for `run_id`, aborting its CDP
+/// event-pump task. Idempotent — a no-op when no session exists. Called both by
+/// the explicit `browser.close` action and by the end-of-run teardown hook, so
+/// a flow that fails (or omits `browser.close`) can't orphan a headless Chrome.
+pub async fn close_run_sessions(run_id: &str) {
+    let removed = sessions().lock().remove(run_id);
+    if let Some(s) = removed {
+        teardown_session(s).await;
+    }
+}
+
+/// Whether a browser session is currently registered for `run_id`. Exposed for
+/// tests; not part of the action surface.
+#[doc(hidden)]
+pub fn session_exists(run_id: &str) -> bool {
+    sessions().lock().contains_key(run_id)
+}
+
+/// Drop the active page, gracefully close the Chrome process and reap it, then
+/// stop the event-pump task. Holds the last `Arc<Session>` so the `Browser` is
+/// dropped only after Chrome has actually exited.
+async fn teardown_session(s: Arc<Session>) {
+    // Release the active page handle first.
+    *s.page.lock() = None;
+    // Graceful CDP `Browser.close`, falling back to `kill` if that fails, then
+    // `wait` to reap the child so it can't linger as a zombie.
+    {
+        let mut browser = s.browser.lock().await;
+        if browser.close().await.is_err() {
+            let _ = browser.kill().await;
+        }
+        let _ = browser.wait().await;
+    }
+    // Stop the CDP event pump (take the handle out before aborting so the sync
+    // guard isn't held across anything).
+    let handle = s.handler.lock().take();
+    if let Some(h) = handle {
+        h.abort();
+    }
+}
+
+/// End-of-run hook: reclaims the browser session keyed by the finished run.
+struct BrowserTeardown;
+
+#[async_trait]
+impl RunTeardown for BrowserTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_sessions(run_id).await;
+    }
 }
 
 // ─── browser.launch ─────────────────────────────────────────────────────────
@@ -155,12 +216,9 @@ impl Action for CloseAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
-        let lock = sessions();
-        let mut g = lock.lock();
-        if let Some(s) = g.remove(ctx.run_id()) {
-            *s.page.lock() = None;
-            drop(s);
-        }
+        // Force-close and reap the session so the Chrome process is terminated,
+        // not just unlinked from the map (P1-2).
+        close_run_sessions(ctx.run_id()).await;
         Ok(ActionResult::null())
     }
 }
@@ -293,13 +351,16 @@ impl Action for OpenAction {
             .map_err(|e| StepError::msg(format!("browser.open input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
         let s = ensure_session(ctx.run_id(), headless).await?;
-        let page = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            s.browser.new_page(url.as_str()),
-        )
-        .await
-        .map_err(|_| StepError::msg(format!("timeout opening {url}")))?
-        .map_err(|e| StepError::msg(format!("new_page: {e}")))?;
+        let page = {
+            let browser = s.browser.lock().await;
+            tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                browser.new_page(url.as_str()),
+            )
+            .await
+            .map_err(|_| StepError::msg(format!("timeout opening {url}")))?
+            .map_err(|e| StepError::msg(format!("new_page: {e}")))?
+        };
         let _ = page.wait_for_navigation().await;
         if let Some(selector) = wait_for {
             tokio::time::timeout(

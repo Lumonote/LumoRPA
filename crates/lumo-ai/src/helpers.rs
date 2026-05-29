@@ -23,6 +23,23 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Maximum size (in bytes) of a screenshot we will base64-encode and ship to a
+/// vision model. Guards against accidentally inlining a multi-megabyte image
+/// into a prompt (provider rejection / cost blowups). 4 MiB.
+const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Reject screenshots larger than [`MAX_IMAGE_BYTES`] before encoding. The
+/// error names the actual vs max size so callers can downscale.
+fn guard_image_size(label: &str, len: usize) -> Result<(), StepError> {
+    if len > MAX_IMAGE_BYTES {
+        return Err(StepError::msg(format!(
+            "{label}: image too large ({len} bytes > max {MAX_IMAGE_BYTES} bytes / 4 MiB); \
+             downscale or crop the screenshot before sending to the vision model"
+        )));
+    }
+    Ok(())
+}
+
 /// Insertion point ①. Note: P0 sends only text context to the LLM;
 /// `screenshot_png` is accepted for future multimodal upgrades.
 pub async fn heal_selector(
@@ -123,6 +140,7 @@ pub async fn extract_visual(
 
     let mut msg = ChatMessage::text(Role::User, user);
     if let Some(png) = screenshot_png {
+        guard_image_size("ai.extract_visual", png.len())?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         msg.attachments
             .push(ImageAttachment::base64("image/png", b64));
@@ -215,6 +233,7 @@ pub async fn vision_locate(
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
 
+    guard_image_size("ai.vision_locate", screenshot_png.len())?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&screenshot_png);
     let attachment = ImageAttachment::base64("image/png", b64);
 
@@ -275,8 +294,20 @@ pub async fn vision_locate(
     }
     // Vision models occasionally hedge with prose; on parse failure return an
     // empty `LocatedTarget` so the caller falls through cleanly rather than
-    // exploding the run.
-    let out: Out = parse_json_loose(&resp.content).unwrap_or_default();
+    // exploding the run. Log the raw content first so the grounding path is
+    // debuggable (truncated to keep logs sane).
+    let out: Out = match parse_json_loose(&resp.content) {
+        Ok(v) => v,
+        Err(e) => {
+            let raw: String = resp.content.chars().take(500).collect();
+            tracing::warn!(
+                error = %e,
+                raw_truncated = %raw,
+                "ai.vision_locate: failed to parse vision output; returning empty target"
+            );
+            Out::default()
+        }
+    };
     let bbox = out.bbox.and_then(|v| {
         if v.len() == 4 {
             Some((v[0], v[1], v[2], v[3]))

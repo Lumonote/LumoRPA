@@ -14,6 +14,17 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{path::Path, sync::Arc};
 
+/// Highest schema version known to this build. `Repo::open` upgrades any DB
+/// whose `PRAGMA user_version` is below this, then stamps it to this value.
+///
+/// Migration history:
+///   0 -> 1: rebuild legacy `step_runs` (no `seq`/`path`/`depth` columns) into
+///           the path-aware layout. Was the hand-written `migrate_step_runs`.
+///           Runs before the baseline DDL so the latter's index on `path` lands
+///           on the rebuilt table (no-op for fresh DBs that have no step_runs).
+///   1 -> 2: baseline schema (CREATE TABLE IF NOT EXISTS via `schema::DDL`).
+pub const LATEST_USER_VERSION: i64 = 2;
+
 #[derive(Clone)]
 pub struct Repo {
     inner: Arc<Mutex<Connection>>,
@@ -25,8 +36,8 @@ impl Repo {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&path)?;
-        migrate_step_runs(&conn)?;
-        conn.execute_batch(schema::DDL)?;
+        init_connection(&conn)?;
+        run_migrations(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
@@ -34,11 +45,23 @@ impl Repo {
 
     pub fn open_in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()?;
-        migrate_step_runs(&conn)?;
-        conn.execute_batch(schema::DDL)?;
+        init_connection(&conn)?;
+        run_migrations(&conn)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Test/diagnostic escape hatch: run a closure against the raw connection.
+    /// Not part of the stable storage API; kept `#[doc(hidden)]` so it does not
+    /// invite call sites in other crates.
+    #[doc(hidden)]
+    pub fn with_raw<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, StorageError> {
+        let c = self.inner.lock();
+        Ok(f(&c)?)
     }
 
     // ─── flows ──────────────────────────────────────────────────────────────
@@ -347,7 +370,67 @@ fn row_to_step_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunRow> {
     })
 }
 
-fn migrate_step_runs(conn: &Connection) -> Result<(), StorageError> {
+/// Apply connection-scoped PRAGMAs that must hold for every connection,
+/// independent of the DDL batch. `busy_timeout` lets a second opener wait for
+/// the WAL writer instead of failing immediately with `SQLITE_BUSY`;
+/// `foreign_keys` is per-connection in SQLite and so cannot live only in the
+/// shared DDL string (it would not survive a future connection pool).
+fn init_connection(conn: &Connection) -> Result<(), StorageError> {
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    // `synchronous` is connection-scoped, so set it on every open (the DDL
+    // batch only runs during a migration). `journal_mode = WAL` is persisted in
+    // the DB header but re-asserting it here is cheap and keeps in-memory DBs
+    // consistent with file DBs.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(())
+}
+
+/// A single migration step: mutates the connection to reach a target version.
+type MigrationStep = fn(&Connection) -> Result<(), StorageError>;
+
+/// `PRAGMA user_version`-based migration runner. Reads the DB's current version,
+/// applies every step with `version > current` in order, then stamps the DB to
+/// the highest applied version. Fresh DBs start at 0 and get the full chain.
+fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current >= LATEST_USER_VERSION {
+        return Ok(());
+    }
+
+    // Ordered list of (target_version, step). Append new steps here; never
+    // renumber or mutate an already-shipped step. The legacy step_runs rebuild
+    // runs first so the baseline DDL's index on `path` lands on the rebuilt
+    // table; on fresh DBs the rebuild is a no-op (no step_runs table yet).
+    let steps: &[(i64, MigrationStep)] =
+        &[(1, migrate_v1_step_runs_paths), (2, migrate_v2_baseline)];
+
+    for &(version, step) in steps {
+        if version > current {
+            step(conn)?;
+        }
+    }
+
+    // PRAGMA user_version does not accept bound parameters; the value is a
+    // compile-time constant so formatting it is safe.
+    conn.execute_batch(&format!("PRAGMA user_version = {LATEST_USER_VERSION};"))?;
+    Ok(())
+}
+
+/// v1 -> v2: baseline schema. Idempotent (`CREATE TABLE IF NOT EXISTS`), so it
+/// is a no-op on DBs that predate versioning but already have the tables. Runs
+/// after the step_runs rebuild so its index on `path` finds the column.
+fn migrate_v2_baseline(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(schema::DDL)?;
+    Ok(())
+}
+
+/// v0 -> v1: rebuild a legacy `step_runs` table that lacks the `seq` column
+/// (and the path/depth/parent_path columns) into the path-aware layout. On DBs
+/// that already have `seq`, or have no step_runs table at all (fresh DB), this
+/// is a no-op. Formerly the standalone `migrate_step_runs` special case.
+fn migrate_v1_step_runs_paths(conn: &Connection) -> Result<(), StorageError> {
     let exists: Option<String> = conn
         .query_row(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='step_runs'",

@@ -157,6 +157,77 @@ fn http_client(timeout_ms: u64) -> Result<reqwest::Client, ProviderError> {
         .map_err(|e| ProviderError::Http(e.to_string()))
 }
 
+// ─── Transient-error retry ───────────────────────────────────────────────────
+//
+// Bounded exponential backoff applied to provider POSTs. Only HTTP 429 and 5xx
+// responses, plus transient reqwest send errors, are retried; all other 4xx
+// responses (and decode failures) are terminal. Up to `MAX_ATTEMPTS` attempts
+// total with sleeps of 200ms, 400ms, ... between them.
+
+const MAX_ATTEMPTS: u32 = 3;
+
+/// True for HTTP statuses we consider worth retrying (rate-limit + server-side).
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+/// Backoff before attempt `attempt` (1-indexed). attempt=1 is the first retry.
+fn backoff_delay(attempt: u32) -> Duration {
+    // 200ms, 400ms, 800ms, ...
+    Duration::from_millis(200u64 << (attempt - 1))
+}
+
+/// Drive `send` (a fresh request builder + send each call) with bounded
+/// exponential backoff, retrying only on retryable statuses or transient send
+/// errors. Returns the raw body bytes on a 2xx, or the terminal `ProviderError`.
+async fn send_with_retry<F, Fut>(mut send: F) -> Result<bytes::Bytes, ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let outcome = send().await;
+        let retryable_err;
+        match outcome {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| ProviderError::Http(e.to_string()))?;
+                if (200..300).contains(&status) {
+                    return Ok(bytes);
+                }
+                if is_retryable_status(status) && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(
+                        status,
+                        attempt,
+                        "provider returned retryable status; backing off"
+                    );
+                    tokio::time::sleep(backoff_delay(attempt)).await;
+                    continue;
+                }
+                return Err(ProviderError::Api {
+                    status,
+                    body: String::from_utf8_lossy(&bytes).to_string(),
+                });
+            }
+            Err(e) => {
+                // Treat timeouts/connect/request send errors as transient.
+                retryable_err = e.is_timeout() || e.is_connect() || e.is_request();
+                if retryable_err && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(error = %e, attempt, "transient send error; backing off");
+                    tokio::time::sleep(backoff_delay(attempt)).await;
+                    continue;
+                }
+                return Err(ProviderError::Http(e.to_string()));
+            }
+        }
+    }
+}
+
 // ─── OpenAI-compatible provider ─────────────────────────────────────────────
 //
 // Supports two wire APIs:
@@ -517,34 +588,24 @@ impl OpenAiProvider {
         body: &T,
     ) -> Result<bytes::Bytes, ProviderError> {
         let client = http_client(120_000)?;
-        let mut rb = client
-            .post(url)
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json");
-        for (k, v) in &self.extra_headers {
-            let kl = k.to_ascii_lowercase();
-            if matches!(kl.as_str(), "authorization" | "content-type") {
-                continue;
+        // Serialize the body once; reuse across retry attempts.
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| ProviderError::Other(format!("encode request: {e}")))?;
+        send_with_retry(|| {
+            let mut rb = client
+                .post(url)
+                .bearer_auth(api_key)
+                .header("Content-Type", "application/json");
+            for (k, v) in &self.extra_headers {
+                let kl = k.to_ascii_lowercase();
+                if matches!(kl.as_str(), "authorization" | "content-type") {
+                    continue;
+                }
+                rb = rb.header(k, v);
             }
-            rb = rb.header(k, v);
-        }
-        let resp = rb
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-        if !(200..300).contains(&status) {
-            return Err(ProviderError::Api {
-                status,
-                body: String::from_utf8_lossy(&bytes).to_string(),
-            });
-        }
-        Ok(bytes)
+            rb.body(body_bytes.clone()).send()
+        })
+        .await
     }
 }
 
@@ -751,49 +812,39 @@ impl LlmProvider for AnthropicProvider {
 
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let client = http_client(60_000)?;
-        let mut rb = client
-            .post(&url)
-            .header("anthropic-version", &self.anthropic_version)
-            .header("Content-Type", "application/json");
-        if let Some(beta) = &self.anthropic_beta {
-            rb = rb.header("anthropic-beta", beta);
-        }
-        rb = match self.auth {
-            AuthScheme::ApiKey => rb.header("x-api-key", api_key),
-            AuthScheme::Bearer => rb.bearer_auth(api_key),
-        };
-        for (k, v) in &self.extra_headers {
-            // Don't double-set headers we manage explicitly.
-            let kl = k.to_ascii_lowercase();
-            if matches!(
-                kl.as_str(),
-                "anthropic-version"
-                    | "anthropic-beta"
-                    | "x-api-key"
-                    | "authorization"
-                    | "content-type"
-                    | "auth"
-            ) {
-                continue;
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Other(format!("encode request: {e}")))?;
+        let bytes = send_with_retry(|| {
+            let mut rb = client
+                .post(&url)
+                .header("anthropic-version", &self.anthropic_version)
+                .header("Content-Type", "application/json");
+            if let Some(beta) = &self.anthropic_beta {
+                rb = rb.header("anthropic-beta", beta);
             }
-            rb = rb.header(k, v);
-        }
-        let resp = rb
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-        if !(200..300).contains(&status) {
-            return Err(ProviderError::Api {
-                status,
-                body: String::from_utf8_lossy(&bytes).to_string(),
-            });
-        }
+            rb = match self.auth {
+                AuthScheme::ApiKey => rb.header("x-api-key", &api_key),
+                AuthScheme::Bearer => rb.bearer_auth(&api_key),
+            };
+            for (k, v) in &self.extra_headers {
+                // Don't double-set headers we manage explicitly.
+                let kl = k.to_ascii_lowercase();
+                if matches!(
+                    kl.as_str(),
+                    "anthropic-version"
+                        | "anthropic-beta"
+                        | "x-api-key"
+                        | "authorization"
+                        | "content-type"
+                        | "auth"
+                ) {
+                    continue;
+                }
+                rb = rb.header(k, v);
+            }
+            rb.body(body_bytes.clone()).send()
+        })
+        .await?;
         let parsed: AntResp = serde_json::from_slice(&bytes)
             .map_err(|e| ProviderError::Other(format!("decode anthropic resp: {e}")))?;
         let mut content = String::new();

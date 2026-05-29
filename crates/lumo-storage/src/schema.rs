@@ -1,9 +1,8 @@
-/// Embedded DDL applied at first open. Idempotent (uses IF NOT EXISTS).
+/// Embedded baseline DDL applied by the v0->v1 migration step. Idempotent
+/// (uses IF NOT EXISTS). Connection-scoped PRAGMAs (journal_mode, synchronous,
+/// foreign_keys, busy_timeout) live in `repo::init_connection`, not here, so
+/// they are applied to every connection regardless of migration state.
 pub const DDL: &str = r#"
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS flows (
   id            TEXT NOT NULL,
   version       TEXT NOT NULL,

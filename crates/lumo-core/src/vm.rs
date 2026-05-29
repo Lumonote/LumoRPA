@@ -160,6 +160,15 @@ impl FlowVm {
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
 
+        // P1-2: reclaim run-scoped external resources (e.g. a launched browser
+        // process) whether the flow succeeded or failed. Action crates register
+        // teardown hooks; each is handed this run's id so it drops only its own
+        // state. Runs before the error is propagated below so a failing flow
+        // can't leak a headless Chrome.
+        for hook in self.registry.teardowns() {
+            hook.teardown(&run_id).await;
+        }
+
         let ok = result.is_ok();
         let outputs = if ok {
             Some(ctx.outputs_snapshot())
