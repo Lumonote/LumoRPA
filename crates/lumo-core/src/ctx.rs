@@ -27,6 +27,10 @@ pub struct StepCtx {
     artifacts_dir: Option<PathBuf>,
     ai_provider: Option<Arc<dyn AiHookProvider>>,
     flow_ai: Option<FlowAi>,
+    /// P0-5: how many `skill.invoke` levels deep this context is. The skill
+    /// action rejects invocations past a fixed ceiling to stop runaway / cyclic
+    /// recursion (stack overflow / OOM).
+    skill_depth: u32,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -83,6 +87,7 @@ impl StepCtx {
             artifacts_dir: None,
             ai_provider: None,
             flow_ai: None,
+            skill_depth: 0,
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs,
                 steps: Map::new(),
@@ -117,6 +122,23 @@ impl StepCtx {
 
     pub fn flow_ai(&self) -> Option<&FlowAi> {
         self.flow_ai.as_ref()
+    }
+
+    /// The capability sandbox in force for this context. Used by `skill.invoke`
+    /// to clamp a sub-flow's grants to the caller's (P0-5).
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    /// Current `skill.invoke` nesting depth (0 at the top level).
+    pub fn skill_depth(&self) -> u32 {
+        self.skill_depth
+    }
+
+    /// Seed the `skill.invoke` nesting depth (set by the VM from `FlowVm`).
+    pub fn with_skill_depth(mut self, depth: u32) -> Self {
+        self.skill_depth = depth;
+        self
     }
 
     pub fn template_ctx(&self) -> TemplateCtx {
@@ -394,12 +416,49 @@ fn ensure_path_allowed(kind: &str, path: &Path, grants: &[String]) -> Result<(),
 fn normalize_path(path: &Path) -> PathBuf {
     let expanded = expand_env_vars(&path.to_string_lossy());
     let p = PathBuf::from(expanded);
-    if p.is_absolute() {
+    let abs = if p.is_absolute() {
         p
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(p)
+    };
+    // P0-2: lexically resolve `.` / `..` BEFORE prefix matching so a grant of
+    // `/data/**` can't be escaped by `/data/../etc/passwd` (whose raw string
+    // still starts with `/data/`). We do NOT canonicalize symlinks here on
+    // purpose: canonicalizing the candidate but not the glob grant would break
+    // legitimate cases like macOS `/tmp` → `/private/tmp`. Lexical cleaning is
+    // the standard, footgun-free way to close the traversal hole.
+    lexical_clean(&abs)
+}
+
+/// Resolve `.` and `..` components without touching the filesystem. `..` pops
+/// the preceding normal component; a `..` that would climb past the root (or a
+/// leading `..` in a relative path) is preserved so it can never match a grant.
+fn lexical_clean(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) => { /* `..` at root is a no-op */ }
+                _ => out.push(comp),
+            },
+            other => out.push(other),
+        }
+    }
+    let mut buf = PathBuf::new();
+    for comp in out {
+        buf.push(comp.as_os_str());
+    }
+    if buf.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        buf
     }
 }
 
@@ -457,6 +516,57 @@ fn matches_mcp_tool(server: &str, tool: &str, grants: &[String]) -> bool {
             None => true,
             Some(pat) => pat == "*" || pat == tool || wildcard_match(tool, pat),
         }
+    })
+}
+
+/// P0-5: clamp a child (skill sub-flow) capability set to the caller's, so an
+/// invoked skill can never exceed the capabilities of the flow that called it.
+/// A child grant is kept only when the parent would also allow it; uncovered
+/// grants are dropped (the skill then hits `CapabilityDenied` if it tries to
+/// use them, exactly as if the caller lacked the grant). This is the
+/// privilege-escalation fix for `skill.invoke`.
+pub fn clamp_capabilities(child: &Capabilities, parent: &Capabilities) -> Capabilities {
+    Capabilities {
+        network: filter_covered(&child.network, |g| host_grant_covered(g, &parent.network)),
+        llm: filter_covered(&child.llm, |g| host_grant_covered(g, &parent.llm)),
+        mcp: filter_covered(&child.mcp, |g| mcp_grant_covered(g, &parent.mcp)),
+        fs_read: filter_covered(&child.fs_read, |g| path_grant_covered(g, &parent.fs_read)),
+        fs_write: filter_covered(&child.fs_write, |g| path_grant_covered(g, &parent.fs_write)),
+    }
+}
+
+fn filter_covered(grants: &[String], covered: impl Fn(&str) -> bool) -> Vec<String> {
+    grants.iter().filter(|g| covered(g)).cloned().collect()
+}
+
+/// A child host/llm grant is covered when the parent allow-list would match it
+/// (or its `*.`-stripped representative host).
+fn host_grant_covered(child: &str, parent: &[String]) -> bool {
+    let c = expand_env_vars(child);
+    let repr = c.trim_start_matches("*.");
+    matches_any(&c, parent) || matches_any(repr, parent)
+}
+
+/// A child MCP grant `server[:tool]` is covered when the parent allows that
+/// `(server, tool)` pair (a bare server means "all tools").
+fn mcp_grant_covered(child: &str, parent: &[String]) -> bool {
+    let c = expand_env_vars(child);
+    let (server, tool) = match c.split_once(':') {
+        Some((s, t)) => (s, t),
+        None => (c.as_str(), "*"),
+    };
+    matches_mcp_tool(server, tool, parent)
+}
+
+/// A child path grant is covered when its glob-stripped representative path
+/// matches some parent path grant.
+fn path_grant_covered(child: &str, parent: &[String]) -> bool {
+    let stripped = child.trim_end_matches("**").trim_end_matches('/');
+    let repr = if stripped.is_empty() { child } else { stripped };
+    let cand = normalize_path(Path::new(repr));
+    parent.iter().any(|p| {
+        let p = expand_env_vars(p);
+        p == "*" || p == "**" || path_matches(&cand, &p)
     })
 }
 
@@ -654,5 +764,88 @@ mod tests {
         // No record_step_output first → nothing to attach to.
         ctx.record_step_ai("ghost", serde_json::json!({ "used": true }));
         assert!(ctx.outputs_snapshot().get("ghost").is_none());
+    }
+
+    fn ctx_with_fs_read(grants: Vec<String>) -> StepCtx {
+        StepCtx::new(
+            "run".into(),
+            "flow".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            Capabilities {
+                fs_read: grants,
+                ..Default::default()
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn fs_read_denies_dotdot_escape_from_grant() {
+        // P0-2: a `..` segment must not let a path escape its grant root even
+        // though the raw string still starts with the granted prefix.
+        let ctx = ctx_with_fs_read(vec!["/data/**".into()]);
+        assert!(
+            ctx.ensure_fs_read(Path::new("/data/sub/f.txt")).is_ok(),
+            "paths inside the grant stay allowed"
+        );
+        assert!(
+            ctx.ensure_fs_read(Path::new("/data/../etc/passwd")).is_err(),
+            "`/data/../etc/passwd` resolves outside `/data/**` and must be denied"
+        );
+        assert!(
+            ctx.ensure_fs_read(Path::new("/data/sub/../../etc/passwd"))
+                .is_err(),
+            "deeper `..` escapes must also be denied"
+        );
+    }
+
+    #[test]
+    fn fs_read_allows_internal_dot_segments() {
+        // `.` and harmless `..` that stay within the grant must still pass.
+        let ctx = ctx_with_fs_read(vec!["/data/**".into()]);
+        assert!(ctx.ensure_fs_read(Path::new("/data/./a/b.txt")).is_ok());
+        assert!(ctx.ensure_fs_read(Path::new("/data/a/../b.txt")).is_ok());
+    }
+
+    #[test]
+    fn clamp_capabilities_drops_uncovered_child_grants() {
+        // P0-5: an invoked skill (child) can never exceed the caller (parent).
+        let parent = Capabilities {
+            fs_read: vec!["/data/**".into()],
+            network: vec!["api.example.com".into()],
+            ..Default::default()
+        };
+        let child = Capabilities {
+            fs_read: vec!["/data/sub/**".into(), "/etc/**".into()],
+            network: vec!["api.example.com".into(), "evil.com".into()],
+            fs_write: vec!["/tmp/**".into()],
+            ..Default::default()
+        };
+        let clamped = clamp_capabilities(&child, &parent);
+        // `/data/sub/**` ⊆ `/data/**` kept; `/etc/**` dropped.
+        assert_eq!(clamped.fs_read, vec!["/data/sub/**".to_string()]);
+        // `evil.com` dropped, declared `api.example.com` kept.
+        assert_eq!(clamped.network, vec!["api.example.com".to_string()]);
+        // Parent grants no fs_write, so the child gets none.
+        assert!(clamped.fs_write.is_empty());
+    }
+
+    #[test]
+    fn clamp_capabilities_wildcard_parent_keeps_child() {
+        let parent = Capabilities {
+            fs_read: vec!["**".into()],
+            network: vec!["*".into()],
+            ..Default::default()
+        };
+        let child = Capabilities {
+            fs_read: vec!["/anything/**".into()],
+            network: vec!["whatever.com".into()],
+            ..Default::default()
+        };
+        let clamped = clamp_capabilities(&child, &parent);
+        assert_eq!(clamped.fs_read, child.fs_read);
+        assert_eq!(clamped.network, child.network);
     }
 }

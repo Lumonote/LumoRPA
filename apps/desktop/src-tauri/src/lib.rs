@@ -994,7 +994,7 @@ fn set_window_alpha(app: AppHandle, options: WindowAlphaOptions) -> Result<(), S
 
 #[tauri::command]
 fn recorder_status(state: State<'_, DesktopState>) -> RecorderStatus {
-    let slot = state.recorder.lock().expect("recorder slot poisoned");
+    let slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
     match &slot.active {
         Some(session) => RecorderStatus {
             recording: true,
@@ -1046,7 +1046,7 @@ async fn recorder_start(
         }
     });
 
-    let mut slot = state.recorder.lock().expect("recorder slot poisoned");
+    let mut slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
     if slot.active.is_some() {
         // Race window guard. Tear down what we just started.
         forwarder.abort();
@@ -1068,7 +1068,7 @@ async fn recorder_start(
 #[tauri::command]
 async fn recorder_stop(state: State<'_, DesktopState>) -> Result<RecorderStopResult, String> {
     let session = {
-        let mut slot = state.recorder.lock().expect("recorder slot poisoned");
+        let mut slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
         slot.active.take()
     };
     let Some(mut session) = session else {

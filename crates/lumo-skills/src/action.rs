@@ -18,6 +18,10 @@ use std::sync::Arc;
 
 use crate::registry::SkillRegistry;
 
+/// Maximum `skill.invoke` nesting depth. Bounds runaway / cyclic recursion
+/// (a skill invoking itself) before it can overflow the stack (P0-5).
+const MAX_SKILL_DEPTH: u32 = 8;
+
 pub fn register_skill_actions(reg: &mut ActionRegistry, skills: Arc<SkillRegistry>) {
     reg.register(InvokeAction { skills });
 }
@@ -64,9 +68,26 @@ impl Action for InvokeAction {
             .get(&name)
             .ok_or_else(|| StepError::msg(format!("unknown skill `{name}`")))?;
 
+        // P0-5: bound recursion so a self-invoking / cyclic skill can't overflow
+        // the stack. `skill_depth` is seeded into each sub-flow's context.
+        let depth = ctx.skill_depth();
+        if depth >= MAX_SKILL_DEPTH {
+            return Err(StepError::msg(format!(
+                "skill.invoke recursion limit reached ({MAX_SKILL_DEPTH}); possible cyclic skill `{name}`"
+            )));
+        }
+
+        // P0-5: clamp the skill's declared capabilities to the caller's sandbox
+        // so an invoked skill can never perform actions the calling flow was not
+        // itself permitted to perform.
+        let clamped = lumo_core::clamp_capabilities(&skill.flow.spec.capabilities, ctx.capabilities());
+
         // Run the skill's flow with the *same* action registry — so any
-        // built-in / ai / skill actions stay available recursively.
-        let vm = FlowVm::new(ctx.registry.clone(), None);
+        // built-in / ai / skill actions stay available recursively — but with
+        // the depth bumped and capabilities clamped.
+        let vm = FlowVm::new(ctx.registry.clone(), None)
+            .with_skill_depth(depth + 1)
+            .with_capability_override(clamped);
         let report = vm
             .run(
                 &skill.flow,

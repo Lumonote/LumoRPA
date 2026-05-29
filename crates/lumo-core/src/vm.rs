@@ -18,7 +18,7 @@ use crate::{
     registry::ActionRegistry,
 };
 use chrono::Utc;
-use lumo_dsl::{AiMode, Flow, Step};
+use lumo_dsl::{AiMode, Capabilities, Flow, Step};
 use lumo_storage::{FlowRunRow, Repo, StepRunRow};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -66,6 +66,12 @@ pub struct FlowVm {
     registry: ActionRegistry,
     repo: Option<Repo>,
     ai_provider: Option<Arc<dyn AiHookProvider>>,
+    /// P0-5: nesting depth to seed into the run's `StepCtx`. Sub-flow runners
+    /// (`skill.invoke`) bump this so recursion can be bounded.
+    skill_depth: u32,
+    /// P0-5: when set, replaces `flow.spec.capabilities` for the run. Used by
+    /// `skill.invoke` to clamp a sub-flow to the caller's sandbox.
+    capability_override: Option<Capabilities>,
 }
 
 impl FlowVm {
@@ -74,6 +80,8 @@ impl FlowVm {
             registry,
             repo,
             ai_provider: None,
+            skill_depth: 0,
+            capability_override: None,
         }
     }
 
@@ -81,6 +89,19 @@ impl FlowVm {
     /// can activate selector heal / extract visual / decide fallbacks.
     pub fn with_ai_provider(mut self, provider: Arc<dyn AiHookProvider>) -> Self {
         self.ai_provider = Some(provider);
+        self
+    }
+
+    /// Seed the run's `skill.invoke` nesting depth (P0-5).
+    pub fn with_skill_depth(mut self, depth: u32) -> Self {
+        self.skill_depth = depth;
+        self
+    }
+
+    /// Override the run's capability sandbox (P0-5). `skill.invoke` passes the
+    /// caller's capabilities clamped to the skill's declared set.
+    pub fn with_capability_override(mut self, caps: Capabilities) -> Self {
+        self.capability_override = Some(caps);
         self
     }
 
@@ -128,10 +149,13 @@ impl FlowVm {
             self.registry.clone(),
             self.repo.clone(),
             inputs,
-            flow.spec.capabilities.clone(),
+            self.capability_override
+                .clone()
+                .unwrap_or_else(|| flow.spec.capabilities.clone()),
             flow.spec.vault.clone(),
         )
-        .with_ai(self.ai_provider.clone(), flow.metadata.ai.clone());
+        .with_ai(self.ai_provider.clone(), flow.metadata.ai.clone())
+        .with_skill_depth(self.skill_depth);
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;

@@ -89,6 +89,12 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
             println!("outputs: {}", serde_json::to_string_pretty(&out)?);
         }
     }
+    // P1-6: surface flow failure as a non-zero exit code so CI / cron / shell
+    // wrappers can detect it. The report line above already printed
+    // `state=failed`, so exit quietly without an extra error message.
+    if !report.success {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
