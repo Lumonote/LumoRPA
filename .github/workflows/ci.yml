@@ -35,8 +35,12 @@ jobs:
           # Don't try to launch Chrome on CI machines.
           LUMO_SKIP_BROWSER_TESTS: "1"
         run: cargo test --workspace --locked --exclude lumo-actions -- --nocapture
-      - name: Test (lumo-actions, non-browser modules)
-        run: cargo test -p lumo-actions --locked --lib -- --nocapture
+      - name: Test (lumo-actions, incl. integration suites)
+        env:
+          # The one browser-dependent test is #[ignore]'d; this keeps any
+          # future opt-in browser test from trying to launch Chrome on CI.
+          LUMO_SKIP_BROWSER_TESTS: "1"
+        run: cargo test -p lumo-actions --locked -- --nocapture
       - name: CLI smoke
         shell: bash
         run: |
@@ -59,3 +63,33 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  coverage:
+    name: coverage floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Browser/vision/selector actions need a real Chrome, the recorder drives
+      # CDP, and the Tauri shell needs system webkit libs — none are reachable on
+      # CI, so they're kept out of the coverage denominator. `--summary-only`
+      # prints the real per-crate + TOTAL table; `--fail-under-lines` is a
+      # deliberately-conservative ratchet (raise it toward the printed TOTAL as
+      # coverage grows, never lower it).
+      - name: Coverage floor (lib + integration, browser excluded)
+        env:
+          LUMO_SKIP_BROWSER_TESTS: "1"
+        run: |
+          cargo llvm-cov --workspace --locked \
+            --exclude lumorpa-desktop \
+            --ignore-filename-regex '(browser|vision|selectors)\.rs$|lumo-recorder/src' \
+            --fail-under-lines 50 \
+            --summary-only
