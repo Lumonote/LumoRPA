@@ -47,6 +47,10 @@ pub fn render(input: &Json, ctx: &TemplateCtx) -> Result<Json, TemplateError> {
 fn build_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.set_keep_trailing_newline(false);
+    // P1-10: undefined variables (`{{ missing }}`) must raise a render error
+    // instead of silently producing an empty string. SemiStrict (not Strict)
+    // keeps `{{ x is defined }}` and `default(...)` guards usable.
+    env.set_undefined_behavior(minijinja::UndefinedBehavior::SemiStrict);
     // Re-register `tojson` defensively so flows don't break across minijinja
     // versions / feature-flag matrices. `add_filter` overrides any builtin.
     env.add_filter(
@@ -142,7 +146,8 @@ fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
 }
 
 /// Walk `path` against the template context's namespaces. The first segment
-/// must be one of: `inputs`, `steps`, `vars`, `env`, `row`, `item`, `index`.
+/// is one of the reserved roots (`inputs`/`steps`/`vars`/`env`) or any loop
+/// binding name (`row`/`item`/`index` or a custom `bind:` like `n`).
 fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
     if path.is_empty() {
         return None;
@@ -153,10 +158,10 @@ fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
         "steps" => ctx.steps.clone(),
         "vars" => ctx.vars.clone(),
         "env" => ctx.env.clone(),
-        "row" => ctx.bindings.get("row").cloned().unwrap_or(Json::Null),
-        "item" => ctx.bindings.get("item").cloned().unwrap_or(Json::Null),
-        "index" => ctx.bindings.get("index").cloned().unwrap_or(Json::Null),
-        _ => return None,
+        // Any other head may be a loop binding (row/item/index or a custom
+        // `bind:` name). Resolve it from bindings; unknown heads fall through
+        // to minijinja (which errors under SemiStrict for truly-undefined vars).
+        other => ctx.bindings.get(other).cloned()?,
     };
     let mut cur = root;
     for seg in &path[1..] {
@@ -172,16 +177,20 @@ fn render_string(env: &Environment, src: &str, ctx: &TemplateCtx) -> Result<Stri
     // Replace vault placeholders BEFORE rendering so they survive untouched.
     // i.e. `{{ vault.smtp.user }}` -> literal `${{ vault.smtp.user }}` token.
     let pre = preprocess_vault(src, &ctx.vault);
-    let tmpl_ctx = Value::from_serialize(serde_json::json!({
-        "inputs": ctx.inputs,
-        "steps":  ctx.steps,
-        "vars":   ctx.vars,
-        "env":    ctx.env,
-        // Loop bindings: merge as top-level for convenience: `{{ row.x }}`
-        "row":    ctx.bindings.get("row").cloned().unwrap_or(Json::Null),
-        "item":   ctx.bindings.get("item").cloned().unwrap_or(Json::Null),
-        "index":  ctx.bindings.get("index").cloned().unwrap_or(Json::Null),
-    }));
+    // Build the render scope: every loop binding (row/item/index AND any custom
+    // `bind:` name) is exposed as a top-level name, then the reserved
+    // namespaces are layered on last so they can never be shadowed by a bind.
+    let mut root = serde_json::Map::new();
+    if let Json::Object(binds) = &ctx.bindings {
+        for (k, v) in binds {
+            root.insert(k.clone(), v.clone());
+        }
+    }
+    root.insert("inputs".into(), ctx.inputs.clone());
+    root.insert("steps".into(), ctx.steps.clone());
+    root.insert("vars".into(), ctx.vars.clone());
+    root.insert("env".into(), ctx.env.clone());
+    let tmpl_ctx = Value::from_serialize(Json::Object(root));
     let rendered = Arc::new(env).template_from_str(&pre)?.render(tmpl_ctx)?;
     Ok(rendered)
 }
@@ -194,4 +203,38 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
     // Real implementation in M2 will use a proper Jinja AST walk.
     src.replace("{{ vault.", "${{ vault.")
         .replace("{{vault.", "${{vault.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_loop_binding_resolves_as_bare_name() {
+        // P1-10 regression: a custom for_each `bind:` name (here `n`) must
+        // resolve as a bare `{{ n }}`. Before, render only surfaced the
+        // hard-coded row/item/index binds, so `{{ n }}` silently rendered ""
+        // (and errors outright under SemiStrict). row/index must still work.
+        let ctx = TemplateCtx {
+            bindings: serde_json::json!({ "n": "hello", "row": "hello", "index": 2 }),
+            ..Default::default()
+        };
+        let out = render(
+            &Json::String("n={{ n }} row={{ row }} i={{ index }}".into()),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out, Json::String("n=hello row=hello i=2".into()));
+    }
+
+    #[test]
+    fn bare_custom_binding_single_expr_resolves() {
+        // The pure-lookup fast path must also resolve a custom bind name.
+        let ctx = TemplateCtx {
+            bindings: serde_json::json!({ "n": "solo" }),
+            ..Default::default()
+        };
+        let out = render(&Json::String("{{ n }}".into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("solo".into()));
+    }
 }

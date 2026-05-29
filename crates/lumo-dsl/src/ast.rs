@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Flow {
     #[serde(rename = "apiVersion")]
     pub api_version: String,
@@ -30,6 +31,7 @@ pub struct Flow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub id: String,
     #[serde(default = "default_version")]
@@ -51,6 +53,7 @@ fn default_version() -> String {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowSpec {
     #[serde(default)]
     pub inputs: Vec<IoDecl>,
@@ -69,6 +72,7 @@ pub struct FlowSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IoDecl {
     pub name: String,
     #[serde(rename = "type", default = "default_type")]
@@ -86,6 +90,7 @@ fn default_type() -> String {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Capabilities {
     #[serde(default)]
     pub network: Vec<String>,
@@ -100,6 +105,7 @@ pub struct Capabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Trigger {
     pub kind: String,
     #[serde(default)]
@@ -107,6 +113,7 @@ pub struct Trigger {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
     pub id: String,
     pub action: String,
@@ -164,6 +171,7 @@ impl Step {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetrySpec {
     #[serde(default = "default_retry_times")]
     pub times: u32,
@@ -187,6 +195,7 @@ fn default_initial_delay() -> u64 {
 
 /// Per-step AI augmentation policy. Absent ⇒ `mode: off`, fully back-compat.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepAi {
     #[serde(default)]
     pub mode: AiMode,
@@ -215,6 +224,7 @@ pub enum AiMode {
 
 /// Flow-level AI policy. Absent ⇒ all defaults; nodes with `ai: { mode: off }` still skip AI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowAi {
     /// Master switch. `false` ⇒ ignore all step-level `ai.mode`.
     #[serde(default = "default_flow_ai_enabled")]
@@ -245,6 +255,7 @@ fn default_flow_ai_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiBudget {
     #[serde(default = "default_max_calls_per_run")]
     pub max_calls_per_run: u32,
