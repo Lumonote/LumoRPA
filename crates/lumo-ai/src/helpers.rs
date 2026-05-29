@@ -86,11 +86,13 @@ pub async fn heal_selector(
 }
 
 /// Insertion point ②. `target_description` is the prompt; `schema` (optional)
-/// shapes the expected JSON; P0 sends text-only (no image).
+/// shapes the expected JSON. When `screenshot_png` is supplied the page image
+/// is attached so the model can *see* the layout (true multimodal extraction);
+/// otherwise it falls back to text-only using `page_text_excerpt`.
 pub async fn extract_visual(
     router: &AiRouter,
     budget: &RunBudget,
-    _screenshot_png: Option<Bytes>,
+    screenshot_png: Option<Bytes>,
     target_description: &str,
     page_text_excerpt: Option<&str>,
     schema: Option<&Value>,
@@ -100,8 +102,14 @@ pub async fn extract_visual(
         .consume()
         .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
 
-    let system_base = "You are an RPA extraction assistant. Given a target description and the page \
-                       contents, return ONLY the extracted value as STRICT JSON (no Markdown fences).";
+    let has_image = screenshot_png.is_some();
+    let system_base = if has_image {
+        "You are an RPA extraction assistant. Look at the attached screenshot of \
+         the page and return ONLY the extracted value as STRICT JSON (no Markdown fences)."
+    } else {
+        "You are an RPA extraction assistant. Given a target description and the page \
+         contents, return ONLY the extracted value as STRICT JSON (no Markdown fences)."
+    };
     let system = if let Some(s) = schema {
         format!("{system_base}\n\nReturn an object matching this JSON schema:\n{s}")
     } else {
@@ -113,12 +121,19 @@ pub async fn extract_visual(
         user.push_str(&format!("\nPage text excerpt:\n{excerpt}\n"));
     }
 
+    let mut msg = ChatMessage::text(Role::User, user);
+    if let Some(png) = screenshot_png {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        msg.attachments
+            .push(ImageAttachment::base64("image/png", b64));
+    }
+
     let req = ChatRequest {
         model: model.unwrap_or("").to_string(),
         system: Some(system),
         temperature: Some(0.0),
         max_tokens: Some(1500),
-        messages: vec![ChatMessage::text(Role::User, user)],
+        messages: vec![msg],
     };
     let resp = router
         .chat(req)
@@ -356,6 +371,7 @@ impl AiHookProvider for AiHooks {
 
     async fn extract_visual(
         &self,
+        screenshot_png: Option<Bytes>,
         target_description: &str,
         page_text_excerpt: Option<&str>,
         schema: Option<&Value>,
@@ -364,7 +380,7 @@ impl AiHookProvider for AiHooks {
         extract_visual(
             &self.router,
             &self.budget,
-            None,
+            screenshot_png,
             target_description,
             page_text_excerpt,
             schema,

@@ -545,6 +545,15 @@ impl Action for ExtractAction {
         let s = session_for_run(_ctx.run_id())?;
         let page = current_page(&s)?;
 
+        // On any extraction failure, stash a page screenshot so the VM's
+        // `extract_visual` AI hook (step.ai.mode: fallback/primary) can pass it
+        // to a vision model for true multimodal extraction.
+        async fn stash_on_extract_fail(ctx: &StepCtx, page: &chromiumoxide::Page) {
+            if let Ok(png) = crate::vision::screenshot_png(page).await {
+                ctx.stash_screenshot(png);
+            }
+        }
+
         // Build a JS function returning the extracted JSON shape, then evaluate.
         let map_json = serde_json::to_string(&map.unwrap_or_default()).unwrap_or("{}".into());
         let attr_json = serde_json::to_string(&attr).unwrap_or("null".into());
@@ -584,14 +593,24 @@ impl Action for ExtractAction {
             attr = attr_json
         );
 
-        let result: Value =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js))
-                .await
-                .map_err(|_| StepError::ExtractFailed(format!("timeout extracting `{selector}`")))?
-                .map_err(|e| StepError::ExtractFailed(format!("extract eval `{selector}`: {e}")))?
-                .into_value()
-                .unwrap_or(Value::Null);
+        let eval = tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js)).await;
+        let result: Value = match eval {
+            Err(_) => {
+                stash_on_extract_fail(_ctx, &page).await;
+                return Err(StepError::ExtractFailed(format!(
+                    "timeout extracting `{selector}`"
+                )));
+            }
+            Ok(Err(e)) => {
+                stash_on_extract_fail(_ctx, &page).await;
+                return Err(StepError::ExtractFailed(format!(
+                    "extract eval `{selector}`: {e}"
+                )));
+            }
+            Ok(Ok(v)) => v.into_value().unwrap_or(Value::Null),
+        };
         if result.is_null() {
+            stash_on_extract_fail(_ctx, &page).await;
             return Err(StepError::ExtractFailed(format!(
                 "selector `{selector}` matched no element"
             )));
@@ -599,6 +618,7 @@ impl Action for ExtractAction {
         if all {
             if let Value::Array(a) = &result {
                 if a.is_empty() {
+                    stash_on_extract_fail(_ctx, &page).await;
                     return Err(StepError::ExtractFailed(format!(
                         "selector `{selector}` matched no elements"
                     )));

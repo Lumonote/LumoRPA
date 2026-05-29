@@ -77,6 +77,7 @@ pub trait AiHookProvider: Send + Sync {
 
     async fn extract_visual(
         &self,
+        screenshot_png: Option<Bytes>,
         target_description: &str,
         page_text_excerpt: Option<&str>,
         schema: Option<&Value>,

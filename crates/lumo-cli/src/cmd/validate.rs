@@ -103,8 +103,17 @@ fn validate_schema(
     schema: &serde_json::Value,
 ) -> anyhow::Result<()> {
     if schema.get("type").and_then(serde_json::Value::as_str) == Some("object") {
-        let Some(input_obj) = input.as_object() else {
-            anyhow::bail!("step `{step_id}` action `{action_id}` with: must be an object");
+        // An absent `with:` (e.g. control-flow steps like `control.parallel`
+        // that carry their config in `branches:`) deserializes to Null. Treat
+        // it as an empty object so it validates cleanly when the schema has no
+        // required properties; a genuinely non-object `with` still errors.
+        let empty = serde_json::Map::new();
+        let input_obj = match input {
+            serde_json::Value::Null => &empty,
+            serde_json::Value::Object(map) => map,
+            _ => anyhow::bail!(
+                "step `{step_id}` action `{action_id}` with: must be an object"
+            ),
         };
         if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
             for key in required.iter().filter_map(serde_json::Value::as_str) {
@@ -200,4 +209,41 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
 
 fn is_template_string(s: &str) -> bool {
     s.contains("{{") || s.contains("{%")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_schema;
+    use serde_json::json;
+
+    fn object_schema() -> serde_json::Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": true })
+    }
+
+    #[test]
+    fn absent_with_is_valid_against_object_schema() {
+        // control.parallel & friends carry config in `branches:`, so `with`
+        // deserializes to Null — that must validate cleanly.
+        assert!(validate_schema("s", "control.parallel", &json!(null), &object_schema()).is_ok());
+    }
+
+    #[test]
+    fn empty_object_with_is_valid() {
+        assert!(validate_schema("s", "control.close", &json!({}), &object_schema()).is_ok());
+    }
+
+    #[test]
+    fn non_object_with_still_errors() {
+        // A scalar `with:` is still a real authoring mistake and must be caught.
+        let err = validate_schema("s", "browser.open", &json!("oops"), &object_schema());
+        assert!(err.is_err(), "scalar with should be rejected");
+        let err2 = validate_schema("s", "browser.open", &json!(["a"]), &object_schema());
+        assert!(err2.is_err(), "array with should be rejected");
+    }
+
+    #[test]
+    fn missing_required_key_errors_even_when_absent() {
+        let schema = json!({ "type": "object", "properties": { "url": {} }, "required": ["url"] });
+        assert!(validate_schema("s", "browser.open", &json!(null), &schema).is_err());
+    }
 }

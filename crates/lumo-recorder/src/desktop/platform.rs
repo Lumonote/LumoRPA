@@ -21,7 +21,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
 pub fn default_backend() -> Arc<dyn Backend> {
     #[cfg(target_os = "macos")]
     {
-        return Arc::new(macos::MacOsBackend::new());
+        Arc::new(macos::MacOsBackend::new())
     }
     #[cfg(target_os = "windows")]
     {

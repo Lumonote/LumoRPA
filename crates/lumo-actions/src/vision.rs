@@ -125,7 +125,9 @@ pub async fn resolve_via_vision(
 
 // ─── Screenshot ─────────────────────────────────────────────────────────
 
-async fn screenshot_png(page: &Page) -> Result<Bytes, StepError> {
+/// Capture a full-page PNG screenshot. Public so non-vision callers (e.g.
+/// `browser.extract`) can stash a frame for the `extract_visual` AI hook.
+pub async fn screenshot_png(page: &Page) -> Result<Bytes, StepError> {
     let params = CaptureScreenshotParams::builder()
         .format(CaptureScreenshotFormat::Png)
         .build();

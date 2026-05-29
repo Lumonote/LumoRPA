@@ -10,7 +10,7 @@
 //!   * `desktop.focus_changed` — the user switched windows;
 //!   * `desktop.app_changed`   — the user switched apps;
 //!   * `desktop.focus_field`   — the focused control changed inside the
-//!                                same window (typing focus moved).
+//!     same window (typing focus moved).
 //! - A heartbeat is emitted every 5 s so Studio can confirm the recorder
 //!   is alive even when the user is idle.
 //!

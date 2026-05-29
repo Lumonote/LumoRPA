@@ -312,7 +312,7 @@ pub async fn dispatch_loop(
 pub fn default_hub() -> Arc<dyn Hub> {
     #[cfg(feature = "hotkey-rdev")]
     {
-        return Arc::new(rdev_backend::RdevHub::start());
+        Arc::new(rdev_backend::RdevHub::start())
     }
     #[cfg(not(feature = "hotkey-rdev"))]
     {

@@ -1294,6 +1294,11 @@ function renderTreeList(list, parentPath) {
 
 const AI_MODES = ["off", "fallback", "primary"];
 const AI_LABEL = { off: "AI 关", fallback: "AI 兜底", primary: "AI 主导" };
+const AI_HELPER_LABEL = {
+  heal_selector: "选择器自愈",
+  extract_visual: "视觉抽取",
+  decide: "语义决策",
+};
 
 function renderStepList() {
   const root = $("stepList");
@@ -2137,12 +2142,39 @@ function handleRunError(error) {
 function onRunComplete(response) {
   state.activeRun = response.run;
   state.activeRunSteps = response.steps || [];
+  // The run report's `outputs` is the full steps snapshot ({ "<id>": { result,
+  // _ai? } }). Stash the per-step `_ai` traces so the timeline can show which
+  // steps were rescued/decided by AI (purple "AI heal" badge).
+  state.activeRunAi = collectAiTraces(response.report.outputs);
   $("outputBox").textContent = pretty({ runId: response.report.runId, outputs: response.report.outputs });
   $("timelineLabel").textContent = `${response.report.runId.slice(0, 14)}… · ${response.report.durationMs}ms`;
   $("timelineCounts").textContent = `${response.report.stepsOk}/${response.report.stepsTotal} 成功 · ${response.report.stepsFailed} 失败`;
   loadArtifacts(response.report.runId).finally(renderTimeline);
   setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
   switchRightSection("outputs");
+}
+
+// Walk a steps-snapshot value and collect `{ stepId: _ai }` for every step
+// whose output carries an `_ai.used` trace. Tolerates `null`/non-object input.
+function collectAiTraces(outputs) {
+  const traces = {};
+  if (!outputs || typeof outputs !== "object") return traces;
+  for (const [id, entry] of Object.entries(outputs)) {
+    if (entry && typeof entry === "object" && entry._ai && entry._ai.used) {
+      traces[id] = entry._ai;
+    }
+  }
+  return traces;
+}
+
+// Resolve the `_ai` trace for a timeline step. step_runs paths look like
+// `loop/item.3/click`; the snapshot is keyed by bare step id, so match on the
+// final path segment as well as state === "ai_healed".
+function aiTraceForStep(step) {
+  if (!step) return null;
+  const traces = state.activeRunAi || {};
+  const leaf = String(step.path || step.stepId || "").split("/").pop();
+  return traces[step.stepId] || traces[leaf] || null;
 }
 
 // X-07 Time-Travel: pull the run's blob artifacts (screenshots / DOM / HAR) so
@@ -2195,8 +2227,13 @@ function renderTimeline() {
     .map((s, idx) => {
       const w = Math.max(20, ((s.durationMs || 1) / max) * 100);
       const left = ((idx / Math.max(1, steps.length - 1)) * (100 - 8));
-      const klass = s.state === "failed" ? "is-failed" : s.state === "skipped" ? "is-skipped" : "";
-      return `<div class="timeline-step ${klass}" data-idx="${idx}" style="left: ${left}%; width: ${Math.min(8, 100 - left)}%" title="${html(s.path)} · ${s.state}"></div>`;
+      const aiHealed = s.state === "ai_healed" || !!aiTraceForStep(s);
+      const klass = [
+        s.state === "failed" ? "is-failed" : s.state === "skipped" ? "is-skipped" : "",
+        aiHealed ? "is-ai" : "",
+      ].filter(Boolean).join(" ");
+      const titleAi = aiHealed ? " · ✨ AI" : "";
+      return `<div class="timeline-step ${klass}" data-idx="${idx}" style="left: ${left}%; width: ${Math.min(8, 100 - left)}%" title="${html(s.path)} · ${s.state}${titleAi}"></div>`;
     })
     .join("");
   track.querySelectorAll(".timeline-step").forEach((el) => {
@@ -2211,10 +2248,25 @@ function showStepDetail(idx) {
   state.activeStepRun = step;
   $$(".timeline-step").forEach((el, i) => el.classList.toggle("is-active", i === idx));
   const art = artifactForStep(step);
+  const aiTrace = aiTraceForStep(step);
+  const aiBadge = aiTrace
+    ? `<div class="kv"><span>AI</span><strong class="ai-heal-badge">✨ ${html(AI_HELPER_LABEL[aiTrace.helper] || aiTrace.helper || "AI heal")}${
+        typeof aiTrace.confidence === "number" ? ` · ${(aiTrace.confidence * 100).toFixed(0)}%` : ""
+      }</strong></div>${
+        aiTrace.healed_selector
+          ? `<div class="kv"><span>新选择器</span><strong>${html(aiTrace.healed_selector)}</strong></div>`
+          : ""
+      }${
+        aiTrace.reasoning
+          ? `<div class="kv"><span>AI 理由</span><strong style="font-weight: 400">${html(aiTrace.reasoning)}</strong></div>`
+          : ""
+      }`
+    : "";
   $("timelineDetail").innerHTML = `
     <div class="kv"><span>节点</span><strong>${html(step.path)}</strong></div>
     <div class="kv"><span>状态</span><strong style="color: ${step.state === "failed" ? "var(--bad)" : "var(--ok)"}">${html(step.state)}</strong></div>
     <div class="kv"><span>耗时</span><strong>${html(step.durationMs ?? 0)} ms</strong></div>
+    ${aiBadge}
     ${step.error ? `<div class="kv"><span>错误</span><strong style="color: var(--bad)">${html(step.error)}</strong></div>` : ""}
     ${art ? `<div class="timeline-screenshot" id="timelineShot"><div class="shot-loading">加载快照…</div></div>` : ""}
     ${step.outputJson ? `<pre>${html(pretty(step.outputJson))}</pre>` : ""}

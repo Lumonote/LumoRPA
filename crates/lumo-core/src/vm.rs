@@ -374,9 +374,10 @@ async fn execute_step(
                     );
                 if try_ai {
                     match try_ai_recovery(ctx, step, &action, &action_input, &e).await {
-                        Ok(Some(result)) => {
+                        Ok(Some((result, ai_trace))) => {
                             let now = Utc::now();
                             ctx.record_step_output(&step.id, &result.output);
+                            ctx.record_step_ai(&step.id, ai_trace);
                             if let Some(bind) = &step.bind {
                                 ctx.set_var(bind, result.output.clone());
                             }
@@ -464,15 +465,28 @@ async fn run_if(
     let ai_mode = effective_ai_mode(ctx, step);
     let need_ai = matches!(ai_mode, AiMode::Primary)
         || (matches!(ai_mode, AiMode::Fallback) && cond.is_null());
+    let mut ai_trace: Option<Value> = None;
     let truthy = if need_ai {
         match try_ai_decide(ctx, step).await {
-            Ok(Some(b)) => b,
+            Ok(Some(decision)) => {
+                ai_trace = Some(serde_json::json!({
+                    "used": true,
+                    "helper": "decide",
+                    "model": effective_ai_model(ctx, step),
+                    "confidence": decision.confidence,
+                    "reasoning": decision.reasoning,
+                }));
+                decision.result
+            }
             _ => is_truthy(&cond),
         }
     } else {
         is_truthy(&cond)
     };
     ctx.record_step_output(&step.id, &Value::Bool(truthy));
+    if let Some(trace) = ai_trace {
+        ctx.record_step_ai(&step.id, trace);
+    }
     let result = if truthy {
         if let Some(body) = &step.do_ {
             run_block_boxed(ctx, body, Some(format!("{path}/do")), depth + 1).await
@@ -1053,14 +1067,16 @@ fn effective_ai_prompt(step: &Step) -> String {
 
 /// Map a failed action error onto an AI helper and (where applicable) re-run
 /// the deterministic action with the AI-suggested input. Returns
-/// `Ok(Some(result))` if AI produced a usable outcome.
+/// `Ok(Some((result, ai_trace)))` if AI produced a usable outcome, where
+/// `ai_trace` is the runtime-only `_ai` metadata recorded next to the step's
+/// `result` (helper name, confidence, healed selector, …).
 async fn try_ai_recovery(
     ctx: &mut StepCtx,
     step: &Step,
     action: &ActionRef,
     action_input: &Value,
     error: &StepError,
-) -> Result<Option<ActionResult>, StepError> {
+) -> Result<Option<(ActionResult, Value)>, StepError> {
     let Some(provider) = ctx.ai_provider().cloned() else {
         return Ok(None);
     };
@@ -1088,10 +1104,17 @@ async fn try_ai_recovery(
             );
             let mut new_input = action_input.clone();
             if let Some(obj) = new_input.as_object_mut() {
-                obj.insert("selector".into(), Value::String(new_sel));
+                obj.insert("selector".into(), Value::String(new_sel.clone()));
             }
             let result = action.execute(ctx, new_input).await?;
-            Ok(Some(result))
+            let trace = serde_json::json!({
+                "used": true,
+                "helper": "heal_selector",
+                "model": model,
+                "confidence": healed.confidence,
+                "healed_selector": new_sel,
+            });
+            Ok(Some((result, trace)))
         }
         ErrorKind::ExtractFailed => {
             let target = action_input
@@ -1099,18 +1122,37 @@ async fn try_ai_recovery(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| prompt.clone());
+            // Browser actions stash a page screenshot before surfacing
+            // ExtractFailed; passing it makes extraction truly multimodal.
+            let screenshot = ctx.take_screenshot();
+            let used_image = screenshot.is_some();
             let value = provider
-                .extract_visual(&target, None, None, model.as_deref())
+                .extract_visual(screenshot, &target, None, None, model.as_deref())
                 .await?;
-            tracing::info!("step `{}`: AI extract_visual produced value", step.id);
-            Ok(Some(ActionResult::from(value)))
+            tracing::info!(
+                "step `{}`: AI extract_visual produced value (image={})",
+                step.id,
+                used_image
+            );
+            let trace = serde_json::json!({
+                "used": true,
+                "helper": "extract_visual",
+                "model": model,
+                "multimodal": used_image,
+            });
+            Ok(Some((ActionResult::from(value), trace)))
         }
         _ => Ok(None),
     }
 }
 
-/// Call AI decide for a control.if step. Returns `Ok(Some(bool))` on success.
-async fn try_ai_decide(ctx: &mut StepCtx, step: &Step) -> Result<Option<bool>, StepError> {
+/// Call AI decide for a control.if step. Returns `Ok(Some(decision))` on
+/// success so the caller can branch on `decision.result` and record the
+/// `_ai` trace (helper/model/confidence/reasoning).
+async fn try_ai_decide(
+    ctx: &mut StepCtx,
+    step: &Step,
+) -> Result<Option<crate::ai_hook::Decision>, StepError> {
     let Some(provider) = ctx.ai_provider().cloned() else {
         return Ok(None);
     };
@@ -1125,7 +1167,7 @@ async fn try_ai_decide(ctx: &mut StepCtx, step: &Step) -> Result<Option<bool>, S
         decision.confidence,
         decision.reasoning
     );
-    Ok(Some(decision.result))
+    Ok(Some(decision))
 }
 
 /// Attach an LLM diagnostic when `metadata.ai.diagnose_on_failure: true`.

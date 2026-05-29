@@ -46,6 +46,11 @@ struct CtxInner {
     /// Used by `attach_artifact` so X-07 time-travel rows line up against
     /// the step_runs path column exactly.
     current_step_path: Option<String>,
+    /// Last page screenshot stashed by a browser action right before it
+    /// surfaced an `ExtractFailed` error. The VM's `extract_visual` AI hook
+    /// picks it up so the LLM can *see* the page (true multimodal extraction)
+    /// instead of falling back to text-only. Cleared after each consume.
+    last_screenshot: Option<bytes::Bytes>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -88,6 +93,7 @@ impl StepCtx {
                 stats: RunStats::default(),
                 current_step_id: None,
                 current_step_path: None,
+                last_screenshot: None,
             })),
         }
     }
@@ -129,6 +135,29 @@ impl StepCtx {
         let mut g = self.inner.lock();
         g.steps
             .insert(step_id.to_string(), serde_json::json!({ "result": output }));
+    }
+
+    /// Attach an `_ai` trace next to a step's `result` (runtime-only; never
+    /// written back to YAML). Lets `steps.<id>._ai` and the Studio timeline
+    /// surface a purple "AI heal" badge while `steps.<id>.result` keeps its
+    /// reference contract. No-op if the step has no recorded output yet.
+    pub fn record_step_ai(&self, step_id: &str, ai: Value) {
+        let mut g = self.inner.lock();
+        if let Some(Value::Object(entry)) = g.steps.get_mut(step_id) {
+            entry.insert("_ai".to_string(), ai);
+        }
+    }
+
+    /// Stash a page screenshot so a subsequent AI hook (e.g. `extract_visual`)
+    /// can pass it to the vision model. Browser actions call this right before
+    /// returning an `ExtractFailed` error.
+    pub fn stash_screenshot(&self, png: bytes::Bytes) {
+        self.inner.lock().last_screenshot = Some(png);
+    }
+
+    /// Take (and clear) the most recently stashed screenshot, if any.
+    pub fn take_screenshot(&self) -> Option<bytes::Bytes> {
+        self.inner.lock().last_screenshot.take()
     }
 
     pub fn set_var(&self, key: &str, value: Value) {
@@ -576,4 +605,54 @@ fn mime_to_ext(mime: &str, kind: &str) -> String {
         },
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx() -> StepCtx {
+        StepCtx::new(
+            "run-test".into(),
+            "flow-test".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            Capabilities::default(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn record_step_ai_sits_beside_result_without_breaking_reference() {
+        let ctx = test_ctx();
+        ctx.record_step_output("title", &Value::String("Hello".into()));
+        ctx.record_step_ai(
+            "title",
+            serde_json::json!({ "used": true, "helper": "extract_visual" }),
+        );
+
+        let snap = ctx.outputs_snapshot();
+        let entry = snap.get("title").expect("step entry present");
+
+        // `steps.title.result` reference contract is preserved.
+        assert_eq!(entry.get("result").and_then(Value::as_str), Some("Hello"));
+        // `_ai` trace is recorded alongside `result`, not nested inside it.
+        assert_eq!(
+            entry.pointer("/_ai/helper").and_then(Value::as_str),
+            Some("extract_visual")
+        );
+        assert_eq!(
+            entry.pointer("/_ai/used").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn record_step_ai_is_noop_without_prior_output() {
+        let ctx = test_ctx();
+        // No record_step_output first → nothing to attach to.
+        ctx.record_step_ai("ghost", serde_json::json!({ "used": true }));
+        assert!(ctx.outputs_snapshot().get("ghost").is_none());
+    }
 }
