@@ -2,6 +2,7 @@ pub mod actions;
 pub mod copilot;
 pub mod hotkey;
 pub mod init;
+pub mod lint;
 pub mod mcp;
 pub mod providers;
 pub mod run;

@@ -7,7 +7,7 @@
 use crate::{
     error::StorageError,
     schema,
-    types::{FlowRunRow, StepRunRow},
+    types::{AiCallInsert, AiCallRow, ArtifactRow, FlowRunRow, StepRunRow},
 };
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::Mutex;
@@ -166,6 +166,147 @@ impl Repo {
         }
         Ok(out)
     }
+
+    // ─── artifacts (X-06 / X-07: screenshots, DOM, HAR) ────────────────────
+    pub fn insert_artifact(&self, row: &ArtifactRow) -> Result<(), StorageError> {
+        let c = self.inner.lock();
+        c.execute(
+            "INSERT INTO artifacts(id,flow_run_id,step_id,kind,mime,size,blob_path,sha256,created_at) \
+             VALUES (?,?,?,?,?,?,?,?,?)",
+            params![
+                row.id,
+                row.flow_run_id,
+                row.step_id,
+                row.kind,
+                row.mime,
+                row.size,
+                row.blob_path,
+                row.sha256,
+                row.created_at.timestamp_millis(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT id,flow_run_id,step_id,kind,mime,size,blob_path,sha256,created_at \
+             FROM artifacts WHERE flow_run_id=? ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([run_id], row_to_artifact)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single artifact row by its id. Used by the desktop replay panel
+    /// to resolve a `blob_path` before streaming the bytes back to the webview.
+    pub fn get_artifact(&self, id: &str) -> Result<Option<ArtifactRow>, StorageError> {
+        let c = self.inner.lock();
+        let row = c
+            .query_row(
+                "SELECT id,flow_run_id,step_id,kind,mime,size,blob_path,sha256,created_at \
+                 FROM artifacts WHERE id=?",
+                [id],
+                row_to_artifact,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    // ─── ai_calls (X-10) ────────────────────────────────────────────────────
+    pub fn record_ai_call(&self, row: AiCallInsert<'_>) -> Result<(), StorageError> {
+        let c = self.inner.lock();
+        c.execute(
+            "INSERT INTO ai_calls(flow_run_id,step_id,helper,provider,model,input_tokens,output_tokens,latency_ms,cost_usd_micro,created_at) \
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+            params![
+                row.flow_run_id,
+                row.step_id,
+                row.helper,
+                row.provider,
+                row.model,
+                row.input_tokens,
+                row.output_tokens,
+                row.latency_ms,
+                row.cost_usd_micro,
+                Utc::now().timestamp_millis(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_ai_calls(&self, run_id: &str) -> Result<Vec<AiCallRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT id,flow_run_id,step_id,helper,provider,model,input_tokens,output_tokens,latency_ms,cost_usd_micro,created_at \
+             FROM ai_calls WHERE flow_run_id=? ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([run_id], row_to_ai_call)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Roll up the ai_calls bucket into the flow_runs cost columns. Called by
+    /// the VM when the flow finishes so `lumo runs list` reflects the right
+    /// totals without recomputing per call.
+    pub fn rollup_run_cost(&self, run_id: &str) -> Result<(i64, i64), StorageError> {
+        let c = self.inner.lock();
+        let (tokens, cost): (Option<i64>, Option<i64>) = c.query_row(
+            "SELECT SUM(input_tokens + output_tokens), SUM(cost_usd_micro) FROM ai_calls WHERE flow_run_id=?",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let tokens = tokens.unwrap_or(0);
+        let cost = cost.unwrap_or(0);
+        c.execute(
+            "UPDATE flow_runs SET cost_token=?, cost_usd_micro=? WHERE id=?",
+            params![tokens, cost, run_id],
+        )?;
+        Ok((tokens, cost))
+    }
+}
+
+fn row_to_ai_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiCallRow> {
+    Ok(AiCallRow {
+        id: row.get(0)?,
+        flow_run_id: row.get(1)?,
+        step_id: row.get(2)?,
+        helper: row.get(3)?,
+        provider: row.get(4)?,
+        model: row.get(5)?,
+        input_tokens: row.get(6)?,
+        output_tokens: row.get(7)?,
+        latency_ms: row.get(8)?,
+        cost_usd_micro: row.get(9)?,
+        created_at: Utc
+            .timestamp_millis_opt(row.get::<_, i64>(10)?)
+            .single()
+            .unwrap_or_else(Utc::now),
+    })
+}
+
+fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRow> {
+    Ok(ArtifactRow {
+        id: row.get(0)?,
+        flow_run_id: row.get(1)?,
+        step_id: row.get(2)?,
+        kind: row.get(3)?,
+        mime: row.get(4)?,
+        size: row.get(5)?,
+        blob_path: row.get(6)?,
+        sha256: row.get(7)?,
+        created_at: Utc
+            .timestamp_millis_opt(row.get::<_, i64>(8)?)
+            .single()
+            .unwrap_or_else(Utc::now),
+    })
 }
 
 fn row_to_flow_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlowRunRow> {

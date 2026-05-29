@@ -31,6 +31,8 @@ enum Cmd {
     Init(cmd::init::Args),
     /// Validate a flow YAML file
     Validate(cmd::validate::Args),
+    /// Lint a flow YAML file (capabilities, refs, retry policies)
+    Lint(cmd::lint::Args),
     /// Run a flow file once
     Run(cmd::run::Args),
     /// Inspect previous runs
@@ -63,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Init(a) => cmd::init::run(a).await,
         Cmd::Validate(a) => cmd::validate::run(home, a).await,
+        Cmd::Lint(a) => cmd::lint::run(home, a).await,
         Cmd::Run(a) => cmd::run::run(home, a).await,
         Cmd::Runs(a) => cmd::runs::run(home, a).await,
         Cmd::Actions(a) => cmd::actions::run(home, a).await,

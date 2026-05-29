@@ -81,6 +81,15 @@ struct FlowSummary {
     step_count: usize,
     valid: bool,
     error: Option<String>,
+    /// `"user"` (saved by the operator) / `"recording"` (recorder output)
+    /// / `"example"` (bundled). Defaults to `"user"` when scanned via the
+    /// bare flow_summary helper; the library scanner overrides per source.
+    #[serde(default)]
+    source: String,
+    /// File modification time as a unix-ms timestamp. Lets the library sort
+    /// recently-touched flows to the top.
+    #[serde(default)]
+    updated_ms: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +145,8 @@ struct RunDto {
     started_at: Option<String>,
     finished_at: Option<String>,
     duration_ms: Option<i64>,
+    cost_token: i64,
+    cost_usd_micro: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +180,17 @@ struct RunResponse {
 struct RunDetail {
     run: RunDto,
     steps: Vec<StepRunDto>,
+}
+
+/// X-07 Time-Travel: a single artifact blob streamed back to the webview as a
+/// base64 data URL so `<img>` / `<iframe>` can render it directly.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactBlobDto {
+    id: String,
+    mime: String,
+    data_url: String,
+    size: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -332,11 +354,154 @@ fn list_examples(app: AppHandle) -> Result<Vec<FlowSummary>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if is_flow_file(&path) {
-            flows.push(flow_summary(&path));
+            let mut s = flow_summary(&path);
+            s.source = "example".into();
+            flows.push(s);
         }
     }
     flows.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(flows)
+}
+
+/// D-* Flow library: returns every flow Studio knows about, tagged by source
+/// (`user` / `recording` / `example`). Frontend defaults to user-first, then
+/// recordings, with examples folded. Empty user/recording dirs are auto-
+/// created on access so this is the canonical "where do my saved flows go?"
+/// answer the UI can rely on.
+#[tauri::command]
+fn list_flow_library(app: AppHandle) -> Result<Vec<FlowSummary>, String> {
+    let mut out: Vec<FlowSummary> = Vec::new();
+    // User flows (saved via `save_flow_as` / "另存为").
+    out.extend(scan_flows_in(&user_flows_dir(&app)?, "user"));
+    // Recorder output.
+    out.extend(scan_flows_in(&recordings_dir(&app)?, "recording"));
+    // Bundled examples (read-only in production builds).
+    if let Some(ex) = examples_dir(&app) {
+        out.extend(scan_flows_in(&ex, "example"));
+    }
+    Ok(out)
+}
+
+/// Copy `source` into the user flows dir under `name` (auto-suffixed with
+/// `.lumoflow.yaml` if missing). Returns the new absolute path so the caller
+/// can immediately load it. Used by both Studio "另存为" and the recording
+/// → save flow.
+#[tauri::command]
+fn save_flow_as(app: AppHandle, name: String, source: String) -> Result<String, String> {
+    let dir = user_flows_dir(&app)?;
+    let safe = sanitize_flow_name(&name);
+    if safe.is_empty() {
+        return Err("flow name must not be empty".into());
+    }
+    let path = dir.join(if safe.ends_with(".lumoflow.yaml") || safe.ends_with(".lumoflow.yml") {
+        safe
+    } else {
+        format!("{safe}.lumoflow.yaml")
+    });
+    std::fs::write(&path, source).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+/// Delete a file from the library. Guards against deleting bundled examples
+/// or anything outside `$LUMO_HOME` so a bug in the UI can't nuke user data
+/// it isn't allowed to.
+#[tauri::command]
+fn delete_flow(app: AppHandle, path: String) -> Result<(), String> {
+    let target = Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("resolve {path}: {e}"))?;
+    let home = app_home(&app)?
+        .canonicalize()
+        .map_err(|e| format!("resolve LUMO_HOME: {e}"))?;
+    if !target.starts_with(&home) {
+        return Err(format!("refused: {} is outside LUMO_HOME", target.display()));
+    }
+    std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+    Ok(())
+}
+
+/// Duplicate a flow into the user dir (works for any source — including
+/// examples — and gives the copy a `-copy` suffix so the original stays put).
+#[tauri::command]
+fn duplicate_flow(app: AppHandle, path: String) -> Result<String, String> {
+    let src = Path::new(&path);
+    let bytes = std::fs::read(src).map_err(|e| format!("read {path}: {e}"))?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("flow")
+        .trim_end_matches(".lumoflow")
+        .to_string();
+    let dir = user_flows_dir(&app)?;
+    let mut candidate = dir.join(format!("{stem}-copy.lumoflow.yaml"));
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem}-copy-{n}.lumoflow.yaml"));
+        n += 1;
+    }
+    std::fs::write(&candidate, bytes)
+        .map_err(|e| format!("write {}: {e}", candidate.display()))?;
+    Ok(candidate.display().to_string())
+}
+
+fn sanitize_flow_name(name: &str) -> String {
+    let trimmed = name.trim();
+    trimmed
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Wrap the recorder's `events_to_yaml_patch` fragment into a complete
+/// LumoFlow doc so the user can hit ▶ on the result without hand-editing.
+/// The fragment lives under `spec.steps`; everything else is reasonable
+/// defaults that the user can tighten later.
+fn wrap_recording_fragment(name: &str, fragment: &str) -> String {
+    let id = sanitize_flow_name(name);
+    let id = if id.is_empty() { "recording".into() } else { id };
+    // Re-indent the fragment so it sits two spaces in under `spec.steps:`.
+    let body: String = fragment
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') || l.contains("Recorder"))
+        .map(|l| if l.trim().is_empty() { String::new() } else { format!("    {l}") })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: 录制 · {id}\n  tags: [recording]\nspec:\n  capabilities:\n    network: [\"*\"]\n  steps:\n{body}\n"
+    )
+}
+
+/// Save the recorder's last output as a complete flow under the recordings
+/// folder. Returns the new file path so the library can refresh + select it.
+#[tauri::command]
+fn save_recording_as_flow(
+    app: AppHandle,
+    name: String,
+    yaml_hint: String,
+) -> Result<String, String> {
+    let dir = recordings_dir(&app)?;
+    let stem = sanitize_flow_name(&name);
+    let stem = if stem.is_empty() {
+        format!("rec-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    } else {
+        stem
+    };
+    let mut candidate = dir.join(format!("{stem}.lumoflow.yaml"));
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem}-{n}.lumoflow.yaml"));
+        n += 1;
+    }
+    let body = wrap_recording_fragment(&stem, &yaml_hint);
+    std::fs::write(&candidate, body)
+        .map_err(|e| format!("write {}: {e}", candidate.display()))?;
+    Ok(candidate.display().to_string())
 }
 
 #[tauri::command]
@@ -474,6 +639,19 @@ fn validate_flow(app: AppHandle, path: String) -> Result<ValidationReport, Strin
     Ok(validation_report(&path, &flow))
 }
 
+/// D-19 Flow Lint. Runs structural lint plus capability / variable-reference
+/// checks. Studio surfaces the returned issues in a side panel with severity
+/// tags and per-rule "+ fix" buttons (e.g. add capability, declare input).
+#[tauri::command]
+fn lint_flow(app: AppHandle, path: String) -> Result<Vec<lumo_dsl::LintIssue>, String> {
+    let home = app_home(&app)?;
+    let flow = lumo_dsl::parse_file(Path::new(&path)).map_err(|e| e.to_string())?;
+    let registry = build_action_registry(&home, Some(Path::new(&path)));
+    let known: Vec<String> = registry.iter_ids().collect();
+    let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
+    Ok(lumo_dsl::lint_flow(&flow, &known_refs))
+}
+
 #[tauri::command]
 async fn run_flow(
     app: AppHandle,
@@ -541,6 +719,55 @@ fn show_run(app: AppHandle, run_id: String) -> Result<RunDetail, String> {
     Ok(RunDetail {
         run: run_dto(run),
         steps,
+    })
+}
+
+/// X-10: every LLM/vision call this run made, with token + USD breakdown.
+/// Studio renders the rows under the timeline so the user can see exactly
+/// where the budget went.
+#[tauri::command]
+fn run_cost(app: AppHandle, run_id: String) -> Result<Vec<lumo_storage::AiCallRow>, String> {
+    let repo = open_repo(&app)?;
+    repo.list_ai_calls(&run_id).map_err(|e| e.to_string())
+}
+
+/// X-07 Time-Travel: every blob artifact (screenshot, DOM, HAR) captured during
+/// a run, ordered by capture time. Studio's replay scrubber walks these to
+/// reconstruct what the screen looked like at each step.
+#[tauri::command]
+fn list_artifacts(app: AppHandle, run_id: String) -> Result<Vec<lumo_storage::ArtifactRow>, String> {
+    let repo = open_repo(&app)?;
+    repo.list_artifacts(&run_id).map_err(|e| e.to_string())
+}
+
+/// X-07: read a single artifact blob off disk and hand it back as a base64
+/// data URL so the webview `<img>`/`<iframe>` can render it without a custom
+/// asset protocol. Guarded against path escapes — the row's `blob_path` must
+/// resolve under `$LUMO_HOME`.
+#[tauri::command]
+fn read_artifact_blob(app: AppHandle, artifact_id: String) -> Result<ArtifactBlobDto, String> {
+    use base64::Engine as _;
+    let repo = open_repo(&app)?;
+    let row = repo
+        .get_artifact(&artifact_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("artifact `{artifact_id}` not found"))?;
+    let home = app_home(&app)?;
+    let path = PathBuf::from(&row.blob_path);
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("artifact blob missing: {e}"))?;
+    let home_canon = home.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.starts_with(&home_canon) {
+        return Err("artifact path escapes LUMO_HOME".into());
+    }
+    let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(ArtifactBlobDto {
+        id: row.id,
+        mime: row.mime.clone(),
+        data_url: format!("data:{};base64,{}", row.mime, b64),
+        size: row.size,
     })
 }
 
@@ -878,16 +1105,25 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_examples,
+            list_flow_library,
+            save_flow_as,
+            delete_flow,
+            duplicate_flow,
+            save_recording_as_flow,
             inspect_flow,
             read_flow_source,
             save_flow_source,
             get_flow_capabilities,
             add_capability_grant,
             validate_flow,
+            lint_flow,
             run_flow,
             run_step,
             list_runs,
             show_run,
+            run_cost,
+            list_artifacts,
+            read_artifact_blob,
             list_actions,
             action_schema,
             provider_status,
@@ -934,6 +1170,40 @@ fn examples_dir(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// User-owned flows. Lives under `$LUMO_HOME/flows`, created on first save.
+fn user_flows_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_home(app)?.join("flows");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Recorder output drop zone. Each `recorder_stop_and_save` call writes one
+/// `.lumoflow.yaml` here so the user can pick it up from the library.
+fn recordings_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_home(app)?.join("recordings");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn scan_flows_in(dir: &Path, source: &str) -> Vec<FlowSummary> {
+    let mut out = Vec::new();
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !is_flow_file(&path) {
+            continue;
+        }
+        let mut s = flow_summary(&path);
+        s.source = source.to_string();
+        out.push(s);
+    }
+    // Newest first.
+    out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
+    out
+}
+
 fn is_flow_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -947,6 +1217,12 @@ fn flow_summary(path: &Path) -> FlowSummary {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string();
+    let updated_ms = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
 
     match lumo_dsl::parse_file(path) {
         Ok(flow) => {
@@ -964,6 +1240,8 @@ fn flow_summary(path: &Path) -> FlowSummary {
                 step_count: count_steps(&flow.spec.steps),
                 valid: validation_error.is_none(),
                 error: validation_error,
+                source: "user".into(),
+                updated_ms,
             }
         }
         Err(e) => FlowSummary {
@@ -979,6 +1257,8 @@ fn flow_summary(path: &Path) -> FlowSummary {
             step_count: 0,
             valid: false,
             error: Some(e.to_string()),
+            source: "user".into(),
+            updated_ms,
         },
     }
 }
@@ -1147,6 +1427,8 @@ fn run_dto(row: FlowRunRow) -> RunDto {
         started_at: row.started_at.map(|t| t.to_rfc3339()),
         finished_at: row.finished_at.map(|t| t.to_rfc3339()),
         duration_ms,
+        cost_token: row.cost_token,
+        cost_usd_micro: row.cost_usd_micro,
     }
 }
 

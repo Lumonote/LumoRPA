@@ -49,3 +49,33 @@ pub struct ArtifactRow {
     pub sha256: Vec<u8>,
     pub created_at: DateTime<Utc>,
 }
+
+/// X-10 cost accounting row. One row per LLM/vision call inside a flow run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiCallRow {
+    pub id: i64,
+    pub flow_run_id: String,
+    pub step_id: Option<String>,
+    pub helper: String,
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub latency_ms: i64,
+    pub cost_usd_micro: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// New-row payload (no `id` / `created_at` — repo fills them in).
+#[derive(Debug, Clone)]
+pub struct AiCallInsert<'a> {
+    pub flow_run_id: &'a str,
+    pub step_id: Option<&'a str>,
+    pub helper: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub latency_ms: i64,
+    pub cost_usd_micro: i64,
+}

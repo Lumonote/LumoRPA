@@ -5,11 +5,13 @@ use crate::ai_hook::AiHookProvider;
 use crate::error::{CapKind, StepError};
 use crate::registry::ActionRegistry;
 use lumo_dsl::{Capabilities, FlowAi, Step, TemplateCtx};
-use lumo_storage::Repo;
+use lumo_storage::{ArtifactRow, Repo};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use ulid::Ulid;
 
 #[derive(Clone)]
 pub struct StepCtx {
@@ -19,6 +21,10 @@ pub struct StepCtx {
     capabilities: Capabilities,
     vault_names: Vec<String>,
     repo: Option<Repo>,
+    /// Root directory for blob artifacts (screenshots, DOM snapshots, ...).
+    /// When unset, `attach_artifact` is a no-op so headless smoke tests don't
+    /// have to mount a temp dir.
+    artifacts_dir: Option<PathBuf>,
     ai_provider: Option<Arc<dyn AiHookProvider>>,
     flow_ai: Option<FlowAi>,
     inner: Arc<Mutex<CtxInner>>,
@@ -32,6 +38,14 @@ struct CtxInner {
     log_buffer: Vec<String>,
     next_seq: i64,
     stats: RunStats,
+    /// Step id currently being executed. Set by the VM right before
+    /// `Action::execute`; lets actions (e.g. `ai.chat`) attribute cost rows
+    /// to the right step without changing the trait signature.
+    current_step_id: Option<String>,
+    /// Full nested path (e.g. `loop/item.3/click`) of the current step.
+    /// Used by `attach_artifact` so X-07 time-travel rows line up against
+    /// the step_runs path column exactly.
+    current_step_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -61,6 +75,7 @@ impl StepCtx {
             capabilities,
             vault_names,
             repo,
+            artifacts_dir: None,
             ai_provider: None,
             flow_ai: None,
             inner: Arc::new(Mutex::new(CtxInner {
@@ -71,6 +86,8 @@ impl StepCtx {
                 log_buffer: Vec::new(),
                 next_seq: 0,
                 stats: RunStats::default(),
+                current_step_id: None,
+                current_step_path: None,
             })),
         }
     }
@@ -148,6 +165,74 @@ impl StepCtx {
         let seq = g.next_seq;
         g.next_seq += 1;
         seq
+    }
+
+    /// Stash the step id about to run so `Action::execute` can read it back
+    /// for cost / OTel attribution.
+    pub fn set_current_step(&self, id: &str) {
+        self.inner.lock().current_step_id = Some(id.to_string());
+    }
+
+    pub fn current_step_id(&self) -> Option<String> {
+        self.inner.lock().current_step_id.clone()
+    }
+
+    /// Stash the nested step path (e.g. `loop/item.3/click`) so
+    /// `attach_artifact` can attribute artifacts to the right step.
+    pub fn set_current_step_path(&self, path: &str) {
+        self.inner.lock().current_step_path = Some(path.to_string());
+    }
+
+    pub fn current_step_path(&self) -> Option<String> {
+        self.inner.lock().current_step_path.clone()
+    }
+
+    /// Builder method to set the artifacts directory.
+    pub fn with_artifacts_dir(mut self, dir: PathBuf) -> Self {
+        self.artifacts_dir = Some(dir);
+        self
+    }
+
+    /// Attach a blob artifact (screenshot, DOM, HAR, etc.) to the current step.
+    /// Returns the artifact ID (ULID) on success, or empty string if artifacts_dir is None.
+    pub fn attach_artifact(
+        &self,
+        kind: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<String, StepError> {
+        let artifacts_dir = match &self.artifacts_dir {
+            Some(d) => d,
+            None => return Ok(String::new()), // No-op if artifacts_dir not set
+        };
+
+        let artifact_id = Ulid::new().to_string();
+        let sha256 = Sha256::digest(data).to_vec();
+        let ext = mime_to_ext(mime, kind);
+        let run_dir = artifacts_dir.join(&self.run_id);
+        std::fs::create_dir_all(&run_dir)
+            .map_err(|e| StepError::msg(format!("create artifacts dir: {e}")))?;
+        let blob_path = run_dir.join(format!("{artifact_id}.{ext}"));
+        std::fs::write(&blob_path, data)
+            .map_err(|e| StepError::msg(format!("write artifact blob: {e}")))?;
+
+        if let Some(repo) = &self.repo {
+            let row = ArtifactRow {
+                id: artifact_id.clone(),
+                flow_run_id: self.run_id.clone(),
+                step_id: self.current_step_id(),
+                kind: kind.to_string(),
+                mime: mime.to_string(),
+                size: data.len() as i64,
+                blob_path: blob_path.to_string_lossy().to_string(),
+                sha256,
+                created_at: chrono::Utc::now(),
+            };
+            repo.insert_artifact(&row)
+                .map_err(|e| StepError::msg(format!("insert artifact row: {e}")))?;
+        }
+
+        Ok(artifact_id)
     }
 
     pub fn mark_step_state(&self, state: &str) {
@@ -473,4 +558,22 @@ fn sanitize_env(s: &str) -> String {
             }
         })
         .collect()
+}
+
+fn mime_to_ext(mime: &str, kind: &str) -> String {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "text/html" => "html",
+        "application/json" => "json",
+        "video/webm" => "webm",
+        _ => match kind {
+            "screenshot" => "png",
+            "dom" => "html",
+            "har" => "json",
+            "video" => "webm",
+            _ => "bin",
+        },
+    }
+    .to_string()
 }

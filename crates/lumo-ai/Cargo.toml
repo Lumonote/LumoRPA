@@ -8,6 +8,7 @@ description = "LumoRPA AI router (LLM/Vision/OCR) with BYOK adapters"
 
 [dependencies]
 lumo-core.workspace = true
+lumo-storage.workspace = true
 
 tokio.workspace = true
 async-trait.workspace = true

@@ -498,6 +498,45 @@ select:focus {
   white-space: nowrap;
 }
 
+/* ── Flow library sections (user / recording / example) ───────────────── */
+.flow-section { margin-bottom: 8px; }
+.flow-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+  border-radius: 6px;
+}
+.flow-section-head:hover { background: var(--surface-strong); color: var(--text); }
+.flow-section.is-folded .flow-section-body { display: none; }
+.flow-section-body { display: grid; gap: 6px; }
+.flow-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+.flow-row-actions { display: flex; gap: 2px; }
+.flow-row .icon-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  cursor: pointer;
+}
+.flow-row .icon-btn:hover { color: var(--text); border-color: var(--accent); }
+.flow-row .icon-btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+
 .search-box {
   position: relative;
   margin-bottom: 8px;
@@ -1131,6 +1170,67 @@ select:focus {
   font-size: 11px;
   max-height: 140px;
   overflow: auto;
+}
+
+/* ─── Time-Travel screenshot viewer ─────────────────────────────────────── */
+.timeline-screenshot {
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-inset);
+  border: 1px solid var(--line);
+}
+
+.timeline-screenshot img {
+  width: 100%;
+  height: auto;
+  max-height: 280px;
+  object-fit: contain;
+  display: block;
+  cursor: zoom-in;
+}
+
+.timeline-screenshot img.zoomed {
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.timeline-screenshot iframe {
+  width: 100%;
+  height: 260px;
+  border: 0;
+  background: #fff;
+}
+
+.timeline-screenshot .shot-loading {
+  padding: 18px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.timeline-screenshot .shot-caption {
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 4px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.timeline-artifact-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--accent-muted, rgba(99,132,238,.15));
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.timeline-artifact-pill:hover {
+  opacity: 0.8;
 }
 
 /* ─── Settings page ────────────────────────────────────────────────────── */

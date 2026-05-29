@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1779874633229,
+  "lastScanned": 1779962387481,
   "projectRoot": "/Users/palmer/IdeaProjects/projectSync/AI/project/LumoRPA",
   "techStack": {
     "languages": [
@@ -13,7 +13,13 @@
         ]
       }
     ],
-    "frameworks": [],
+    "frameworks": [
+      {
+        "name": "axum",
+        "version": null,
+        "category": "backend"
+      }
+    ],
     "packageManager": "cargo",
     "runtime": null
   },
@@ -46,21 +52,21 @@
       "path": "apps",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1779874633182,
+      "lastAccessed": 1779962387448,
       "keyFiles": []
     },
     "crates": {
       "path": "crates",
       "purpose": null,
       "fileCount": 0,
-      "lastAccessed": 1779874633184,
+      "lastAccessed": 1779962387449,
       "keyFiles": []
     },
     "dist": {
       "path": "dist",
       "purpose": "Distribution/build output",
       "fileCount": 2,
-      "lastAccessed": 1779874633185,
+      "lastAccessed": 1779962387450,
       "keyFiles": [
         "lumorpa-0.1.0-darwin-x86_64.tar.gz"
       ]
@@ -69,7 +75,7 @@
       "path": "docs",
       "purpose": "Documentation",
       "fileCount": 4,
-      "lastAccessed": 1779874633185,
+      "lastAccessed": 1779962387451,
       "keyFiles": [
         "00-LumoRPA-Master-Report.md",
         "01-Product-Design.md",
@@ -80,8 +86,8 @@
     "examples": {
       "path": "examples",
       "purpose": "Example code",
-      "fileCount": 9,
-      "lastAccessed": 1779874633186,
+      "fileCount": 12,
+      "lastAccessed": 1779962387451,
       "keyFiles": [
         "browser-scrape.lumoflow.yaml",
         "browser-scrape.lumoflow.yaml.original",
@@ -94,7 +100,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 1,
-      "lastAccessed": 1779874633186,
+      "lastAccessed": 1779962387452,
       "keyFiles": [
         "build-desktop.sh"
       ]
@@ -102,8 +108,8 @@
     "target": {
       "path": "target",
       "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1779874633186,
+      "fileCount": 3,
+      "lastAccessed": 1779962387452,
       "keyFiles": [
         "CACHEDIR.TAG"
       ]
@@ -112,7 +118,7 @@
       "path": "examples/data",
       "purpose": "Data files",
       "fileCount": 1,
-      "lastAccessed": 1779874633188,
+      "lastAccessed": 1779962387454,
       "keyFiles": [
         "orders.xlsx"
       ]
@@ -121,26 +127,38 @@
   "hotPaths": [
     {
       "path": "apps/desktop/frontend/app.js",
-      "accessCount": 60,
-      "lastAccessed": 1779949433153,
+      "accessCount": 89,
+      "lastAccessed": 1780024901042,
       "type": "file"
     },
     {
       "path": "apps/desktop/src-tauri/src/lib.rs",
-      "accessCount": 48,
-      "lastAccessed": 1779954791107,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-recorder/src/lib.rs",
-      "accessCount": 22,
-      "lastAccessed": 1779960433730,
+      "accessCount": 78,
+      "lastAccessed": 1780024712940,
       "type": "file"
     },
     {
       "path": "apps/desktop/frontend/styles.css",
-      "accessCount": 20,
-      "lastAccessed": 1779949506828,
+      "accessCount": 28,
+      "lastAccessed": 1780025031714,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-core/src/vm.rs",
+      "accessCount": 24,
+      "lastAccessed": 1780024261462,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-recorder/src/lib.rs",
+      "accessCount": 23,
+      "lastAccessed": 1779962489441,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-core/src/ctx.rs",
+      "accessCount": 21,
+      "lastAccessed": 1780023709403,
       "type": "file"
     },
     {
@@ -163,14 +181,20 @@
     },
     {
       "path": "apps/desktop/frontend/index.html",
-      "accessCount": 14,
-      "lastAccessed": 1779949432316,
+      "accessCount": 16,
+      "lastAccessed": 1779974334078,
       "type": "file"
     },
     {
       "path": "crates/lumo-ai/src/provider.rs",
       "accessCount": 14,
       "lastAccessed": 1779959369997,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-cli/src/main.rs",
+      "accessCount": 12,
+      "lastAccessed": 1779972845856,
       "type": "file"
     },
     {
@@ -186,21 +210,9 @@
       "type": "file"
     },
     {
-      "path": "crates/lumo-core/src/vm.rs",
+      "path": "crates/lumo-cli/src/cmd/mod.rs",
       "accessCount": 10,
-      "lastAccessed": 1779959687591,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-core/src/ctx.rs",
-      "accessCount": 9,
-      "lastAccessed": 1779959336860,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-cli/src/main.rs",
-      "accessCount": 9,
-      "lastAccessed": 1779959369842,
+      "lastAccessed": 1779972825559,
       "type": "file"
     },
     {
@@ -223,20 +235,14 @@
     },
     {
       "path": "crates/lumo-dsl/src/ast.rs",
-      "accessCount": 8,
-      "lastAccessed": 1779959490238,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-cli/src/cmd/mod.rs",
-      "accessCount": 8,
-      "lastAccessed": 1779960588491,
+      "accessCount": 9,
+      "lastAccessed": 1779971533237,
       "type": "file"
     },
     {
       "path": "crates/lumo-actions/src/lib.rs",
-      "accessCount": 7,
-      "lastAccessed": 1779960101107,
+      "accessCount": 9,
+      "lastAccessed": 1779972435764,
       "type": "file"
     },
     {
@@ -247,20 +253,26 @@
     },
     {
       "path": "Cargo.toml",
-      "accessCount": 5,
-      "lastAccessed": 1779947471043,
+      "accessCount": 6,
+      "lastAccessed": 1779962429468,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-actions/Cargo.toml",
+      "accessCount": 6,
+      "lastAccessed": 1779971755133,
+      "type": "file"
+    },
+    {
+      "path": "apps/desktop/src-tauri/Cargo.toml",
+      "accessCount": 6,
+      "lastAccessed": 1780024748764,
       "type": "file"
     },
     {
       "path": "crates/lumo-core/src/lib.rs",
       "accessCount": 5,
       "lastAccessed": 1779959843676,
-      "type": "file"
-    },
-    {
-      "path": "apps/desktop/src-tauri/Cargo.toml",
-      "accessCount": 4,
-      "lastAccessed": 1779877134921,
       "type": "file"
     },
     {
@@ -276,15 +288,27 @@
       "type": "file"
     },
     {
-      "path": "crates/lumo-actions/Cargo.toml",
+      "path": "docs/01-Product-Design.md",
       "accessCount": 4,
-      "lastAccessed": 1779960075086,
+      "lastAccessed": 1779962466551,
       "type": "file"
     },
     {
       "path": "crates/lumo-core/src/error.rs",
-      "accessCount": 3,
-      "lastAccessed": 1779940007170,
+      "accessCount": 4,
+      "lastAccessed": 1779971518792,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-dsl/src/validate.rs",
+      "accessCount": 4,
+      "lastAccessed": 1779971547720,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-ai/Cargo.toml",
+      "accessCount": 4,
+      "lastAccessed": 1779973381124,
       "type": "file"
     },
     {
@@ -294,33 +318,15 @@
       "type": "file"
     },
     {
-      "path": "crates/lumo-dsl/src/validate.rs",
-      "accessCount": 3,
-      "lastAccessed": 1779959592834,
-      "type": "file"
-    },
-    {
       "path": "crates/lumo-core/Cargo.toml",
       "accessCount": 3,
       "lastAccessed": 1779959828848,
       "type": "file"
     },
     {
-      "path": "crates/lumo-ai/Cargo.toml",
-      "accessCount": 3,
-      "lastAccessed": 1779959987869,
-      "type": "file"
-    },
-    {
-      "path": "docs/01-Product-Design.md",
-      "accessCount": 3,
-      "lastAccessed": 1779961329516,
-      "type": "file"
-    },
-    {
       "path": "crates/lumo-ai/src/router.rs",
-      "accessCount": 2,
-      "lastAccessed": 1779864742761,
+      "accessCount": 3,
+      "lastAccessed": 1779971613463,
       "type": "file"
     },
     {
@@ -342,6 +348,42 @@
       "type": "file"
     },
     {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1779962421411,
+      "type": "file"
+    },
+    {
+      "path": "docs/00-LumoRPA-Master-Report.md",
+      "accessCount": 2,
+      "lastAccessed": 1779962447068,
+      "type": "file"
+    },
+    {
+      "path": "docs/02-Architecture-Design.md",
+      "accessCount": 2,
+      "lastAccessed": 1779962475612,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-actions/src/data.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779971455586,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-actions/src/http.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779971486285,
+      "type": "file"
+    },
+    {
+      "path": "crates/lumo-core/src/action.rs",
+      "accessCount": 2,
+      "lastAccessed": 1779971497337,
+      "type": "file"
+    },
+    {
       "path": "apps/desktop/src-tauri/tauri.conf.json",
       "accessCount": 1,
       "lastAccessed": 1779786838560,
@@ -360,21 +402,9 @@
       "type": "file"
     },
     {
-      "path": "docs/00-LumoRPA-Master-Report.md",
-      "accessCount": 1,
-      "lastAccessed": 1779787911074,
-      "type": "file"
-    },
-    {
       "path": "docs/03-Subsystems-Deep-Dive.md",
       "accessCount": 1,
       "lastAccessed": 1779787972387,
-      "type": "file"
-    },
-    {
-      "path": "docs/02-Architecture-Design.md",
-      "accessCount": 1,
-      "lastAccessed": 1779787972490,
       "type": "file"
     },
     {
@@ -384,39 +414,15 @@
       "type": "file"
     },
     {
-      "path": "crates/lumo-actions/src/data.rs",
-      "accessCount": 1,
-      "lastAccessed": 1779865598737,
-      "type": "file"
-    },
-    {
       "path": "crates/lumo-actions/src/control.rs",
       "accessCount": 1,
       "lastAccessed": 1779865599144,
       "type": "file"
     },
     {
-      "path": "README.md",
-      "accessCount": 1,
-      "lastAccessed": 1779884645634,
-      "type": "file"
-    },
-    {
       "path": "crates/lumo-cli/src/cmd/run.rs",
       "accessCount": 1,
       "lastAccessed": 1779894455402,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-actions/src/http.rs",
-      "accessCount": 1,
-      "lastAccessed": 1779939891913,
-      "type": "file"
-    },
-    {
-      "path": "crates/lumo-core/src/action.rs",
-      "accessCount": 1,
-      "lastAccessed": 1779939891963,
       "type": "file"
     }
   ],

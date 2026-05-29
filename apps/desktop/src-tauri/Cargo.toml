@@ -25,6 +25,7 @@ lumo-recorder.workspace = true
 lumo-skills.workspace = true
 lumo-storage.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

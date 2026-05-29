@@ -95,4 +95,22 @@ CREATE TABLE IF NOT EXISTS queue (
 );
 CREATE INDEX IF NOT EXISTS idx_queue_topic_avail
   ON queue(topic, available_at) WHERE done_at IS NULL;
+
+-- X-10 AI call accounting. One row per LLM/vision invocation; rolled up into
+-- flow_runs.cost_token / cost_usd_micro when the run finishes.
+CREATE TABLE IF NOT EXISTS ai_calls (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  flow_run_id       TEXT NOT NULL,
+  step_id           TEXT,
+  helper            TEXT NOT NULL DEFAULT 'chat',
+  provider          TEXT NOT NULL,
+  model             TEXT NOT NULL,
+  input_tokens      INTEGER NOT NULL DEFAULT 0,
+  output_tokens     INTEGER NOT NULL DEFAULT 0,
+  latency_ms        INTEGER NOT NULL DEFAULT 0,
+  cost_usd_micro    INTEGER NOT NULL DEFAULT 0,
+  created_at        INTEGER NOT NULL,
+  FOREIGN KEY (flow_run_id) REFERENCES flow_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ai_calls_run ON ai_calls(flow_run_id, created_at);
 "#;

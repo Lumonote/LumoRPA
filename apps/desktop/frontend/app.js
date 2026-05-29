@@ -23,6 +23,17 @@ const FAMILY_LABEL = {
   flow:     "子流程",
   data:     "数据处理",
   control:  "控制流",
+  string:   "字符串",
+  regex:    "正则表达式",
+  date:     "日期 / 时间",
+  math:     "数学 / 计算",
+  list:     "列表",
+  json:     "JSON",
+  csv:      "CSV",
+  hash:     "哈希 / 加密",
+  util:     "通用工具",
+  system:   "系统",
+  db:       "数据库",
   misc:     "其它",
 };
 
@@ -61,6 +72,91 @@ const ACTION_ZH = {
   "file.exists":      { label: "文件存在?",        hint: "判断路径是否存在" },
 
   "http.request":     { label: "HTTP 请求",        hint: "发起 GET / POST / PUT / DELETE 请求" },
+
+  // ── 字符串 ──
+  "string.upper":       { label: "字符串大写",       hint: "把字符串转为大写" },
+  "string.lower":       { label: "字符串小写",       hint: "把字符串转为小写" },
+  "string.trim":        { label: "去除空白",         hint: "去掉字符串首尾空白" },
+  "string.length":      { label: "字符长度",         hint: "按字符计数（不按字节）" },
+  "string.split":       { label: "字符串切分",       hint: "按分隔符切成数组" },
+  "string.join":        { label: "数组拼接成字符串", hint: "用分隔符把数组连成字符串" },
+  "string.replace":     { label: "字符串替换",       hint: "把 from 替换为 to（字面量）" },
+  "string.contains":    { label: "包含子串?",        hint: "判断字符串是否包含子串" },
+  "string.starts_with": { label: "以…开头?",         hint: "判断是否以前缀开头" },
+  "string.ends_with":   { label: "以…结尾?",         hint: "判断是否以后缀结尾" },
+  "string.substring":   { label: "截取子串",         hint: "按字符位置切片，支持负数" },
+  "string.repeat":      { label: "重复字符串",       hint: "把字符串重复 N 次" },
+  "string.pad_left":    { label: "左侧补齐",         hint: "把字符串补齐到指定宽度" },
+  "string.pad_right":   { label: "右侧补齐",         hint: "把字符串补齐到指定宽度" },
+  "string.format":      { label: "模板替换",         hint: "替换 {key} 占位符" },
+
+  // ── 正则 ──
+  "regex.match":        { label: "正则匹配?",        hint: "判断文本是否匹配正则" },
+  "regex.find_all":     { label: "正则查找全部",     hint: "返回所有匹配的字符串数组" },
+  "regex.replace":      { label: "正则替换",         hint: "支持 $1 $2 反向引用" },
+  "regex.captures":     { label: "正则捕获组",       hint: "返回第一个匹配的命名/编号分组" },
+
+  // ── 日期 ──
+  "date.now":           { label: "当前时间",         hint: "返回 RFC3339 时间字符串" },
+  "date.parse":         { label: "解析时间",         hint: "把任意日期字符串规范成 RFC3339" },
+  "date.format":        { label: "格式化时间",       hint: "按 strftime 格式输出" },
+  "date.add":           { label: "时间偏移",         hint: "按天/小时/分/秒加减" },
+  "date.diff":          { label: "时间差",           hint: "返回 a-b 的差值（天/时/分/秒）" },
+  "date.weekday":       { label: "星期几",           hint: "返回 1=周一 … 7=周日" },
+
+  // ── 数学 ──
+  "math.round":         { label: "四舍五入",         hint: "保留指定位小数" },
+  "math.random":        { label: "随机数",           hint: "范围内随机数（整/浮点）" },
+  "math.min":           { label: "最小值",           hint: "数组中最小数" },
+  "math.max":           { label: "最大值",           hint: "数组中最大数" },
+  "math.sum":           { label: "求和",             hint: "对数组求和" },
+  "math.avg":           { label: "平均值",           hint: "对数组求算术平均" },
+  "math.abs":           { label: "绝对值",           hint: "取数字的绝对值" },
+
+  // ── 列表 ──
+  "list.length":        { label: "列表长度",         hint: "返回数组长度" },
+  "list.append":        { label: "追加元素",         hint: "在数组末尾追加一项" },
+  "list.sort":          { label: "排序",             hint: "升/降序，支持 by 字段" },
+  "list.unique":        { label: "去重",             hint: "保留出现顺序的去重" },
+  "list.range":         { label: "生成区间",         hint: "[start, end) 整数数组" },
+  "list.contains":      { label: "包含某值?",        hint: "数组是否包含某个值" },
+  "list.get":           { label: "按索引取值",       hint: "支持负数索引" },
+  "list.slice":         { label: "切片",             hint: "数组切片 [start:end]" },
+  "list.reverse":       { label: "倒序",             hint: "倒序排列数组" },
+  "list.pluck":         { label: "抽取字段",         hint: "从对象数组中取出某字段" },
+
+  // ── JSON ──
+  "json.get":           { label: "按路径取值",       hint: "形如 a.b.0.c 的点号路径" },
+  "json.set":           { label: "按路径写值",       hint: "在 JSON 中按点号路径写入" },
+  "json.merge":         { label: "对象合并",         hint: "浅合并 a + b，b 优先" },
+  "json.keys":          { label: "对象键名",         hint: "返回对象的所有键" },
+  "json.values":        { label: "对象值",           hint: "返回对象的所有值" },
+  "json.delete":        { label: "按路径删除",       hint: "删除 JSON 中的某个字段" },
+
+  // ── CSV ──
+  "csv.parse":          { label: "解析 CSV",         hint: "把 CSV 文本转成数组/对象" },
+  "csv.stringify":      { label: "生成 CSV",         hint: "把数组转成 CSV 文本" },
+  "csv.read":           { label: "读取 CSV 文件",    hint: "从磁盘读 CSV 并解析" },
+  "csv.write":          { label: "写出 CSV 文件",    hint: "把数据写成 CSV 文件" },
+
+  // ── 哈希 / 编码 ──
+  "hash.sha256":        { label: "SHA-256",          hint: "SHA-256 十六进制" },
+  "hash.sha512":        { label: "SHA-512",          hint: "SHA-512 十六进制" },
+  "hash.sha1":          { label: "SHA-1（旧）",      hint: "SHA-1 十六进制" },
+  "hash.md5":           { label: "MD5（旧）",        hint: "MD5 十六进制" },
+  "util.base64_encode": { label: "Base64 编码",      hint: "把字符串编码为 Base64" },
+  "util.base64_decode": { label: "Base64 解码",      hint: "把 Base64 解码为字符串" },
+  "util.uuid":          { label: "UUID 生成",        hint: "生成随机 UUID v4" },
+
+  // ── 系统 ──
+  "system.shell":       { label: "运行 shell",       hint: "需要 LUMO_ALLOW_SHELL=1" },
+  "system.env_get":     { label: "读取环境变量",     hint: "按名字读 env" },
+  "system.sleep":       { label: "睡眠",             hint: "等待 N 毫秒" },
+  "system.platform":    { label: "系统信息",         hint: "返回 OS / arch" },
+
+  // ── 数据库 ──
+  "db.sqlite_query":    { label: "SQLite 查询",      hint: "只读 SELECT，返回行" },
+  "db.sqlite_exec":     { label: "SQLite 写入",      hint: "执行 INSERT/UPDATE/DDL" },
 };
 
 function categoryOf(actionId) {
@@ -74,6 +170,17 @@ function categoryOf(actionId) {
   if (actionId.startsWith("ai."))                          return "ai";
   if (actionId.startsWith("skill."))                       return "skill";
   if (actionId === "lumo.flow")                            return "flow";
+  if (actionId.startsWith("string."))                      return "string";
+  if (actionId.startsWith("regex."))                       return "regex";
+  if (actionId.startsWith("date."))                        return "date";
+  if (actionId.startsWith("math."))                        return "math";
+  if (actionId.startsWith("list."))                        return "list";
+  if (actionId.startsWith("json."))                        return "json";
+  if (actionId.startsWith("csv."))                         return "csv";
+  if (actionId.startsWith("hash."))                        return "hash";
+  if (actionId.startsWith("util."))                        return "util";
+  if (actionId.startsWith("system."))                      return "system";
+  if (actionId.startsWith("db."))                          return "db";
   if (actionId.startsWith("data.") || actionId === "control.set_var") return "data";
   if (actionId.startsWith("control."))                     return "control";
   return "misc";
@@ -105,6 +212,8 @@ const state = {
   activeRun: null,
   activeRunSteps: [],
   activeStepRun: null,
+  activeArtifacts: [],        // X-07: blob artifacts for the active run
+  artifactBlobCache: new Map(), // artifactId -> data URL (lazy-loaded)
   providers: null,
   providerDraft: null,
   features: [],
@@ -589,24 +698,105 @@ async function renderCapabilitiesPanel() {
 // ─── Flow list + Actions library ───────────────────────────────────────────
 
 async function refreshFlows() {
-  state.examples = await call("list_examples");
+  state.examples = await call("list_flow_library");
   renderFlowList();
+}
+
+const BLANK_FLOW_TEMPLATE = `apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: NAME
+  version: 0.1.0
+  name: 新流程
+spec:
+  capabilities:
+    network: []
+  steps:
+    - id: hello
+      action: control.log
+      with: { message: "hello {{ inputs.name | default('world') }}" }
+`;
+
+async function createNewFlow() {
+  const proposed = `flow-${new Date().toISOString().slice(0, 10)}`;
+  const name = prompt("流程文件名（不带扩展名）：", proposed);
+  if (!name) return;
+  const yaml = BLANK_FLOW_TEMPLATE.replace("id: NAME", `id: ${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`);
+  try {
+    const path = await call("save_flow_as", { name, source: yaml });
+    await refreshFlows();
+    await loadFlow(path);
+    toast("已创建", path, "ok");
+  } catch (e) {
+    toast("新建失败", String(e), "bad");
+  }
+}
+
+async function saveCurrentFlowAs() {
+  const source = (state.source || "").trim();
+  if (!source) {
+    toast("当前编辑器为空", "先输入流程内容再另存为", "bad");
+    return;
+  }
+  const seed = (state.flowPath || "").split("/").pop()?.replace(/\.lumoflow\.ya?ml$/, "") || "flow-copy";
+  const name = prompt("另存为流程名（不带扩展名）：", seed);
+  if (!name) return;
+  try {
+    const path = await call("save_flow_as", { name, source });
+    await refreshFlows();
+    await loadFlow(path);
+    toast("已另存", path, "ok");
+  } catch (e) {
+    toast("另存失败", String(e), "bad");
+  }
 }
 
 function renderFlowList() {
   const box = $("flowList");
   if (!state.examples.length) {
-    box.innerHTML = `<div class="flow-item"><div class="title">无示例</div><div class="meta">examples 目录为空</div></div>`;
+    box.innerHTML = `<div class="flow-item"><div class="title">空流程库</div><div class="meta">点击「新建流程」开始，或通过录制保存流程</div></div>`;
     return;
   }
-  box.innerHTML = state.examples
-    .map(
-      (f) => `<button class="flow-item ${f.path === state.flowPath ? "is-active" : ""}" data-path="${html(f.path)}">
-        <div class="title">${html(f.name || f.id || f.fileName)}</div>
-        <div class="meta">${html(f.valid ? `${f.stepCount} 步 · ${f.fileName}` : f.error)}</div>
-      </button>`
-    )
-    .join("");
+  // Group by source: user-saved → recordings → examples.
+  const groups = { user: [], recording: [], example: [] };
+  for (const f of state.examples) {
+    (groups[f.source] || groups.example).push(f);
+  }
+  const SECTION_LABELS = {
+    user:      { label: "我的流程",   collapsed: false },
+    recording: { label: "录制产物",   collapsed: false },
+    example:   { label: "内置示例",   collapsed: true  },
+  };
+  const renderSection = (kind, items) => {
+    if (!items.length) return "";
+    const cfg = SECTION_LABELS[kind];
+    const folded = state.flowSectionFolded?.[kind] ?? cfg.collapsed;
+    const rows = items
+      .map((f) => `
+        <div class="flow-row" data-source="${kind}">
+          <button class="flow-item ${f.path === state.flowPath ? "is-active" : ""}" data-path="${html(f.path)}">
+            <div class="title">${html(f.name || f.id || f.fileName)}</div>
+            <div class="meta">${html(f.valid ? `${f.stepCount} 步 · ${f.fileName}` : (f.error || "解析失败"))}</div>
+          </button>
+          <div class="flow-row-actions">
+            <button class="icon-btn" data-act="dup"  data-path="${html(f.path)}" title="复制到我的流程">⎘</button>
+            ${kind !== "example" ? `<button class="icon-btn danger" data-act="del" data-path="${html(f.path)}" title="删除">✕</button>` : ""}
+          </div>
+        </div>`)
+      .join("");
+    return `
+      <div class="flow-section ${folded ? "is-folded" : ""}" data-section="${kind}">
+        <div class="flow-section-head" data-toggle="${kind}">
+          <span>${cfg.label} · ${items.length}</span>
+          <span class="chev">${folded ? "▸" : "▾"}</span>
+        </div>
+        <div class="flow-section-body">${rows}</div>
+      </div>`;
+  };
+  box.innerHTML =
+    renderSection("user", groups.user)
+    + renderSection("recording", groups.recording)
+    + renderSection("example", groups.example);
 }
 
 async function refreshActions() {
@@ -622,7 +812,7 @@ async function refreshActions() {
 function renderActions() {
   const query = ($("actionSearch").value || "").trim().toLowerCase();
   const box = $("actionLibrary");
-  const order = ["browser","condition","loop","wait","excel","file","http","ai","skill","flow","data","control","misc"];
+  const order = ["browser","condition","loop","wait","excel","file","http","ai","skill","flow","data","string","regex","date","math","list","json","csv","hash","util","system","db","control","misc"];
   const byCategory = new Map();
   for (const a of state.actions) {
     const cat = categoryOf(a.id);
@@ -1950,9 +2140,46 @@ function onRunComplete(response) {
   $("outputBox").textContent = pretty({ runId: response.report.runId, outputs: response.report.outputs });
   $("timelineLabel").textContent = `${response.report.runId.slice(0, 14)}… · ${response.report.durationMs}ms`;
   $("timelineCounts").textContent = `${response.report.stepsOk}/${response.report.stepsTotal} 成功 · ${response.report.stepsFailed} 失败`;
-  renderTimeline();
+  loadArtifacts(response.report.runId).finally(renderTimeline);
   setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
   switchRightSection("outputs");
+}
+
+// X-07 Time-Travel: pull the run's blob artifacts (screenshots / DOM / HAR) so
+// the scrubber can show what the screen looked like at each step. Tolerates the
+// IPC missing on older builds.
+async function loadArtifacts(runId) {
+  state.activeArtifacts = [];
+  state.artifactBlobCache = new Map();
+  try {
+    state.activeArtifacts = (await call("list_artifacts", { runId })) || [];
+  } catch (_) {
+    state.activeArtifacts = [];
+  }
+}
+
+// Find the artifact (preferring screenshots) attributed to a given step path /
+// id. step_runs.path and artifacts.step_id are matched loosely so loop-nested
+// steps still line up.
+function artifactForStep(step) {
+  if (!state.activeArtifacts.length || !step) return null;
+  const matches = state.activeArtifacts.filter(
+    (a) => a.step_id && (a.step_id === step.stepId || a.step_id === step.path)
+  );
+  const pool = matches.length ? matches : [];
+  return pool.find((a) => a.kind === "screenshot") || pool[0] || null;
+}
+
+async function blobDataUrl(artifactId) {
+  if (state.artifactBlobCache.has(artifactId)) return state.artifactBlobCache.get(artifactId);
+  try {
+    const dto = await call("read_artifact_blob", { artifactId });
+    state.artifactBlobCache.set(artifactId, dto.dataUrl);
+    return dto.dataUrl;
+  } catch (_) {
+    state.artifactBlobCache.set(artifactId, null);
+    return null;
+  }
 }
 
 function renderTimeline() {
@@ -1983,13 +2210,34 @@ function showStepDetail(idx) {
   if (!step) return;
   state.activeStepRun = step;
   $$(".timeline-step").forEach((el, i) => el.classList.toggle("is-active", i === idx));
+  const art = artifactForStep(step);
   $("timelineDetail").innerHTML = `
     <div class="kv"><span>节点</span><strong>${html(step.path)}</strong></div>
     <div class="kv"><span>状态</span><strong style="color: ${step.state === "failed" ? "var(--bad)" : "var(--ok)"}">${html(step.state)}</strong></div>
     <div class="kv"><span>耗时</span><strong>${html(step.durationMs ?? 0)} ms</strong></div>
     ${step.error ? `<div class="kv"><span>错误</span><strong style="color: var(--bad)">${html(step.error)}</strong></div>` : ""}
+    ${art ? `<div class="timeline-screenshot" id="timelineShot"><div class="shot-loading">加载快照…</div></div>` : ""}
     ${step.outputJson ? `<pre>${html(pretty(step.outputJson))}</pre>` : ""}
   `;
+  if (art) {
+    blobDataUrl(art.id).then((url) => {
+      const box = $("timelineShot");
+      if (!box) return;
+      if (!url) {
+        box.innerHTML = `<div class="shot-loading">快照不可用</div>`;
+        return;
+      }
+      if (art.mime && art.mime.startsWith("image/")) {
+        box.innerHTML = `<img src="${url}" alt="step ${html(step.path)} screenshot" loading="lazy" />
+          <div class="shot-caption">${html(art.kind)} · ${html(step.path)}</div>`;
+      } else if (art.mime === "text/html") {
+        box.innerHTML = `<iframe src="${url}" sandbox=""></iframe>
+          <div class="shot-caption">${html(art.kind)} · ${html(step.path)}</div>`;
+      } else {
+        box.innerHTML = `<div class="shot-caption">${html(art.kind)} · ${html(art.mime)} (${html(art.size)} bytes)</div>`;
+      }
+    });
+  }
 }
 
 // ─── Runs history ──────────────────────────────────────────────────────────
@@ -2022,7 +2270,36 @@ async function showHistoricalRun(runId) {
   const detail = await call("show_run", { runId });
   state.activeRun = detail.run;
   state.activeRunSteps = detail.steps;
+  // X-10: fetch AI cost rows in parallel; tolerate the storage layer not having
+  // any (older runs predate ai_calls). X-07: also pull blob artifacts so the
+  // replay scrubber can show per-step screenshots.
+  let aiCalls = [];
+  try { aiCalls = await call("run_cost", { runId }); } catch (_) {}
+  await loadArtifacts(runId);
   $$("#runsList .run-row").forEach((el) => el.classList.toggle("is-active", el.dataset.runId === runId));
+  const tokenTotal = (detail.run.costToken || 0).toLocaleString();
+  const usd = ((detail.run.costUsdMicro || 0) / 1_000_000).toFixed(4);
+  const costRows = aiCalls
+    .map(
+      (c) => `<tr style="border-top: 1px solid var(--line)">
+        <td style="font-family:'SF Mono',Consolas,monospace">${html(c.step_id || "-")}</td>
+        <td>${html(c.provider)}</td>
+        <td>${html(c.model)}</td>
+        <td style="text-align:right">${c.input_tokens}</td>
+        <td style="text-align:right">${c.output_tokens}</td>
+        <td style="text-align:right">${c.latency_ms}ms</td>
+        <td style="text-align:right">$${(c.cost_usd_micro / 1_000_000).toFixed(4)}</td>
+      </tr>`
+    )
+    .join("");
+  const costBlock = aiCalls.length
+    ? `
+    <div class="section-title" style="margin-top: 10px">AI 用量 (X-10)</div>
+    <table style="width: 100%; font-size: 11.5px; border-collapse: collapse">
+      <thead><tr><th style="text-align:left">step</th><th style="text-align:left">provider</th><th style="text-align:left">model</th><th style="text-align:right">in</th><th style="text-align:right">out</th><th style="text-align:right">latency</th><th style="text-align:right">USD</th></tr></thead>
+      <tbody>${costRows}</tbody>
+    </table>`
+    : "";
   $("runDetail").innerHTML = `
     <div class="kv-list" style="padding: 0">
       <div class="kv"><span>流程</span><strong>${html(detail.run.flowId)} @ ${html(detail.run.flowVersion)}</strong></div>
@@ -2030,6 +2307,8 @@ async function showHistoricalRun(runId) {
       <div class="kv"><span>开始时间</span><strong>${html(detail.run.startedAt || "-")}</strong></div>
       <div class="kv"><span>结束时间</span><strong>${html(detail.run.finishedAt || "-")}</strong></div>
       <div class="kv"><span>耗时</span><strong>${html(detail.run.durationMs ?? "-")} ms</strong></div>
+      <div class="kv"><span>AI Token</span><strong>${tokenTotal}</strong></div>
+      <div class="kv"><span>AI 费用</span><strong>$${usd}</strong></div>
     </div>
     <div class="section-title" style="margin-top: 10px">节点明细</div>
     <table style="width: 100%; font-size: 11.5px; border-collapse: collapse">
@@ -2047,6 +2326,7 @@ async function showHistoricalRun(runId) {
           .join("")}
       </tbody>
     </table>
+    ${costBlock}
     <pre style="margin-top: 10px; background: var(--surface-soft); padding: 10px; border-radius: 8px; font-size: 11px; max-height: 220px; overflow: auto">${html(pretty(detail.run.outputs))}</pre>
   `;
 }
@@ -2464,6 +2744,7 @@ function renderRecorderPatch(yaml) {
       <span>▶ Recorder YAML patch · 可粘贴到 spec.steps</span>
       <div style="display:flex;gap:6px">
         <button id="recorderPatchCopyBtn" title="复制到剪贴板">📋 复制</button>
+        <button id="recorderPatchSaveBtn" title="另存为一个新流程文件，进入「录制产物」">💾 另存为新流程</button>
         <button class="primary" id="recorderPatchInsertBtn" title="追加到当前打开的流程末尾">⤓ 插入到当前流程</button>
       </div>
     </div>
@@ -2478,6 +2759,32 @@ function renderRecorderPatch(yaml) {
   };
   const insert = $("recorderPatchInsertBtn");
   if (insert) insert.onclick = () => insertRecorderPatchIntoFlow();
+  const save = $("recorderPatchSaveBtn");
+  if (save) save.onclick = () => saveRecorderPatchAsFlow();
+}
+
+async function saveRecorderPatchAsFlow() {
+  if (!pendingRecorderPatch.trim()) {
+    toast("没有可保存内容", "先录制一段操作", "bad");
+    return;
+  }
+  const proposed = `rec-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}`;
+  const name = prompt("保存为流程名（不带扩展名）：", proposed);
+  if (!name) return;
+  try {
+    const path = await call("save_recording_as_flow", {
+      name,
+      yamlHint: pendingRecorderPatch,
+    });
+    await refreshFlows();
+    await loadFlow(path);
+    pendingRecorderPatch = "";
+    const box = $("recorderPatch");
+    if (box) box.innerHTML = `<div class="muted" style="padding:8px 10px">已保存到 ${html(path)}。可继续录制或返回设计页编辑。</div>`;
+    toast("已保存到流程库", path, "ok");
+  } catch (e) {
+    toast("保存失败", String(e), "bad");
+  }
 }
 
 function insertRecorderPatchIntoFlow() {
@@ -2601,12 +2908,48 @@ function bindEvents() {
   $$("[data-preset]").forEach((b) => b.addEventListener("click", () => applyPreset(b.dataset.preset)));
 
   // Flow list
-  $("flowList").addEventListener("click", (e) => {
+  $("flowList").addEventListener("click", async (e) => {
+    // Fold toggle
+    const head = e.target.closest("[data-toggle]");
+    if (head) {
+      const kind = head.dataset.toggle;
+      state.flowSectionFolded ||= {};
+      state.flowSectionFolded[kind] = !head.parentElement.classList.contains("is-folded")
+        ? true
+        : false;
+      renderFlowList();
+      return;
+    }
+    // Row icon actions (delete / duplicate)
+    const act = e.target.closest("[data-act]");
+    if (act) {
+      e.stopPropagation();
+      const path = act.dataset.path;
+      try {
+        if (act.dataset.act === "del") {
+          if (!confirm(`确认删除流程文件：\n${path}`)) return;
+          await call("delete_flow", { path });
+          if (state.flowPath === path) state.flowPath = null;
+          await refreshFlows();
+          toast("已删除", path, "ok");
+        } else if (act.dataset.act === "dup") {
+          const newPath = await call("duplicate_flow", { path });
+          await refreshFlows();
+          await loadFlow(newPath);
+          toast("已复制", newPath, "ok");
+        }
+      } catch (err) {
+        toast("操作失败", String(err), "bad");
+      }
+      return;
+    }
     const item = e.target.closest("[data-path]");
     if (item) loadFlow(item.dataset.path).catch(reportError);
   });
   $("flowPath").addEventListener("keydown", (e) => { if (e.key === "Enter") loadFlow().catch(reportError); });
   $("refreshFlowsBtn").addEventListener("click", () => refreshFlows().catch(reportError));
+  $("newFlowBtn").addEventListener("click", () => createNewFlow().catch(reportError));
+  $("saveFlowAsBtn").addEventListener("click", () => saveCurrentFlowAs().catch(reportError));
 
   // Action library: search + collapse + drag
   $("actionSearch").addEventListener("input", renderActions);
@@ -2761,7 +3104,15 @@ async function boot() {
       refreshSettings().catch(() => {}),
       loadFeatureMap().catch(() => {}),
     ]);
-    if (state.examples[0]) await loadFlow(state.examples[0].path);
+    if (state.examples[0]) {
+      // Prefer user-saved → recordings → bundled examples so a returning
+      // operator lands on the flow they were actually editing.
+      const order = { user: 0, recording: 1, example: 2 };
+      const first = [...state.examples].sort(
+        (a, b) => (order[a.source] ?? 9) - (order[b.source] ?? 9),
+      )[0];
+      await loadFlow(first.path);
+    }
     setStatus("就绪");
   } catch (e) {
     reportError(e);

@@ -24,6 +24,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::Instrument;
 use ulid::Ulid;
 
 #[derive(Debug, Clone)]
@@ -142,6 +143,11 @@ impl FlowVm {
             None
         };
         if let Some(repo) = &self.repo {
+            // X-10: aggregate every ai_calls row from this run into the
+            // flow_runs cost columns before we close the run. After this the
+            // CLI / Studio can show "this run cost $0.012 / 1.2k tokens"
+            // without re-scanning ai_calls every render.
+            let _ = repo.rollup_run_cost(&run_id);
             let _ = repo.finish_run(&run_id, if ok { "ok" } else { "failed" }, outputs.as_ref());
         }
         result?;
@@ -273,12 +279,32 @@ async fn execute_step(
         .unwrap_or_else(|| "fixed".into());
     let initial_ms = step.retry.as_ref().map(|r| r.initial_ms).unwrap_or(500);
 
+    // Make the step id visible to the action so cost / OTel rows can be
+    // attributed correctly (X-10). Also expose the full nested path so
+    // `attach_artifact` (X-07 time-travel) lines blobs up against the
+    // step_runs path column.
+    ctx.set_current_step(&step.id);
+    ctx.set_current_step_path(&path);
+
     let mut attempt: u32 = 1;
     loop {
         let try_input = action_input.clone();
         let started_at = Utc::now();
         let t0 = Instant::now();
-        match action.execute(ctx, try_input).await {
+        // X-05: OTel GenAI semconv — wrap each action execution in a tracing
+        // span carrying the canonical `otel.*` / `step.*` / `flow.run_id`
+        // fields. `tracing` spans are the OpenTelemetry data source any
+        // subscriber/exporter consumes; we use `Instrument` (not `enter()`)
+        // because the span must stay attached across the `.await` boundary.
+        let exec_span = tracing::info_span!(
+            "lumo.step.execute",
+            "otel.name" = %format!("lumo.step {}", step.id),
+            "step.id" = %step.id,
+            "step.action" = %step.action,
+            "step.path" = %path,
+            "flow.run_id" = %ctx.run_id(),
+        );
+        match action.execute(ctx, try_input).instrument(exec_span).await {
             Ok(result) => {
                 let finished_at = Utc::now();
                 let _elapsed_ms = t0.elapsed().as_millis() as i64;
