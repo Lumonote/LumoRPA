@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use ulid::Ulid;
 
@@ -31,6 +32,10 @@ pub struct StepCtx {
     /// action rejects invocations past a fixed ceiling to stop runaway / cyclic
     /// recursion (stack overflow / OOM).
     skill_depth: u32,
+    /// Persisted step sequence counter. Shared (via `Arc`) across parallel
+    /// branch forks so the `step_runs (flow_run_id, seq)` primary key stays
+    /// unique even when branches persist concurrently (P0-4).
+    seq: Arc<AtomicI64>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -40,7 +45,6 @@ struct CtxInner {
     vars: Map<String, Value>,
     bindings: Map<String, Value>,
     log_buffer: Vec<String>,
-    next_seq: i64,
     stats: RunStats,
     /// Step id currently being executed. Set by the VM right before
     /// `Action::execute`; lets actions (e.g. `ai.chat`) attribute cost rows
@@ -88,13 +92,13 @@ impl StepCtx {
             ai_provider: None,
             flow_ai: None,
             skill_depth: 0,
+            seq: Arc::new(AtomicI64::new(0)),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs,
                 steps: Map::new(),
                 vars: Map::new(),
                 bindings: Map::new(),
                 log_buffer: Vec::new(),
-                next_seq: 0,
                 stats: RunStats::default(),
                 current_step_id: None,
                 current_step_path: None,
@@ -212,10 +216,63 @@ impl StepCtx {
     }
 
     pub fn next_step_seq(&self) -> i64 {
+        self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// P0-4: produce an isolated child context for a `control.parallel` branch.
+    /// The fork gets a deep copy of the current inputs/vars/bindings/steps so
+    /// concurrent branches can't race on shared mutable state, while the
+    /// registry/repo/capabilities/AI provider and the persisted `seq` counter
+    /// are shared (read-only or append-only). Call [`StepCtx::merge_branch`]
+    /// afterward to fold the branch's results back.
+    pub fn fork(&self) -> StepCtx {
+        let g = self.inner.lock();
+        StepCtx {
+            run_id: self.run_id.clone(),
+            flow_id: self.flow_id.clone(),
+            registry: self.registry.clone(),
+            capabilities: self.capabilities.clone(),
+            vault_names: self.vault_names.clone(),
+            repo: self.repo.clone(),
+            artifacts_dir: self.artifacts_dir.clone(),
+            ai_provider: self.ai_provider.clone(),
+            flow_ai: self.flow_ai.clone(),
+            skill_depth: self.skill_depth,
+            seq: self.seq.clone(),
+            inner: Arc::new(Mutex::new(CtxInner {
+                inputs: g.inputs.clone(),
+                steps: g.steps.clone(),
+                vars: g.vars.clone(),
+                bindings: g.bindings.clone(),
+                log_buffer: Vec::new(),
+                stats: RunStats::default(),
+                current_step_id: g.current_step_id.clone(),
+                current_step_path: g.current_step_path.clone(),
+                last_screenshot: None,
+            })),
+        }
+    }
+
+    /// P0-4: fold a finished parallel branch's recorded step outputs, vars, run
+    /// stats, and logs back into this (parent) context after the join. Branches
+    /// should write distinct step ids / var names; on collision the
+    /// later-merged branch wins (callers merge in deterministic branch order).
+    pub fn merge_branch(&self, branch: &StepCtx) {
+        let b = branch.inner.lock();
         let mut g = self.inner.lock();
-        let seq = g.next_seq;
-        g.next_seq += 1;
-        seq
+        for (k, v) in b.steps.iter() {
+            g.steps.insert(k.clone(), v.clone());
+        }
+        for (k, v) in b.vars.iter() {
+            g.vars.insert(k.clone(), v.clone());
+        }
+        g.stats.executed += b.stats.executed;
+        g.stats.ok += b.stats.ok;
+        g.stats.failed += b.stats.failed;
+        g.stats.skipped += b.stats.skipped;
+        g.stats.retried += b.stats.retried;
+        g.stats.caught += b.stats.caught;
+        g.log_buffer.extend(b.log_buffer.iter().cloned());
     }
 
     /// Stash the step id about to run so `Action::execute` can read it back

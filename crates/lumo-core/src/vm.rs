@@ -781,11 +781,12 @@ async fn run_parallel(
     parent_path: Option<String>,
     depth: i64,
 ) -> Result<(), ExecError> {
-    // D-10: concurrent branch execution. StepCtx is Clone with Arc<Mutex<inner>>
-    // so each branch sees and updates the same step bindings / vars. We use
-    // `futures::future::join_all` to drive branches cooperatively on the
-    // current task — that gives async concurrency for I/O-bound work
-    // (browser, http, file) without needing the inner state to be Send.
+    // D-10: concurrent branch execution. Each branch runs on an *isolated*
+    // fork of the context (P0-4) so concurrent branches can't corrupt each
+    // other's vars / loop bindings; only the persisted `seq` counter is shared
+    // (so step rows stay uniquely keyed). We use `futures::future::join_all` to
+    // drive branches cooperatively on the current task — async concurrency for
+    // I/O-bound work (browser, http, file) without needing inner state to be Send.
     let started_at = Utc::now();
     let rendered = render_value_inline(ctx, &step.with)?;
     let input_hash = Sha256::digest(rendered.to_string().as_bytes()).to_vec();
@@ -821,11 +822,11 @@ async fn run_parallel(
         return Ok(());
     }
 
-    // Materialize per-branch state on the stack so the futures can borrow into it.
+    // Materialize per-branch forked state on the stack so the futures can borrow it.
     let mut branch_state: Vec<(StepCtx, Vec<Step>, String)> = branches
         .into_iter()
         .enumerate()
-        .map(|(i, body)| (ctx.clone(), body, format!("{path}/branch[{i}]")))
+        .map(|(i, body)| (ctx.fork(), body, format!("{path}/branch[{i}]")))
         .collect();
 
     let futs: Vec<_> = branch_state
@@ -836,6 +837,12 @@ async fn run_parallel(
         .collect();
 
     let results = futures::future::join_all(futs).await;
+
+    // P0-4: fold each branch's isolated state back into the parent, in branch
+    // order for deterministic last-writer-wins on any colliding keys.
+    for (branch_ctx, _, _) in &branch_state {
+        ctx.merge_branch(branch_ctx);
+    }
 
     // First failure wins; everything else still completes.
     let first_err = results.into_iter().find_map(|r| r.err());

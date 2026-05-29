@@ -287,3 +287,54 @@ spec:
     let elapsed = t0.elapsed().as_millis();
     assert!(elapsed < 150, "expected concurrent ≈60ms, got {elapsed}ms");
 }
+
+#[tokio::test]
+async fn control_parallel_branches_have_isolated_bindings() {
+    // P0-4: concurrent branches must NOT share mutable loop bindings. Each
+    // branch loops over its own item, sleeps (forcing interleaving), then
+    // records the item. With shared state one branch overwrites/clears the
+    // other's `item` binding and the recorded values get corrupted. With
+    // isolated forks each branch sees only its own item, and the per-branch
+    // vars merge back so the post-parallel steps can read them.
+    let report = run(r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  steps:
+    - id: par
+      action: control.parallel
+      branches:
+        - - id: loop0
+            action: control.for_each
+            with: { in: ["aaa"] }
+            do:
+              - { id: s0, action: control.sleep, with: { ms: 60 } }
+              - { id: w0, action: control.set_var, with: { name: r0, value: "{{ item }}" } }
+        - - id: loop1
+            action: control.for_each
+            with: { in: ["bbb"] }
+            do:
+              - { id: s1, action: control.sleep, with: { ms: 60 } }
+              - { id: w1, action: control.set_var, with: { name: r1, value: "{{ item }}" } }
+    - id: read0
+      action: control.set_var
+      with: { name: out0, value: "{{ vars.r0 }}" }
+    - id: read1
+      action: control.set_var
+      with: { name: out1, value: "{{ vars.r1 }}" }
+"#)
+    .await;
+    assert!(report.success);
+    let out = report.outputs.expect("outputs");
+    assert_eq!(
+        out.pointer("/read0/result").and_then(serde_json::Value::as_str),
+        Some("aaa"),
+        "branch 0 must see its own item, not branch 1's"
+    );
+    assert_eq!(
+        out.pointer("/read1/result").and_then(serde_json::Value::as_str),
+        Some("bbb"),
+        "branch 1 must see its own item, not branch 0's"
+    );
+}
