@@ -111,4 +111,66 @@ async fn unzip_rejects_when_total_exceeds_limit() {
     .await
     .unwrap_err();
     assert!(err.contains("exceeds limit"), "got: {err}");
+    assert!(
+        !out.join("big.txt").exists(),
+        "partial output must be removed on overflow"
+    );
+}
+
+#[tokio::test]
+async fn unzip_dir_only_archive_outside_sandbox_is_denied() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let archive = src_dir.path().join("dirs.zip");
+    // Hand-craft a zip carrying ONLY a directory entry (no files).
+    {
+        let f = std::fs::File::create(&archive).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.add_directory("subdir/", opts).unwrap();
+        zw.finish().unwrap();
+    }
+    // dest lives in a SEPARATE tempdir for which we grant no write.
+    let dest_dir = tempfile::tempdir().unwrap();
+    let out = dest_dir.path().join("out");
+    let err = run_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": out}),
+        fs_caps(src_dir.path()), // read+write on src only, NOT on dest
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(
+        !out.join("subdir").exists(),
+        "no directory may be created outside the sandbox"
+    );
+}
+
+#[tokio::test]
+async fn unzip_rejects_when_entry_count_exceeds_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let caps = fs_caps(dir.path());
+    let mut paths = Vec::new();
+    for i in 0..3 {
+        let p = dir.path().join(format!("f{i}.txt"));
+        std::fs::write(&p, "x").unwrap();
+        paths.push(p);
+    }
+    let archive = dir.path().join("many.zip");
+    ok_with(
+        "archive.zip",
+        json!({"paths": paths, "dest": archive}),
+        caps.clone(),
+    )
+    .await;
+
+    let out = dir.path().join("unpacked");
+    let err = run_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": out, "max_entries": 2}),
+        caps,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("max_entries"), "got: {err}");
 }

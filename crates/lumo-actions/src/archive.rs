@@ -23,6 +23,12 @@ pub fn register(r: &mut ActionRegistry) {
 /// unless the caller raises `max_total_bytes`.
 const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
+/// zip-bomb backstop (count axis): refuse archives with more than this many
+/// entries unless the caller raises `max_entries`. Generous enough for legit
+/// large archives (e.g. `node_modules`) but bounds an inode/handle bomb of many
+/// tiny entries that never trips the byte cap.
+const DEFAULT_MAX_ENTRIES: u64 = 1_000_000;
+
 // ─── archive.zip ──────────────────────────────────────────────────────────────
 
 pub struct ZipAction;
@@ -192,6 +198,8 @@ struct UnzipIn {
     dest: String,
     #[serde(default)]
     max_total_bytes: Option<u64>,
+    #[serde(default)]
+    max_entries: Option<u64>,
 }
 
 /// Resolve a zip entry name to a path under `dest`, rejecting any entry that
@@ -298,7 +306,8 @@ impl Action for UnzipAction {
                 "properties": {
                     "src": { "type": "string" },
                     "dest": { "type": "string" },
-                    "max_total_bytes": { "type": "integer" }
+                    "max_total_bytes": { "type": "integer" },
+                    "max_entries": { "type": "integer" }
                 },
                 "additionalProperties": false
             })
@@ -310,12 +319,14 @@ impl Action for UnzipAction {
             src,
             dest,
             max_total_bytes,
+            max_entries,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("archive.unzip input invalid: {e}")))?;
         let src_path = PathBuf::from(&src);
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_read(&src_path)?;
         let max_total = max_total_bytes.unwrap_or(DEFAULT_MAX_TOTAL_BYTES);
+        let max_entries = max_entries.unwrap_or(DEFAULT_MAX_ENTRIES);
 
         // Pre-scan: validate every entry path (zip-slip) and cap-check writes
         // before extracting a single byte.
@@ -326,16 +337,23 @@ impl Action for UnzipAction {
             let mut zr = zip::ZipArchive::new(file).map_err(|e| {
                 StepError::msg(format!("archive.unzip read {}: {e}", src_path.display()))
             })?;
+            // Count cap (mirrors the byte cap): bound entries once, cheaply,
+            // before the pre-scan and extract loops touch any of them.
+            if zr.len() as u64 > max_entries {
+                return Err(StepError::msg(format!(
+                    "archive.unzip: entry count {} exceeds max_entries {max_entries}",
+                    zr.len()
+                )));
+            }
             for i in 0..zr.len() {
                 let entry = zr
                     .by_index(i)
                     .map_err(|e| StepError::msg(format!("archive.unzip entry {i}: {e}")))?;
                 let name = entry.name().to_string();
-                let is_dir = entry.is_dir();
+                // Cap-check EVERY target (files and directories): a dir-only
+                // archive must not create trees outside the fs_write grant.
                 let target = safe_join(&dest_path, &name)?;
-                if !is_dir {
-                    ctx.ensure_fs_write(&target)?;
-                }
+                ctx.ensure_fs_write(&target)?;
             }
         }
 
