@@ -23,6 +23,10 @@ homepage = "https://lumorpa.io"
 authors = ["LumoRPA Contributors"]
 
 [workspace.dependencies]
+# crypto
+age             = "0.11"
+rpassword       = "7"
+
 # crates
 lumo-dsl       = { path = "crates/lumo-dsl",       version = "0.1.0" }
 lumo-storage   = { path = "crates/lumo-storage",   version = "0.1.0" }
