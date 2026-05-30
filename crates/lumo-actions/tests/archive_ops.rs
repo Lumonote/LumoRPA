@@ -58,3 +58,57 @@ async fn zip_outside_sandbox_is_denied() {
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
 }
+
+#[tokio::test]
+async fn unzip_rejects_zip_slip_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("evil.zip");
+    // Hand-craft a zip whose entry name escapes the destination.
+    {
+        let f = std::fs::File::create(&archive).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("../escaped.txt", opts).unwrap();
+        use std::io::Write;
+        zw.write_all(b"pwned").unwrap();
+        zw.finish().unwrap();
+    }
+    let out = dir.path().join("out");
+    let err = run_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": out}),
+        fs_caps(dir.path()),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("zip-slip"), "got: {err}");
+    assert!(
+        !dir.path().join("escaped.txt").exists(),
+        "no file may escape the sandbox"
+    );
+}
+
+#[tokio::test]
+async fn unzip_rejects_when_total_exceeds_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.txt");
+    std::fs::write(&src, "hello world").unwrap(); // 11 bytes
+    let archive = dir.path().join("big.zip");
+    let caps = fs_caps(dir.path());
+    ok_with(
+        "archive.zip",
+        json!({"paths": [src], "dest": archive}),
+        caps.clone(),
+    )
+    .await;
+
+    let out = dir.path().join("unpacked");
+    let err = run_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": out, "max_total_bytes": 5}),
+        caps,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("exceeds limit"), "got: {err}");
+}
