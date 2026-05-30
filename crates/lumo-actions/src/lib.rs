@@ -1,5 +1,6 @@
 //! LumoRPA built-in actions.
 
+pub mod archive;
 pub mod browser;
 pub mod control;
 pub mod csv_ops;
@@ -28,6 +29,7 @@ pub fn register_all(registry: &mut ActionRegistry) {
     control::register(registry);
     data::register(registry);
     file::register(registry);
+    archive::register(registry);
     http::register(registry);
     excel::register(registry);
     browser::register(registry);
