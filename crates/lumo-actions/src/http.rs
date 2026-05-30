@@ -143,7 +143,9 @@ impl Action for RequestAction {
                     "http.request: blocked redirect to ungranted host (network capability)",
                 )
             } else {
-                StepError::msg(format!("http send: {e}"))
+                // reqwest 的 Error::Display 会带上完整 URL(query 可能含凭据,如
+                // ?api_key=...);without_url() 剥掉 URL,防凭据落 step 快照/日志。
+                StepError::msg(format!("http send: {}", e.without_url()))
             }
         })?;
         let status = resp.status().as_u16();
@@ -164,7 +166,7 @@ impl Action for RequestAction {
         let text = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("http body: {e}")))?;
+            .map_err(|e| StepError::msg(format!("http body: {}", e.without_url())))?;
         if text.len() as u64 > max_bytes {
             return Err(StepError::msg(format!(
                 "http.request: response body {} bytes exceeds max_bytes {max_bytes}",
@@ -247,7 +249,7 @@ impl Action for DownloadAction {
                     "http.download: blocked redirect to ungranted host (network capability)",
                 )
             } else {
-                StepError::msg(format!("http.download send: {e}"))
+                StepError::msg(format!("http.download send: {}", e.without_url()))
             }
         })?;
         let status = resp.status().as_u16();
@@ -279,7 +281,8 @@ impl Action for DownloadAction {
         let mut downloaded: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| StepError::msg(format!("http.download stream: {e}")))?;
+            let chunk = chunk
+                .map_err(|e| StepError::msg(format!("http.download stream: {}", e.without_url())))?;
             downloaded += chunk.len() as u64;
             // Streaming guard: also catches chunked / unknown-length responses
             // that the Content-Length pre-check can't see — delete the partial.
@@ -424,7 +427,7 @@ impl Action for UploadAction {
                             "http.upload: blocked redirect to ungranted host (network capability)",
                         )
                     } else {
-                        StepError::msg(format!("http.upload send: {e}"))
+                        StepError::msg(format!("http.upload send: {}", e.without_url()))
                     }
                 })?
             }
@@ -446,7 +449,7 @@ impl Action for UploadAction {
                             "http.upload: blocked redirect to ungranted host (network capability)",
                         )
                     } else {
-                        StepError::msg(format!("http.upload send: {e}"))
+                        StepError::msg(format!("http.upload send: {}", e.without_url()))
                     }
                 })?
             }
@@ -466,7 +469,7 @@ impl Action for UploadAction {
         let text = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("http.upload body: {e}")))?;
+            .map_err(|e| StepError::msg(format!("http.upload body: {}", e.without_url())))?;
         let body_json: Option<Value> = serde_json::from_str(&text).ok();
 
         Ok(ActionResult::from(serde_json::json!({

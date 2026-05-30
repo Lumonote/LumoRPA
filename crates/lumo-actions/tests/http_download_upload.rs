@@ -302,3 +302,31 @@ async fn request_rejects_body_over_max_bytes() {
     .unwrap_err();
     assert!(err.contains("max_bytes"), "got: {err}");
 }
+
+#[tokio::test]
+async fn http_request_transport_error_does_not_leak_url() {
+    // 传输失败时 reqwest 的 Error::Display 会带上完整 URL;flow 常把凭据放在 query
+    // (?api_key=...)或 userinfo 里。该错误串经 vm.rs 落 step 快照 + tracing 日志,
+    // 故 send / body 错误必须 without_url() 剥离 URL,防凭据泄漏。
+    let port = {
+        // 绑定后立即释放 → 该端口无监听 → 连接被拒(确定性传输错误)。
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let err = run_with(
+        "http.request",
+        json!({
+            "url": format!("http://127.0.0.1:{port}/api?api_key=SUPERSECRET"),
+            "timeout_ms": 2000
+        }),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        !err.contains("SUPERSECRET") && !err.contains("api_key="),
+        "transport error must not leak the request URL (may carry credentials in query/userinfo): {err}"
+    );
+}

@@ -242,14 +242,16 @@ impl Action for SendAction {
                         "notify.send: blocked redirect to ungranted host (network capability)",
                     )
                 } else {
-                    StepError::msg(format!("notify.send send: {e}"))
+                    // reqwest 的 Error::Display 会带上完整 URL(含 query);dingtalk 带
+                    // secret 时 URL 含 ?sign=<HMAC>。without_url() 剥掉 URL,防签名落日志/快照。
+                    StepError::msg(format!("notify.send send: {}", e.without_url()))
                 }
             })?;
         let status = resp.status().as_u16();
         let text_resp = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("notify.send body: {e}")))?;
+            .map_err(|e| StepError::msg(format!("notify.send body: {}", e.without_url())))?;
         let response: Value =
             serde_json::from_str(&text_resp).unwrap_or(Value::String(text_resp.clone()));
 

@@ -173,3 +173,35 @@ async fn notify_blocks_redirect_to_ungranted_host() {
         "got: {err}"
     );
 }
+
+#[tokio::test]
+async fn dingtalk_transport_error_does_not_leak_signed_url() {
+    // 传输层 send 失败(连接拒绝)时,reqwest 的 Error::Display 会带上完整 URL;
+    // dingtalk 带 secret 时该 URL 含 ?timestamp=...&sign=<HMAC>(派生自 secret、
+    // 1 小时窗口内可重放的有效签名)。该错误串经 vm.rs 持久化进 step 记录并
+    // tracing::warn 落日志,违反 design doc「secret 绝不进快照/日志」契约。
+    let port = {
+        // 绑定后立即释放 → 该端口无监听 → 连接被拒(确定性传输错误,非 redirect)。
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let err = common::run_with(
+        "notify.send",
+        json!({
+            "provider": "dingtalk",
+            "url": format!("http://127.0.0.1:{port}/robot"),
+            "text": "hi",
+            "secret": "S3CRET",
+            "timeout_ms": 2000
+        }),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        !err.contains("sign=") && !err.contains("timestamp="),
+        "transport error must not leak the signed URL query (sign/timestamp derived from secret): {err}"
+    );
+}
