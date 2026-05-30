@@ -2833,6 +2833,7 @@ dependencies = [
  "chromiumoxide",
  "chrono",
  "futures",
+ "hmac",
  "lumo-core",
  "lumo-dsl",
  "md-5",

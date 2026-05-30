@@ -15,6 +15,7 @@ pub mod json_ops;
 pub mod list_ops;
 pub mod math_ops;
 pub mod mcp;
+pub mod notify;
 pub mod regex_ops;
 pub mod selector_stats;
 pub mod selectors;
@@ -46,4 +47,5 @@ pub fn register_all(registry: &mut ActionRegistry) {
     csv_ops::register(registry);
     system_ops::register(registry);
     db_ops::register(registry);
+    notify::register(registry);
 }
