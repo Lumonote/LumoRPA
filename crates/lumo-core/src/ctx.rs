@@ -497,13 +497,20 @@ impl StepCtx {
     pub fn ensure_network_url(&self, url: &str) -> Result<(), StepError> {
         let host = extract_host(url)
             .ok_or_else(|| StepError::msg(format!("network URL has no host: {url}")))?;
-        if matches_any(&host, &self.capabilities.network) {
+        if host_matches_grants(&host, &self.capabilities.network) {
             return Ok(());
         }
         Err(StepError::CapabilityDenied {
             kind: CapKind::Network,
             target: host,
         })
+    }
+
+    /// The network capability grants in force for this context. Used by HTTP
+    /// actions to re-authorize every redirect hop against the same allow-list
+    /// the initial [`ensure_network_url`] gate uses (SSRF / sandbox-bypass fix).
+    pub fn network_grants(&self) -> &[String] {
+        &self.capabilities.network
     }
 
     pub fn ensure_llm(&self, model: &str) -> Result<(), StepError> {
@@ -650,6 +657,14 @@ fn matches_any(candidate: &str, grants: &[String]) -> bool {
             })
             || wildcard_match(candidate, &grant)
     })
+}
+
+/// Public wrapper over the network host matcher so HTTP actions can re-gate
+/// redirect hops against the network capability grants using the EXACT same
+/// logic as [`StepCtx::ensure_network_url`] (one code path, no reimplementation).
+/// `host` should be a bare host (no scheme/port), as produced by `extract_host`.
+pub fn host_matches_grants(host: &str, grants: &[String]) -> bool {
+    matches_any(host, grants)
 }
 
 /// `capabilities.mcp` entry → server match (ignores any `:tool` suffix).

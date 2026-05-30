@@ -14,6 +14,38 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(DownloadAction);
 }
 
+/// Build a `reqwest::Client` whose redirect policy re-authorizes EVERY hop
+/// against the caller's network capability grants. `reqwest` follows 3xx by
+/// default, but the per-action `ctx.ensure_network_url` gate only sees the
+/// initial URL — so a granted host could 302 to an ungranted internal target
+/// (e.g. `169.254.169.254` cloud metadata), bypassing the network sandbox.
+/// This closure closes that hole by re-checking each redirect target's host
+/// with the SAME matcher the capability system uses (`host_matches_grants`).
+/// Shared by `http.request` / `http.download` (and reusable by future HTTP
+/// actions like `http.upload` / `notify.send`).
+pub(crate) fn build_gated_client(
+    grants: &[String],
+    timeout_ms: u64,
+) -> Result<reqwest::Client, StepError> {
+    let grants = grants.to_vec(); // owned, moved into the closure
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            let host = attempt.url().host_str().map(|h| h.to_string());
+            match host {
+                Some(ref h) if lumo_core::host_matches_grants(h, &grants) => attempt.follow(),
+                other => attempt.error(format!(
+                    "redirect to ungranted host blocked (network capability): {other:?}"
+                )),
+            }
+        }))
+        .build()
+        .map_err(|e| StepError::msg(format!("http client: {e}")))
+}
+
 pub struct RequestAction;
 
 #[derive(Deserialize)]
@@ -78,10 +110,7 @@ impl Action for RequestAction {
             .map_err(|e| StepError::msg(format!("http.request input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(timeout_ms))
-            .build()
-            .map_err(|e| StepError::msg(format!("http client: {e}")))?;
+        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
 
         let mut req = client
             .request(
@@ -103,10 +132,15 @@ impl Action for RequestAction {
             };
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StepError::msg(format!("http send: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            if e.is_redirect() {
+                StepError::msg(
+                    "http.request: blocked redirect to ungranted host (network capability)",
+                )
+            } else {
+                StepError::msg(format!("http send: {e}"))
+            }
+        })?;
         let status = resp.status().as_u16();
         let resp_headers: HashMap<_, _> = resp
             .headers()
@@ -182,18 +216,20 @@ impl Action for DownloadAction {
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_write(&dest_path)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(timeout_ms))
-            .build()
-            .map_err(|e| StepError::msg(format!("http client: {e}")))?;
+        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
         let mut req = client.get(&url);
         for (k, v) in &headers {
             req = req.header(k, v);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StepError::msg(format!("http.download send: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            if e.is_redirect() {
+                StepError::msg(
+                    "http.download: blocked redirect to ungranted host (network capability)",
+                )
+            } else {
+                StepError::msg(format!("http.download send: {e}"))
+            }
+        })?;
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()
