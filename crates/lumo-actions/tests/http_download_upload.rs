@@ -6,7 +6,7 @@
 mod common;
 use common::{run, run_with, Capabilities};
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn net(host: &str) -> Capabilities {
@@ -187,4 +187,74 @@ async fn download_streaming_guard_trips_without_content_length() {
         !dest.exists(),
         "streaming guard must delete the partial file on overflow"
     );
+}
+
+#[tokio::test]
+async fn upload_multipart_sends_file_part() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload"))
+        .and(body_string_contains("hello-up"))
+        .and(body_string_contains("name=\"file\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("payload.txt");
+    std::fs::write(&src, "hello-up").unwrap();
+
+    let out = common::ok_with(
+        "http.upload",
+        json!({"url": format!("{}/upload", server.uri()), "src": src, "mode": "multipart"}),
+        net_fs("127.0.0.1", dir.path()),
+    )
+    .await;
+    assert_eq!(out["status"], json!(200));
+    assert_eq!(out["json"], json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn upload_body_put_sends_raw_contents() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/object"))
+        .and(body_string("raw-bytes"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("obj.bin");
+    std::fs::write(&src, "raw-bytes").unwrap();
+
+    let out = common::ok_with(
+        "http.upload",
+        json!({"url": format!("{}/object", server.uri()), "src": src, "mode": "body"}),
+        net_fs("127.0.0.1", dir.path()),
+    )
+    .await;
+    assert_eq!(out["status"], json!(200));
+}
+
+#[tokio::test]
+async fn upload_denied_without_network_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("x.txt");
+    std::fs::write(&src, "x").unwrap();
+    // fs grant only, no network → denied at the network gate.
+    let err = run_with(
+        "http.upload",
+        json!({"url": "https://example.com/u", "src": src, "mode": "body"}),
+        {
+            let glob = format!("{}/**", dir.path().display());
+            Capabilities {
+                fs_read: vec![glob],
+                ..Default::default()
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
 }

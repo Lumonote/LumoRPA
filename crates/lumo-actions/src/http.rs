@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub fn register(r: &mut ActionRegistry) {
     r.register(RequestAction);
     r.register(DownloadAction);
+    r.register(UploadAction);
 }
 
 /// Build a `reqwest::Client` whose redirect policy re-authorizes EVERY hop
@@ -283,6 +284,177 @@ impl Action for DownloadAction {
             "bytes": downloaded,
             "status": status,
             "content_type": content_type,
+        })))
+    }
+}
+
+// ─── http.upload ──────────────────────────────────────────────────────────────
+
+pub struct UploadAction;
+
+#[derive(Deserialize)]
+struct UploadIn {
+    url: String,
+    src: String,
+    mode: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default = "default_max_bytes")]
+    max_bytes: u64,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for UploadAction {
+    fn id(&self) -> &'static str {
+        "http.upload"
+    }
+    fn summary(&self) -> &'static str {
+        "Upload a local file via multipart form or raw request body"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["url", "src", "mode"],
+                "properties": {
+                    "url": { "type": "string" },
+                    "src": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["multipart", "body"] },
+                    "method": { "type": "string" },
+                    "field": { "type": "string" },
+                    "filename": { "type": "string" },
+                    "headers": { "type": "object" },
+                    "max_bytes": { "type": "integer" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let UploadIn {
+            url,
+            src,
+            mode,
+            method,
+            field,
+            filename,
+            headers,
+            max_bytes,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("http.upload input invalid: {e}")))?;
+        ctx.ensure_network_url(&url)?;
+        let src_path = PathBuf::from(&src);
+        ctx.ensure_fs_read(&src_path)?;
+
+        // Cap the in-memory read by stat-ing first: prevents OOM from an
+        // operator-/attacker-sized file before we ever allocate the buffer.
+        let meta = tokio::fs::metadata(&src_path)
+            .await
+            .map_err(|e| StepError::msg(format!("http.upload stat {}: {e}", src_path.display())))?;
+        if meta.len() > max_bytes {
+            return Err(StepError::msg(format!(
+                "http.upload: file size {} exceeds max_bytes {max_bytes}",
+                meta.len()
+            )));
+        }
+        let bytes = tokio::fs::read(&src_path)
+            .await
+            .map_err(|e| StepError::msg(format!("http.upload read {}: {e}", src_path.display())))?;
+
+        // Reuse the SSRF-gated client: every redirect hop is re-authorized
+        // against the network grants, so an upload can't be bounced to an
+        // ungranted host (data exfiltration).
+        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
+
+        let resp = match mode.as_str() {
+            "multipart" => {
+                let field = field.unwrap_or_else(|| "file".into());
+                let filename = filename.unwrap_or_else(|| {
+                    src_path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".into())
+                });
+                let part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+                let form = reqwest::multipart::Form::new().part(field, part);
+                let m = method.unwrap_or_else(|| "POST".into());
+                let mut req = client
+                    .request(
+                        m.parse()
+                            .map_err(|e| StepError::msg(format!("bad method: {e}")))?,
+                        &url,
+                    )
+                    .multipart(form);
+                for (k, v) in &headers {
+                    req = req.header(k, v);
+                }
+                req.send().await.map_err(|e| {
+                    if e.is_redirect() {
+                        StepError::msg(
+                            "http.upload: blocked redirect to ungranted host (network capability)",
+                        )
+                    } else {
+                        StepError::msg(format!("http.upload send: {e}"))
+                    }
+                })?
+            }
+            "body" => {
+                let m = method.unwrap_or_else(|| "PUT".into());
+                let mut req = client
+                    .request(
+                        m.parse()
+                            .map_err(|e| StepError::msg(format!("bad method: {e}")))?,
+                        &url,
+                    )
+                    .body(bytes);
+                for (k, v) in &headers {
+                    req = req.header(k, v);
+                }
+                req.send().await.map_err(|e| {
+                    if e.is_redirect() {
+                        StepError::msg(
+                            "http.upload: blocked redirect to ungranted host (network capability)",
+                        )
+                    } else {
+                        StepError::msg(format!("http.upload send: {e}"))
+                    }
+                })?
+            }
+            other => {
+                return Err(StepError::msg(format!(
+                    "http.upload: mode must be `multipart` or `body`, got `{other}`"
+                )))
+            }
+        };
+
+        let status = resp.status().as_u16();
+        let resp_headers: HashMap<_, _> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| StepError::msg(format!("http.upload body: {e}")))?;
+        let body_json: Option<Value> = serde_json::from_str(&text).ok();
+
+        Ok(ActionResult::from(serde_json::json!({
+            "status": status,
+            "headers": resp_headers,
+            "text": text,
+            "json": body_json,
         })))
     }
 }
