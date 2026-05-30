@@ -258,3 +258,28 @@ async fn upload_denied_without_network_grant() {
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
 }
+
+#[tokio::test]
+async fn upload_rejects_oversize_file() {
+    // The OOM guard stats the file and compares to max_bytes BEFORE reading it
+    // into memory or sending — so an oversize source is rejected with no live
+    // server. (Port :9 is the discard port: even if the guard regressed, the
+    // send would fail fast rather than hang.)
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.bin");
+    std::fs::write(&src, "x".repeat(100)).unwrap();
+
+    let err = run_with(
+        "http.upload",
+        json!({
+            "url": "http://127.0.0.1:9/u",
+            "src": src,
+            "mode": "body",
+            "max_bytes": 10
+        }),
+        net_fs("127.0.0.1", dir.path()),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("max_bytes"), "got: {err}");
+}
