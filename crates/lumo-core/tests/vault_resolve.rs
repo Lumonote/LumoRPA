@@ -99,3 +99,43 @@ fn identity_absent_degrades_to_env() {
     assert_eq!(out, json!("env-only"));
     std::env::remove_var("LUMO_VAULT_DEGRADE_USER");
 }
+
+#[tokio::test]
+async fn vm_resolves_vault_from_store_at_action_exec() {
+    use lumo_actions::register_all;
+    use lumo_core::{FlowVm, RunOptions};
+    use lumo_dsl::parse_str;
+
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    put_secret(&repo, &id, "smtp", "user", "alice@example.com");
+
+    let mut reg = ActionRegistry::new();
+    register_all(&mut reg);
+    let vm = FlowVm::new(reg, Some(repo.clone())).with_vault(Some(Arc::new(id)));
+
+    // `{{ vault.smtp.user }}` is literalized to `${{ … }}` before template
+    // render, then resolved from the store at action-exec time.
+    let flow = parse_str(
+        r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  vault: [smtp]
+  steps:
+    - id: read
+      action: control.set_var
+      with: { name: u, value: "{{ vault.smtp.user }}" }
+"#,
+    )
+    .expect("parse");
+
+    let report = vm.run(&flow, RunOptions::default()).await.expect("run");
+    assert!(report.success);
+    let out = report.outputs.expect("outputs");
+    assert_eq!(
+        out.pointer("/read/result").and_then(Value::as_str),
+        Some("alice@example.com")
+    );
+}

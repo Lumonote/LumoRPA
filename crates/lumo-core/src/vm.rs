@@ -76,6 +76,9 @@ pub struct FlowVm {
     cancel: Option<CancelToken>,
     /// P1-1: per-step timeout applied to every leaf action's execution.
     step_timeout: Option<Duration>,
+    /// P1-3: optional age identity, threaded into each run's `StepCtx` so
+    /// `${{ vault.* }}` can fall back to the encrypted store.
+    vault_identity: Option<Arc<lumo_storage::VaultIdentity>>,
 }
 
 impl FlowVm {
@@ -88,6 +91,7 @@ impl FlowVm {
             capability_override: None,
             cancel: None,
             step_timeout: None,
+            vault_identity: None,
         }
     }
 
@@ -122,6 +126,13 @@ impl FlowVm {
     /// this fails the run with [`ExecError::Timeout`].
     pub fn with_step_timeout(mut self, timeout: Duration) -> Self {
         self.step_timeout = Some(timeout);
+        self
+    }
+
+    /// Attach the age identity for `${{ vault.* }}` store decryption (P1-3).
+    /// `None` keeps resolution env-only.
+    pub fn with_vault(mut self, identity: Option<Arc<lumo_storage::VaultIdentity>>) -> Self {
+        self.vault_identity = identity;
         self
     }
 
@@ -177,7 +188,8 @@ impl FlowVm {
         .with_ai(self.ai_provider.clone(), flow.metadata.ai.clone())
         .with_skill_depth(self.skill_depth)
         .with_cancel(self.cancel.clone())
-        .with_step_timeout(self.step_timeout);
+        .with_step_timeout(self.step_timeout)
+        .with_vault(self.vault_identity.clone());
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
