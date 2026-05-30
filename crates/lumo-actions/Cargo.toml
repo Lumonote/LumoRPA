@@ -29,6 +29,7 @@ reqwest.workspace = true
 chromiumoxide.workspace = true
 calamine.workspace = true
 rust_xlsxwriter.workspace = true
+arboard = { version = "3", default-features = false }
 base64 = "0.22"
 bytes = "1"
 hmac = "0.12"

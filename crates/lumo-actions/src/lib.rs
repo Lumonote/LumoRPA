@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod browser;
+pub mod clipboard;
 pub mod control;
 pub mod csv_ops;
 pub mod data;
@@ -48,4 +49,5 @@ pub fn register_all(registry: &mut ActionRegistry) {
     system_ops::register(registry);
     db_ops::register(registry);
     notify::register(registry);
+    clipboard::register(registry);
 }
