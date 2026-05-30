@@ -41,6 +41,8 @@ enum Cmd {
     Actions(cmd::actions::Args),
     /// Manage LLM provider profiles (cc-switch style)
     Providers(cmd::providers::Args),
+    /// Manage the encrypted secret vault (age)
+    Vault(cmd::vault::Args),
     /// Manage reusable Skills (Claude-Code-style SKILL.md)
     Skills(cmd::skills::Args),
     /// Start a webhook HTTP server that dispatches POSTs to flows
@@ -70,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Runs(a) => cmd::runs::run(home, a).await,
         Cmd::Actions(a) => cmd::actions::run(home, a).await,
         Cmd::Providers(a) => cmd::providers::run(home, a).await,
+        Cmd::Vault(a) => cmd::vault::run(home, a).await,
         Cmd::Skills(a) => cmd::skills::run(home, a).await,
         Cmd::Serve(a) => cmd::serve::run(home, a).await,
         Cmd::Mcp(a) => cmd::mcp::run(home, a).await,

@@ -10,6 +10,7 @@ pub mod runs;
 pub mod serve;
 pub mod skills;
 pub mod validate;
+pub mod vault;
 
 use lumo_ai::{AiRouter, ChatAction, ProvidersConfig};
 use lumo_core::{ActionRegistry, FlowVm};
@@ -28,6 +29,12 @@ pub(crate) fn skills_root(home: &Path) -> PathBuf {
     std::env::var_os("LUMO_SKILLS_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join("skills"))
+}
+
+pub(crate) fn vault_identity_path(home: &Path) -> PathBuf {
+    std::env::var_os("LUMO_VAULT_IDENTITY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("age-identity.txt"))
 }
 
 pub(crate) fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> ActionRegistry {

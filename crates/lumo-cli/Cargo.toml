@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 colored.workspace = true
 comfy-table.workspace = true
+rpassword.workspace = true
 indicatif.workspace = true
 chrono.workspace = true
 axum.workspace = true
