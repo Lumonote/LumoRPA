@@ -199,15 +199,93 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
     if vault_names.is_empty() || !src.contains("vault.") {
         return src.to_string();
     }
-    // Crude but safe: `{{ vault.X.* }}` -> `${{ vault.X.* }}`
-    // Real implementation in M2 will use a proper Jinja AST walk.
-    src.replace("{{ vault.", "${{ vault.")
-        .replace("{{vault.", "${{vault.")
+    // Keep secret references OUT of the live template engine. Each
+    // `{{ vault.PATH }}` (or `{{vault.PATH}}`) is rewritten to a raw-wrapped
+    // literal `{% raw %}${{ vault.PATH }}{% endraw %}`, which minijinja renders
+    // verbatim to the token `${{ vault.PATH }}`. The runtime
+    // (`StepCtx::resolve_vault_placeholders`) substitutes the real value
+    // just-in-time at action dispatch, so secrets never enter rendered step
+    // snapshots, logs, or LLM prompts. Non-vault expressions are left untouched
+    // for minijinja to evaluate. A naive `{{`→`${{` replace does NOT work: the
+    // expression stays live and errors (vault is not in the render scope).
+    let mut out = String::with_capacity(src.len() + 24);
+    let mut rest = src;
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            // Unterminated `{{` — emit verbatim and stop; minijinja will report it.
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let inner = after[..close].trim();
+        if let Some(path) = inner.strip_prefix("vault.") {
+            out.push_str("{% raw %}${{ vault.");
+            out.push_str(path);
+            out.push_str(" }}{% endraw %}");
+        } else {
+            // Non-vault expression block — pass through unchanged.
+            out.push_str(&rest[open..open + 2 + close + 2]);
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_placeholder_survives_render_as_literal_token() {
+        // P1-3: `{{ vault.X }}` must render to the literal `${{ vault.X }}`
+        // (NOT be evaluated), so the runtime can JIT-resolve it later.
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(&Json::String("{{ vault.smtp.user }}".into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("${{ vault.smtp.user }}".into()));
+    }
+
+    #[test]
+    fn vault_placeholder_mixed_with_live_expression() {
+        let ctx = TemplateCtx {
+            inputs: serde_json::json!({ "who": "bob" }),
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(
+            &Json::String("hi {{ inputs.who }} pass={{ vault.smtp.pass }}".into()),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            Json::String("hi bob pass=${{ vault.smtp.pass }}".into())
+        );
+    }
+
+    #[test]
+    fn vault_placeholder_no_spaces_normalizes() {
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(&Json::String("{{vault.smtp.user}}".into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("${{ vault.smtp.user }}".into()));
+    }
+
+    #[test]
+    fn scalar_vault_placeholder_survives() {
+        let ctx = TemplateCtx {
+            vault: vec!["token".into()],
+            ..Default::default()
+        };
+        let out = render(&Json::String("{{ vault.token }}".into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("${{ vault.token }}".into()));
+    }
 
     #[test]
     fn custom_loop_binding_resolves_as_bare_name() {
