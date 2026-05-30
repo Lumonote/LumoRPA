@@ -139,3 +139,68 @@ spec:
         Some("alice@example.com")
     );
 }
+
+#[tokio::test]
+async fn vault_secret_value_never_enters_persisted_input_hash() {
+    // Security regression guard (P1-3): the persisted `step_runs.input_hash` is
+    // computed from the `${{ vault.* }}` placeholder form BEFORE decryption (the
+    // VM hashes `rendered_input`, then resolves the secret only into the value
+    // handed to `action.execute`). So the hash MUST be independent of the secret
+    // value. Running the same flow twice with two DIFFERENT stored secrets behind
+    // the same placeholder must yield the SAME input_hash. If a future refactor
+    // ever hashed the *resolved* input, these would diverge — and the decrypted
+    // secret would be leaking into the persisted snapshot. This pins
+    // hash(rendered) ahead of resolve().
+    async fn input_hash_for_secret(secret: &str) -> Vec<u8> {
+        use lumo_actions::register_all;
+        use lumo_core::{FlowVm, RunOptions};
+        use lumo_dsl::parse_str;
+
+        let repo = Repo::open_in_memory().unwrap();
+        let id = VaultIdentity::generate();
+        put_secret(&repo, &id, "smtp", "user", secret);
+        let mut reg = ActionRegistry::new();
+        register_all(&mut reg);
+        let vm = FlowVm::new(reg, Some(repo.clone())).with_vault(Some(Arc::new(id)));
+        let flow = parse_str(
+            r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  vault: [smtp]
+  steps:
+    - id: read
+      action: control.set_var
+      with: { name: u, value: "{{ vault.smtp.user }}" }
+"#,
+        )
+        .expect("parse");
+        let report = vm.run(&flow, RunOptions::default()).await.expect("run");
+        assert!(report.success);
+        // Sanity: the secret really was resolved at action-exec time, so this
+        // test exercises the resolution path rather than a no-op.
+        assert_eq!(
+            report
+                .outputs
+                .as_ref()
+                .and_then(|o| o.pointer("/read/result"))
+                .and_then(Value::as_str),
+            Some(secret)
+        );
+        repo.list_steps(&report.run_id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.step_id == "read")
+            .expect("read step persisted")
+            .input_hash
+    }
+
+    let hash_a = input_hash_for_secret("alice@example.com").await;
+    let hash_b = input_hash_for_secret("a-totally-different-and-longer-secret@example.org").await;
+    assert_eq!(
+        hash_a, hash_b,
+        "persisted input_hash must be secret-independent (hashed from the vault \
+         placeholder form, not the decrypted value)"
+    );
+}
