@@ -146,3 +146,30 @@ async fn notify_denied_without_network_grant() {
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
 }
+
+#[tokio::test]
+async fn notify_blocks_redirect_to_ungranted_host() {
+    // SSRF 网关:授权 host 302 跳到未授权内网(云元数据),必须在连接前被拒,
+    // 与 http.download/upload 的逐跳重定向防护一致(复用 build_gated_client)。
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/robot"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", "http://169.254.169.254/latest/meta-data/"),
+        )
+        .mount(&server)
+        .await;
+
+    let err = common::run_with(
+        "notify.send",
+        json!({"provider": "webhook", "url": format!("{}/robot", server.uri()), "text": "hi"}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("redirect") || err.contains("network capability"),
+        "got: {err}"
+    );
+}

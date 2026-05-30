@@ -227,16 +227,24 @@ impl Action for SendAction {
             secret.as_deref(),
         )?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(timeout_ms))
-            .build()
-            .map_err(|e| StepError::msg(format!("http client: {e}")))?;
+        // 复用 http 模块的 SSRF 网关:逐跳重定向重新鉴权,防止授权 host 302
+        // 跳到未授权内网地址(如 169.254.169.254 云元数据)绕过网络沙箱
+        // (notify 出站,与 http.request/download/upload 同一防护)。
+        let client = crate::http::build_gated_client(ctx.network_grants(), timeout_ms)?;
         let resp = client
             .post(&final_url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| StepError::msg(format!("notify.send send: {e}")))?;
+            .map_err(|e| {
+                if e.is_redirect() {
+                    StepError::msg(
+                        "notify.send: blocked redirect to ungranted host (network capability)",
+                    )
+                } else {
+                    StepError::msg(format!("notify.send send: {e}"))
+                }
+            })?;
         let status = resp.status().as_u16();
         let text_resp = resp
             .text()
