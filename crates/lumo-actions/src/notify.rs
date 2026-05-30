@@ -140,6 +140,13 @@ fn build_request(
                 if let Value::Object(m) = &mut body {
                     m.insert("timestamp".into(), Value::String(ts_s.to_string()));
                     m.insert("sign".into(), Value::String(sign));
+                } else {
+                    // 非 object payload 无处插入 timestamp/sign:与其静默发出未签名
+                    // 请求(飞书侧 401、本地无提示),不如显式报错暴露配置问题。
+                    return Err(StepError::msg(
+                        "notify.send feishu: signing requires a JSON object payload \
+                         (cannot add timestamp/sign to a non-object body)",
+                    ));
                 }
                 Ok((url.to_string(), body))
             } else {

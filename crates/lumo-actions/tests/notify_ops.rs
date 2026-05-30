@@ -205,3 +205,36 @@ async fn dingtalk_transport_error_does_not_leak_signed_url() {
         "transport error must not leak the signed URL query (sign/timestamp derived from secret): {err}"
     );
 }
+
+#[tokio::test]
+async fn feishu_secret_with_non_object_payload_is_rejected() {
+    // secret 存在但 payload 非 JSON object 时,timestamp/sign 无处可插。旧实现静默
+    // 丢弃签名并发出未签名请求(飞书侧 401,本地无任何提示)。应显式报错而非静默
+    // 安全降级。mock 200 确保「未修复时返回 Ok(发了未签名)」,使 expect_err 干净失败。
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/hook"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 0})))
+        .mount(&server)
+        .await;
+
+    let res = common::run_with(
+        "notify.send",
+        json!({
+            "provider": "feishu",
+            "url": format!("{}/hook", server.uri()),
+            "payload": [1, 2, 3],
+            "secret": "S3CRET"
+        }),
+        net("127.0.0.1"),
+    )
+    .await;
+
+    let err = res.expect_err(
+        "feishu + secret + non-object payload must be rejected, not silently sent unsigned",
+    );
+    assert!(
+        err.contains("object") || err.contains("payload"),
+        "error should explain the object-payload signing requirement: {err}"
+    );
+}
