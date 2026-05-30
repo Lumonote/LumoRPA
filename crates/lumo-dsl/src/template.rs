@@ -208,6 +208,10 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
     // snapshots, logs, or LLM prompts. Non-vault expressions are left untouched
     // for minijinja to evaluate. A naive `{{`→`${{` replace does NOT work: the
     // expression stays live and errors (vault is not in the render scope).
+    // Only `{{ ... }}` expression blocks are handled. A `vault.` reference inside a
+    // `{% ... %}` statement block or carrying whitespace-control markers (`{{- -}}`)
+    // is left for minijinja; since `vault` is never in the render scope it errors
+    // (fail-closed) rather than leaking — vault refs are only supported in `{{ }}`.
     let mut out = String::with_capacity(src.len() + 24);
     let mut rest = src;
     while let Some(open) = rest.find("{{") {
@@ -236,6 +240,62 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_multiple_placeholders_in_one_string() {
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(
+            &Json::String("{{ vault.smtp.user }}:{{ vault.smtp.pass }}".into()),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            Json::String("${{ vault.smtp.user }}:${{ vault.smtp.pass }}".into())
+        );
+    }
+
+    #[test]
+    fn non_vault_expression_with_vault_substring_is_not_literalized() {
+        // A string literal that merely contains "vault." must be evaluated by
+        // minijinja, NOT mistaken for a vault placeholder.
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(&Json::String(r#"{{ "vault.x" }}"#.into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("vault.x".into()));
+    }
+
+    #[test]
+    fn vault_reference_in_statement_block_fails_closed() {
+        // Vault refs are only literalized inside `{{ }}`. A `vault.` ref in a
+        // `{% %}` statement block is NOT literalized; `vault` is never in the
+        // render scope, so it errors (fail-closed, no value leak).
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let res = render(
+            &Json::String("{% if vault.smtp.user %}x{% endif %}".into()),
+            &ctx,
+        );
+        assert!(res.is_err(), "vault in a statement block must not evaluate");
+    }
+
+    #[test]
+    fn vault_placeholder_with_multibyte_neighbors() {
+        // Guards the byte-offset arithmetic against multibyte text around the block.
+        let ctx = TemplateCtx {
+            vault: vec!["smtp".into()],
+            ..Default::default()
+        };
+        let out = render(&Json::String("密码={{ vault.smtp.pass }}".into()), &ctx).unwrap();
+        assert_eq!(out, Json::String("密码=${{ vault.smtp.pass }}".into()));
+    }
 
     #[test]
     fn vault_placeholder_survives_render_as_literal_token() {
