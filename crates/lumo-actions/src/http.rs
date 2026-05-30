@@ -7,9 +7,11 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(RequestAction);
+    r.register(DownloadAction);
 }
 
 pub struct RequestAction;
@@ -33,6 +35,9 @@ fn default_method() -> String {
 }
 fn default_timeout_ms() -> u64 {
     30_000
+}
+fn default_max_bytes() -> u64 {
+    100 * 1024 * 1024 // 100 MiB
 }
 
 #[async_trait]
@@ -119,6 +124,129 @@ impl Action for RequestAction {
             "headers": resp_headers,
             "text": text,
             "json": body_json,
+        })))
+    }
+}
+
+// ─── http.download ────────────────────────────────────────────────────────────
+
+pub struct DownloadAction;
+
+#[derive(Deserialize)]
+struct DownloadIn {
+    url: String,
+    dest: String,
+    #[serde(default = "default_max_bytes")]
+    max_bytes: u64,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for DownloadAction {
+    fn id(&self) -> &'static str {
+        "http.download"
+    }
+    fn summary(&self) -> &'static str {
+        "Stream an HTTP GET response to a file, capped at max_bytes"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["url", "dest"],
+                "properties": {
+                    "url": { "type": "string" },
+                    "dest": { "type": "string" },
+                    "max_bytes": { "type": "integer" },
+                    "headers": { "type": "object" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DownloadIn {
+            url,
+            dest,
+            max_bytes,
+            headers,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("http.download input invalid: {e}")))?;
+        ctx.ensure_network_url(&url)?;
+        let dest_path = PathBuf::from(&dest);
+        ctx.ensure_fs_write(&dest_path)?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|e| StepError::msg(format!("http client: {e}")))?;
+        let mut req = client.get(&url);
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StepError::msg(format!("http.download send: {e}")))?;
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Cheap pre-check: refuse before opening the file if the server declares
+        // a length over the cap — a rejected oversize download leaves no file.
+        if let Some(len) = resp.content_length() {
+            if len > max_bytes {
+                return Err(StepError::msg(format!(
+                    "http.download: Content-Length {len} exceeds max_bytes {max_bytes}"
+                )));
+            }
+        }
+
+        if let Some(parent) = dest_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let mut file = tokio::fs::File::create(&dest_path).await.map_err(|e| {
+            StepError::msg(format!("http.download create {}: {e}", dest_path.display()))
+        })?;
+
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut downloaded: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| StepError::msg(format!("http.download stream: {e}")))?;
+            downloaded += chunk.len() as u64;
+            // Streaming guard: also catches chunked / unknown-length responses
+            // that the Content-Length pre-check can't see — delete the partial.
+            if downloaded > max_bytes {
+                drop(file);
+                let _ = tokio::fs::remove_file(&dest_path).await;
+                return Err(StepError::msg(format!(
+                    "http.download: response exceeds max_bytes {max_bytes}"
+                )));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| StepError::msg(format!("http.download write: {e}")))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| StepError::msg(format!("http.download flush: {e}")))?;
+
+        Ok(ActionResult::from(serde_json::json!({
+            "dest": dest,
+            "bytes": downloaded,
+            "status": status,
+            "content_type": content_type,
         })))
     }
 }
