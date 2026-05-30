@@ -27,6 +27,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(ClickAction);
     r.register(TypeAction);
     r.register(ExtractAction);
+    r.register(WaitAction);
     // P1-2: reclaim any browser process left open by a run that failed (or
     // forgot `browser.close`) once the VM finishes that run.
     r.register_teardown(Arc::new(BrowserTeardown));
@@ -687,5 +688,200 @@ impl Action for ExtractAction {
             }
         }
         Ok(ActionResult::from(result))
+    }
+}
+
+// ─── browser.wait (F-9) ───────────────────────────────────────────────────────
+
+/// Per-poll JS-eval budget. The query itself is cheap; this only bounds a
+/// pathological evaluate() call, not the overall wait (that's `timeout_ms`).
+const WAIT_EVAL_TIMEOUT_MS: u64 = 2_000;
+
+const WAIT_CONDITIONS: &[&str] = &["present", "visible", "clickable", "hidden"];
+
+/// Self-contained matcher: locates the element by the same strategy order as the
+/// resolver, then returns a single boolean for the requested condition. Kept
+/// separate from `resolve_element` so the poll loop never writes SelectorStats.
+const WAIT_JS_TEMPLATE: &str = r#"
+((spec, condition, needle) => {
+  const escape = (s) => (window.CSS && CSS.escape) ? CSS.escape(String(s)) : String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  const find = () => {
+    if (spec.id) { const e = document.getElementById(spec.id); if (e) return e; }
+    if (spec.data_testid) { const e = document.querySelector(`[data-testid="${escape(spec.data_testid)}"]`); if (e) return e; }
+    if (spec.css) { const e = document.querySelector(spec.css); if (e) return e; }
+    if (spec.aria_label) {
+      const e = document.querySelector(`[aria-label="${escape(spec.aria_label)}"]`);
+      if (e) return e;
+      const m = Array.from(document.querySelectorAll('*')).find((el) => el.getAttribute && el.getAttribute('aria-label') === spec.aria_label);
+      if (m) return m;
+    }
+    if (spec.text_includes) {
+      const t = String(spec.text_includes).trim();
+      const cands = document.querySelectorAll('button, a, span, label, div, li, td, th, h1, h2, h3, h4, h5, h6, p');
+      for (const el of cands) { if ((el.innerText || '').trim().includes(t)) return el; }
+    }
+    if (spec.xpath) {
+      try { const r = document.evaluate(spec.xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); if (r.singleNodeValue) return r.singleNodeValue; } catch (_) {}
+    }
+    return null;
+  };
+  const hasSpec = !!(spec.id || spec.data_testid || spec.css || spec.aria_label || spec.text_includes || spec.xpath);
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    const st = window.getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity) === 0) return false;
+    return true;
+  };
+  const clickable = (el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+  const containsText = (el, n) => !!el && (el.innerText || '').includes(n);
+  if (!hasSpec) {
+    return !!(document.body && (document.body.innerText || '').includes(needle || ''));
+  }
+  const el = find();
+  switch (condition) {
+    case 'present': return !!el;
+    case 'visible': return visible(el) && (needle ? containsText(el, needle) : true);
+    case 'clickable': return clickable(el) && (needle ? containsText(el, needle) : true);
+    case 'hidden': return !el || !visible(el);
+    default: return false;
+  }
+})(__SPEC__, "__COND__", __NEEDLE__)
+"#;
+
+pub struct WaitAction;
+
+#[derive(Deserialize)]
+struct WaitIn {
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    #[serde(default = "default_condition")]
+    condition: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+fn default_condition() -> String {
+    "visible".into()
+}
+fn default_wait_timeout_ms() -> u64 {
+    30_000
+}
+
+async fn wait_matches(
+    page: &Page,
+    spec: Option<&MultiSelector>,
+    condition: &str,
+    text: Option<&str>,
+) -> Result<bool, StepError> {
+    let spec_json = match spec {
+        Some(s) => serde_json::json!({
+            "id": s.id, "data_testid": s.data_testid, "css": s.css,
+            "aria_label": s.aria_label, "text_includes": s.text_includes, "xpath": s.xpath,
+        }),
+        None => serde_json::json!({}),
+    };
+    let needle_json = serde_json::to_string(text.unwrap_or("")).unwrap_or_else(|_| "\"\"".into());
+    let js = WAIT_JS_TEMPLATE
+        .replace("__SPEC__", &spec_json.to_string())
+        .replace("__COND__", condition)
+        .replace("__NEEDLE__", &needle_json);
+    let val = tokio::time::timeout(
+        Duration::from_millis(WAIT_EVAL_TIMEOUT_MS),
+        page.evaluate(js),
+    )
+    .await
+    .map_err(|_| StepError::msg("browser.wait: page eval timed out"))?
+    .map_err(|e| StepError::msg(format!("browser.wait eval: {e}")))?;
+    Ok(val.into_value::<bool>().unwrap_or(false))
+}
+
+#[async_trait]
+impl Action for WaitAction {
+    fn id(&self) -> &'static str {
+        "browser.wait"
+    }
+    fn summary(&self) -> &'static str {
+        "Wait until an element is present/visible/clickable/hidden, or text appears"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string" },
+                    "selectors": multi_selector_schema(),
+                    "condition": { "type": "string", "enum": ["present", "visible", "clickable", "hidden"] },
+                    "text": { "type": "string" },
+                    "timeout_ms": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let WaitIn {
+            selector,
+            selectors,
+            condition,
+            text,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.wait input invalid: {e}")))?;
+
+        // Validate before needing a browser session, so bad input fails fast
+        // (and unit-testably) without launching Chrome.
+        if !WAIT_CONDITIONS.contains(&condition.as_str()) {
+            return Err(StepError::msg(format!(
+                "browser.wait: unknown condition `{condition}` (present/visible/clickable/hidden)"
+            )));
+        }
+        let has_selector = selector.as_ref().is_some_and(|s| !s.is_empty())
+            || selectors.as_ref().is_some_and(|s| !s.is_empty());
+        if !has_selector && text.is_none() {
+            return Err(StepError::msg(
+                "browser.wait requires `selector`/`selectors` or `text`",
+            ));
+        }
+        let spec = if has_selector {
+            Some(build_selector(selector, selectors)?)
+        } else {
+            None
+        };
+
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+
+        let deadline = Duration::from_millis(timeout_ms);
+        let start = std::time::Instant::now();
+        let poll = Duration::from_millis(100);
+        loop {
+            if wait_matches(&page, spec.as_ref(), &condition, text.as_deref()).await? {
+                let matched = spec
+                    .as_ref()
+                    .map(|s| s.first_hint())
+                    .unwrap_or_else(|| format!("text:{}", text.as_deref().unwrap_or("")));
+                return Ok(ActionResult::from(serde_json::json!({
+                    "condition": condition,
+                    "matched": matched,
+                    "waited_ms": start.elapsed().as_millis() as u64,
+                })));
+            }
+            if start.elapsed() >= deadline {
+                let what = spec
+                    .as_ref()
+                    .map(|s| s.first_hint())
+                    .unwrap_or_else(|| format!("text `{}`", text.as_deref().unwrap_or("")));
+                return Err(StepError::msg(format!(
+                    "browser.wait: condition `{condition}` not met within {timeout_ms}ms for {what}"
+                )));
+            }
+            tokio::time::sleep(poll).await;
+        }
     }
 }
