@@ -283,3 +283,22 @@ async fn upload_rejects_oversize_file() {
     .unwrap_err();
     assert!(err.contains("max_bytes"), "got: {err}");
 }
+
+#[tokio::test]
+async fn request_rejects_body_over_max_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/huge"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("y".repeat(100)))
+        .mount(&server)
+        .await;
+
+    let err = run_with(
+        "http.request",
+        json!({"url": format!("{}/huge", server.uri()), "max_bytes": 10}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("max_bytes"), "got: {err}");
+}

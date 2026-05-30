@@ -62,6 +62,8 @@ struct ReqIn {
     body: Option<Value>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default = "default_max_bytes")]
+    max_bytes: u64,
 }
 fn default_method() -> String {
     "GET".into()
@@ -92,7 +94,8 @@ impl Action for RequestAction {
                     "headers": { "type": "object" },
                     "query": { "type": "object" },
                     "body": {},
-                    "timeout_ms": { "type": "integer" }
+                    "timeout_ms": { "type": "integer" },
+                    "max_bytes": { "type": "integer" }
                 },
                 "additionalProperties": false
             })
@@ -107,6 +110,7 @@ impl Action for RequestAction {
             query,
             body,
             timeout_ms,
+            max_bytes,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.request input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
@@ -148,10 +152,25 @@ impl Action for RequestAction {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
+        // 响应大小上限(F-11):Content-Length 预检挡掉声明超限的响应;读后再按
+        // 实际字节兜底(chunked / 无 Content-Length 时预检看不到长度)。
+        if let Some(len) = resp.content_length() {
+            if len > max_bytes {
+                return Err(StepError::msg(format!(
+                    "http.request: response Content-Length {len} exceeds max_bytes {max_bytes}"
+                )));
+            }
+        }
         let text = resp
             .text()
             .await
             .map_err(|e| StepError::msg(format!("http body: {e}")))?;
+        if text.len() as u64 > max_bytes {
+            return Err(StepError::msg(format!(
+                "http.request: response body {} bytes exceeds max_bytes {max_bytes}",
+                text.len()
+            )));
+        }
         let body_json: Option<Value> = serde_json::from_str(&text).ok();
 
         Ok(ActionResult::from(serde_json::json!({
