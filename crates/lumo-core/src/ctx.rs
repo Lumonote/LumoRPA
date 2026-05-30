@@ -76,6 +76,10 @@ pub struct StepCtx {
     artifacts_dir: Option<PathBuf>,
     ai_provider: Option<Arc<dyn AiHookProvider>>,
     flow_ai: Option<FlowAi>,
+    /// P1-3: optional age identity for decrypting `${{ vault.* }}` from the
+    /// encrypted store when an env var isn't set. `None` ⇒ env-only (graceful
+    /// degrade when no identity file exists).
+    vault_identity: Option<Arc<lumo_storage::VaultIdentity>>,
     /// P0-5: how many `skill.invoke` levels deep this context is. The skill
     /// action rejects invocations past a fixed ceiling to stop runaway / cyclic
     /// recursion (stack overflow / OOM).
@@ -145,6 +149,7 @@ impl StepCtx {
             artifacts_dir: None,
             ai_provider: None,
             flow_ai: None,
+            vault_identity: None,
             skill_depth: 0,
             cancel: None,
             step_timeout: None,
@@ -173,6 +178,14 @@ impl StepCtx {
     ) -> Self {
         self.ai_provider = provider;
         self.flow_ai = flow_ai;
+        self
+    }
+
+    /// Attach the age identity used to decrypt `${{ vault.* }}` from the
+    /// encrypted store (P1-3). Seeded by the VM from `FlowVm::with_vault`.
+    /// `None` keeps resolution env-only.
+    pub fn with_vault(mut self, identity: Option<Arc<lumo_storage::VaultIdentity>>) -> Self {
+        self.vault_identity = identity;
         self
     }
 
@@ -321,6 +334,7 @@ impl StepCtx {
             artifacts_dir: self.artifacts_dir.clone(),
             ai_provider: self.ai_provider.clone(),
             flow_ai: self.flow_ai.clone(),
+            vault_identity: self.vault_identity.clone(),
             skill_depth: self.skill_depth,
             cancel: self.cancel.clone(),
             step_timeout: self.step_timeout,
@@ -464,7 +478,12 @@ impl StepCtx {
     }
 
     pub fn resolve_vault_placeholders(&self, value: &Value) -> Result<Value, StepError> {
-        resolve_vault_value(value, &self.vault_names)
+        VaultResolver {
+            names: &self.vault_names,
+            repo: self.repo.as_ref(),
+            identity: self.vault_identity.as_deref(),
+        }
+        .resolve_value(value)
     }
 
     pub fn ensure_fs_read(&self, path: &Path) -> Result<(), StepError> {
@@ -765,69 +784,97 @@ fn extract_host(url: &str) -> Option<String> {
     }
 }
 
-fn resolve_vault_value(value: &Value, names: &[String]) -> Result<Value, StepError> {
-    match value {
-        Value::String(s) => Ok(Value::String(resolve_vault_string(s, names)?)),
-        Value::Array(items) => Ok(Value::Array(
-            items
-                .iter()
-                .map(|v| resolve_vault_value(v, names))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        Value::Object(map) => {
-            let mut out = Map::with_capacity(map.len());
-            for (k, v) in map {
-                out.insert(k.clone(), resolve_vault_value(v, names)?);
+/// Resolves `${{ vault.NAME.KEY }}` placeholders left intact through template
+/// rendering. Env vars win (back-compat / CI override); the encrypted store is
+/// the fallback when both a repo and an identity are present (P1-3).
+struct VaultResolver<'a> {
+    names: &'a [String],
+    repo: Option<&'a Repo>,
+    identity: Option<&'a lumo_storage::VaultIdentity>,
+}
+
+impl VaultResolver<'_> {
+    fn resolve_value(&self, value: &Value) -> Result<Value, StepError> {
+        match value {
+            Value::String(s) => Ok(Value::String(self.resolve_string(s)?)),
+            Value::Array(items) => Ok(Value::Array(
+                items
+                    .iter()
+                    .map(|v| self.resolve_value(v))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Value::Object(map) => {
+                let mut out = Map::with_capacity(map.len());
+                for (k, v) in map {
+                    out.insert(k.clone(), self.resolve_value(v)?);
+                }
+                Ok(Value::Object(out))
             }
-            Ok(Value::Object(out))
+            other => Ok(other.clone()),
         }
-        other => Ok(other.clone()),
     }
-}
 
-fn resolve_vault_string(src: &str, names: &[String]) -> Result<String, StepError> {
-    let mut out = String::new();
-    let mut rest = src;
-    while let Some(start) = rest.find("${{ vault.") {
-        out.push_str(&rest[..start]);
-        let token_rest = &rest[start + 4..];
-        let Some(end) = token_rest.find("}}") else {
-            out.push_str(&rest[start..]);
-            return Ok(out);
+    fn resolve_string(&self, src: &str) -> Result<String, StepError> {
+        let mut out = String::new();
+        let mut rest = src;
+        while let Some(start) = rest.find("${{ vault.") {
+            out.push_str(&rest[..start]);
+            let token_rest = &rest[start + 4..];
+            let Some(end) = token_rest.find("}}") else {
+                out.push_str(&rest[start..]);
+                return Ok(out);
+            };
+            let expr = token_rest[..end].trim();
+            out.push_str(&self.resolve_expr(expr)?);
+            rest = &token_rest[end + 2..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    fn resolve_expr(&self, expr: &str) -> Result<String, StepError> {
+        let path = expr
+            .strip_prefix("vault.")
+            .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
+        let mut parts = path.split('.');
+        let name = parts
+            .next()
+            .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
+        if !self.names.iter().any(|n| n == name) {
+            return Err(StepError::msg(format!(
+                "vault `{name}` is not declared in spec.vault"
+            )));
+        }
+        let key = parts.collect::<Vec<_>>().join("_");
+
+        // 1) Env wins: LUMO_VAULT_<NAME>[_<KEY>] (back-compat + CI override).
+        let env_key = if key.is_empty() {
+            format!("LUMO_VAULT_{}", sanitize_env(name))
+        } else {
+            format!("LUMO_VAULT_{}_{}", sanitize_env(name), sanitize_env(&key))
         };
-        let expr = token_rest[..end].trim();
-        let resolved = resolve_vault_expr(expr, names)?;
-        out.push_str(&resolved);
-        rest = &token_rest[end + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
+        if let Ok(v) = std::env::var(&env_key) {
+            return Ok(v);
+        }
 
-fn resolve_vault_expr(expr: &str, names: &[String]) -> Result<String, StepError> {
-    let path = expr
-        .strip_prefix("vault.")
-        .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
-    let mut parts = path.split('.');
-    let name = parts
-        .next()
-        .ok_or_else(|| StepError::msg(format!("invalid vault placeholder `{expr}`")))?;
-    if !names.iter().any(|n| n == name) {
-        return Err(StepError::msg(format!(
-            "vault `{name}` is not declared in spec.vault"
-        )));
+        // 2) Encrypted store fallback (only when both repo + identity present).
+        if let (Some(repo), Some(identity)) = (self.repo, self.identity) {
+            match lumo_storage::vault::get_field(repo, identity, name, &key) {
+                Ok(Some(v)) => return Ok(v),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(StepError::msg(format!(
+                        "vault `{name}` could not be decrypted: {e}"
+                    )))
+                }
+            }
+        }
+
+        // 3) Neither env nor store had it.
+        Err(StepError::msg(format!(
+            "vault value `{expr}` is missing; set {env_key} or run `lumo vault add {name}`"
+        )))
     }
-    let key = parts.collect::<Vec<_>>().join("_");
-    let env_key = if key.is_empty() {
-        format!("LUMO_VAULT_{}", sanitize_env(name))
-    } else {
-        format!("LUMO_VAULT_{}_{}", sanitize_env(name), sanitize_env(&key))
-    };
-    std::env::var(&env_key).map_err(|_| {
-        StepError::msg(format!(
-            "vault value `{expr}` is missing; set environment variable {env_key}"
-        ))
-    })
 }
 
 fn sanitize_env(s: &str) -> String {
@@ -934,7 +981,8 @@ mod tests {
             "paths inside the grant stay allowed"
         );
         assert!(
-            ctx.ensure_fs_read(Path::new("/data/../etc/passwd")).is_err(),
+            ctx.ensure_fs_read(Path::new("/data/../etc/passwd"))
+                .is_err(),
             "`/data/../etc/passwd` resolves outside `/data/**` and must be denied"
         );
         assert!(
