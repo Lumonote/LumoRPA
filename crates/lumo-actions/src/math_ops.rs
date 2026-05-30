@@ -30,18 +30,24 @@ struct RoundIn {
 }
 #[async_trait]
 impl Action for RoundAction {
-    fn id(&self) -> &'static str { "math.round" }
-    fn summary(&self) -> &'static str { "Round a number to N digits (default 0)" }
+    fn id(&self) -> &'static str {
+        "math.round"
+    }
+    fn summary(&self) -> &'static str {
+        "Round a number to N digits (default 0)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": {
-                "value":  { "type": "number" },
-                "digits": { "type": "integer", "default": 0 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value":  { "type": "number" },
+                    "digits": { "type": "integer", "default": 0 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -69,18 +75,24 @@ struct RandIn {
 }
 #[async_trait]
 impl Action for RandomAction {
-    fn id(&self) -> &'static str { "math.random" }
-    fn summary(&self) -> &'static str { "Random number in [min, max) (default [0,1) float)" }
+    fn id(&self) -> &'static str {
+        "math.random"
+    }
+    fn summary(&self) -> &'static str {
+        "Random number in [min, max) (default [0,1) float)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "properties": {
-                "min":     { "type": "number" },
-                "max":     { "type": "number" },
-                "integer": { "type": "boolean", "default": false }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "min":     { "type": "number" },
+                    "max":     { "type": "number" },
+                    "integer": { "type": "boolean", "default": false }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -122,9 +134,15 @@ struct ListIn {
 pub struct MinAction;
 #[async_trait]
 impl Action for MinAction {
-    fn id(&self) -> &'static str { "math.min" }
-    fn summary(&self) -> &'static str { "Smallest number in `items`" }
-    fn schema(&self) -> &'static Value { items_schema() }
+    fn id(&self) -> &'static str {
+        "math.min"
+    }
+    fn summary(&self) -> &'static str {
+        "Smallest number in `items`"
+    }
+    fn schema(&self) -> &'static Value {
+        items_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.min invalid: {e}")))?;
@@ -145,9 +163,15 @@ impl Action for MinAction {
 pub struct MaxAction;
 #[async_trait]
 impl Action for MaxAction {
-    fn id(&self) -> &'static str { "math.max" }
-    fn summary(&self) -> &'static str { "Largest number in `items`" }
-    fn schema(&self) -> &'static Value { items_schema() }
+    fn id(&self) -> &'static str {
+        "math.max"
+    }
+    fn summary(&self) -> &'static str {
+        "Largest number in `items`"
+    }
+    fn schema(&self) -> &'static Value {
+        items_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.max invalid: {e}")))?;
@@ -168,9 +192,15 @@ impl Action for MaxAction {
 pub struct SumAction;
 #[async_trait]
 impl Action for SumAction {
-    fn id(&self) -> &'static str { "math.sum" }
-    fn summary(&self) -> &'static str { "Sum of numeric entries (non-numbers ignored)" }
-    fn schema(&self) -> &'static Value { items_schema() }
+    fn id(&self) -> &'static str {
+        "math.sum"
+    }
+    fn summary(&self) -> &'static str {
+        "Sum of numeric entries (non-numbers ignored)"
+    }
+    fn schema(&self) -> &'static Value {
+        items_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.sum invalid: {e}")))?;
@@ -186,9 +216,15 @@ impl Action for SumAction {
 pub struct AvgAction;
 #[async_trait]
 impl Action for AvgAction {
-    fn id(&self) -> &'static str { "math.avg" }
-    fn summary(&self) -> &'static str { "Arithmetic mean of numeric entries" }
-    fn schema(&self) -> &'static Value { items_schema() }
+    fn id(&self) -> &'static str {
+        "math.avg"
+    }
+    fn summary(&self) -> &'static str {
+        "Arithmetic mean of numeric entries"
+    }
+    fn schema(&self) -> &'static Value {
+        items_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.avg invalid: {e}")))?;
@@ -207,18 +243,26 @@ impl Action for AvgAction {
 
 pub struct AbsAction;
 #[derive(Deserialize)]
-struct AbsIn { value: f64 }
+struct AbsIn {
+    value: f64,
+}
 #[async_trait]
 impl Action for AbsAction {
-    fn id(&self) -> &'static str { "math.abs" }
-    fn summary(&self) -> &'static str { "Absolute value" }
+    fn id(&self) -> &'static str {
+        "math.abs"
+    }
+    fn summary(&self) -> &'static str {
+        "Absolute value"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": { "value": { "type": "number" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": { "value": { "type": "number" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

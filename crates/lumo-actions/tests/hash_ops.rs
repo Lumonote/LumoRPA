@@ -39,7 +39,9 @@ async fn base64_round_trips() {
 
 #[tokio::test]
 async fn base64_decode_rejects_garbage() {
-    let err = run("util.base64_decode", json!({"text": "!!!not base64!!!"})).await.unwrap_err();
+    let err = run("util.base64_decode", json!({"text": "!!!not base64!!!"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("base64"), "got: {err}");
 }
 

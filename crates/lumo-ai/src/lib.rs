@@ -17,9 +17,7 @@ pub use helpers::{
 };
 // Re-export the canonical hook types from lumo-core so external callers see
 // a single set of `HealedSelector`/`Decision` symbols.
-pub use lumo_core::ai_hook::{
-    AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark,
-};
+pub use lumo_core::ai_hook::{AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
 pub use provider::{
     AnthropicProvider, ChatMessage, ChatRequest, ChatResponse, LlmProvider, OpenAiProvider,
     ProviderError, ProviderId, Role,

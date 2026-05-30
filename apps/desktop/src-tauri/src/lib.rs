@@ -393,11 +393,13 @@ fn save_flow_as(app: AppHandle, name: String, source: String) -> Result<String, 
     if safe.is_empty() {
         return Err("flow name must not be empty".into());
     }
-    let path = dir.join(if safe.ends_with(".lumoflow.yaml") || safe.ends_with(".lumoflow.yml") {
-        safe
-    } else {
-        format!("{safe}.lumoflow.yaml")
-    });
+    let path = dir.join(
+        if safe.ends_with(".lumoflow.yaml") || safe.ends_with(".lumoflow.yml") {
+            safe
+        } else {
+            format!("{safe}.lumoflow.yaml")
+        },
+    );
     std::fs::write(&path, source).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path.display().to_string())
 }
@@ -414,7 +416,10 @@ fn delete_flow(app: AppHandle, path: String) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("resolve LUMO_HOME: {e}"))?;
     if !target.starts_with(&home) {
-        return Err(format!("refused: {} is outside LUMO_HOME", target.display()));
+        return Err(format!(
+            "refused: {} is outside LUMO_HOME",
+            target.display()
+        ));
     }
     std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
     Ok(())
@@ -440,8 +445,7 @@ fn duplicate_flow(app: AppHandle, path: String) -> Result<String, String> {
         candidate = dir.join(format!("{stem}-copy-{n}.lumoflow.yaml"));
         n += 1;
     }
-    std::fs::write(&candidate, bytes)
-        .map_err(|e| format!("write {}: {e}", candidate.display()))?;
+    std::fs::write(&candidate, bytes).map_err(|e| format!("write {}: {e}", candidate.display()))?;
     Ok(candidate.display().to_string())
 }
 
@@ -465,12 +469,22 @@ fn sanitize_flow_name(name: &str) -> String {
 /// defaults that the user can tighten later.
 fn wrap_recording_fragment(name: &str, fragment: &str) -> String {
     let id = sanitize_flow_name(name);
-    let id = if id.is_empty() { "recording".into() } else { id };
+    let id = if id.is_empty() {
+        "recording".into()
+    } else {
+        id
+    };
     // Re-indent the fragment so it sits two spaces in under `spec.steps:`.
     let body: String = fragment
         .lines()
         .filter(|l| !l.trim_start().starts_with('#') || l.contains("Recorder"))
-        .map(|l| if l.trim().is_empty() { String::new() } else { format!("    {l}") })
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                format!("    {l}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -500,8 +514,7 @@ fn save_recording_as_flow(
         n += 1;
     }
     let body = wrap_recording_fragment(&stem, &yaml_hint);
-    std::fs::write(&candidate, body)
-        .map_err(|e| format!("write {}: {e}", candidate.display()))?;
+    std::fs::write(&candidate, body).map_err(|e| format!("write {}: {e}", candidate.display()))?;
     Ok(candidate.display().to_string())
 }
 
@@ -744,7 +757,10 @@ fn run_cost(app: AppHandle, run_id: String) -> Result<Vec<lumo_storage::AiCallRo
 /// a run, ordered by capture time. Studio's replay scrubber walks these to
 /// reconstruct what the screen looked like at each step.
 #[tauri::command]
-fn list_artifacts(app: AppHandle, run_id: String) -> Result<Vec<lumo_storage::ArtifactRow>, String> {
+fn list_artifacts(
+    app: AppHandle,
+    run_id: String,
+) -> Result<Vec<lumo_storage::ArtifactRow>, String> {
     let repo = open_repo(&app)?;
     repo.list_artifacts(&run_id).map_err(|e| e.to_string())
 }

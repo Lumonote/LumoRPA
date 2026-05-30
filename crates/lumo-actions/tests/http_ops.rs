@@ -35,7 +35,11 @@ async fn request_returns_status_and_parsed_json() {
     )
     .await;
     assert_eq!(out["status"], json!(200));
-    assert_eq!(out["json"], json!({"ok": true}), "JSON bodies are parsed into `json`");
+    assert_eq!(
+        out["json"],
+        json!({"ok": true}),
+        "JSON bodies are parsed into `json`"
+    );
     assert_eq!(out["headers"]["x-trace"], json!("abc"));
 }
 
@@ -55,7 +59,11 @@ async fn request_exposes_raw_text_when_body_is_not_json() {
     )
     .await;
     assert_eq!(out["text"], json!("just text"));
-    assert_eq!(out["json"], json!(null), "non-JSON bodies leave `json` null");
+    assert_eq!(
+        out["json"],
+        json!(null),
+        "non-JSON bodies leave `json` null"
+    );
 }
 
 #[tokio::test]

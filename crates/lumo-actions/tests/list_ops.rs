@@ -6,7 +6,10 @@ use serde_json::json;
 
 #[tokio::test]
 async fn length_append_reverse() {
-    assert_eq!(ok("list.length", json!({"items": [1, 2, 3]})).await, json!(3));
+    assert_eq!(
+        ok("list.length", json!({"items": [1, 2, 3]})).await,
+        json!(3)
+    );
     assert_eq!(
         ok("list.append", json!({"items": [1, 2], "value": 3})).await,
         json!([1, 2, 3])
@@ -19,13 +22,20 @@ async fn length_append_reverse() {
 
 #[tokio::test]
 async fn sort_ascending_descending_and_by_key() {
-    assert_eq!(ok("list.sort", json!({"items": [3, 1, 2]})).await, json!([1, 2, 3]));
+    assert_eq!(
+        ok("list.sort", json!({"items": [3, 1, 2]})).await,
+        json!([1, 2, 3])
+    );
     assert_eq!(
         ok("list.sort", json!({"items": [3, 1, 2], "desc": true})).await,
         json!([3, 2, 1])
     );
     assert_eq!(
-        ok("list.sort", json!({"items": [{"n": 2}, {"n": 1}], "by": "n"})).await,
+        ok(
+            "list.sort",
+            json!({"items": [{"n": 2}, {"n": 1}], "by": "n"})
+        )
+        .await,
         json!([{"n": 1}, {"n": 2}]),
         "by-key sorts arrays of objects"
     );
@@ -41,7 +51,10 @@ async fn unique_preserves_first_seen_order() {
 
 #[tokio::test]
 async fn range_ascending_descending_and_step() {
-    assert_eq!(ok("list.range", json!({"end": 4})).await, json!([0, 1, 2, 3]));
+    assert_eq!(
+        ok("list.range", json!({"end": 4})).await,
+        json!([0, 1, 2, 3])
+    );
     assert_eq!(
         ok("list.range", json!({"start": 1, "end": 10, "step": 3})).await,
         json!([1, 4, 7])
@@ -54,14 +67,20 @@ async fn range_ascending_descending_and_step() {
 
 #[tokio::test]
 async fn range_rejects_zero_step() {
-    let err = run("list.range", json!({"end": 5, "step": 0})).await.unwrap_err();
+    let err = run("list.range", json!({"end": 5, "step": 0}))
+        .await
+        .unwrap_err();
     assert!(err.contains("step must not be 0"), "got: {err}");
 }
 
 #[tokio::test]
 async fn contains_uses_deep_equality() {
     assert_eq!(
-        ok("list.contains", json!({"items": [{"a": 1}], "value": {"a": 1}})).await,
+        ok(
+            "list.contains",
+            json!({"items": [{"a": 1}], "value": {"a": 1}})
+        )
+        .await,
         json!(true)
     );
     assert_eq!(
@@ -72,7 +91,10 @@ async fn contains_uses_deep_equality() {
 
 #[tokio::test]
 async fn get_handles_negatives_and_out_of_range() {
-    assert_eq!(ok("list.get", json!({"items": ["a", "b", "c"], "index": 1})).await, json!("b"));
+    assert_eq!(
+        ok("list.get", json!({"items": ["a", "b", "c"], "index": 1})).await,
+        json!("b")
+    );
     assert_eq!(
         ok("list.get", json!({"items": ["a", "b", "c"], "index": -1})).await,
         json!("c"),
@@ -88,7 +110,11 @@ async fn get_handles_negatives_and_out_of_range() {
 #[tokio::test]
 async fn slice_with_negatives() {
     assert_eq!(
-        ok("list.slice", json!({"items": [0, 1, 2, 3, 4], "start": 1, "end": 3})).await,
+        ok(
+            "list.slice",
+            json!({"items": [0, 1, 2, 3, 4], "start": 1, "end": 3})
+        )
+        .await,
         json!([1, 2])
     );
     assert_eq!(
@@ -101,7 +127,11 @@ async fn slice_with_negatives() {
 #[tokio::test]
 async fn pluck_extracts_field_or_null() {
     assert_eq!(
-        ok("list.pluck", json!({"items": [{"id": 1}, {"id": 2}, {"x": 9}], "key": "id"})).await,
+        ok(
+            "list.pluck",
+            json!({"items": [{"id": 1}, {"id": 2}, {"x": 9}], "key": "id"})
+        )
+        .await,
         json!([1, 2, null]),
         "missing key yields null for that element"
     );

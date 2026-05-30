@@ -11,7 +11,11 @@ async fn match_tests_partial() {
         json!(true)
     );
     assert_eq!(
-        ok("regex.match", json!({"pattern": "^\\d+$", "text": "abc123"})).await,
+        ok(
+            "regex.match",
+            json!({"pattern": "^\\d+$", "text": "abc123"})
+        )
+        .await,
         json!(false)
     );
 }
@@ -19,7 +23,11 @@ async fn match_tests_partial() {
 #[tokio::test]
 async fn find_all_returns_every_match() {
     assert_eq!(
-        ok("regex.find_all", json!({"pattern": "\\d+", "text": "a1b22c333"})).await,
+        ok(
+            "regex.find_all",
+            json!({"pattern": "\\d+", "text": "a1b22c333"})
+        )
+        .await,
         json!(["1", "22", "333"])
     );
 }
@@ -27,15 +35,27 @@ async fn find_all_returns_every_match() {
 #[tokio::test]
 async fn replace_all_and_once_with_capture_refs() {
     assert_eq!(
-        ok("regex.replace", json!({"pattern": "a", "text": "banana", "replacement": "X"})).await,
+        ok(
+            "regex.replace",
+            json!({"pattern": "a", "text": "banana", "replacement": "X"})
+        )
+        .await,
         json!("bXnXnX")
     );
     assert_eq!(
-        ok("regex.replace", json!({"pattern": "a", "text": "banana", "replacement": "X", "once": true})).await,
+        ok(
+            "regex.replace",
+            json!({"pattern": "a", "text": "banana", "replacement": "X", "once": true})
+        )
+        .await,
         json!("bXnana")
     );
     assert_eq!(
-        ok("regex.replace", json!({"pattern": "(\\w+)@(\\w+)", "text": "user@host", "replacement": "$2.$1"})).await,
+        ok(
+            "regex.replace",
+            json!({"pattern": "(\\w+)@(\\w+)", "text": "user@host", "replacement": "$2.$1"})
+        )
+        .await,
         json!("host.user"),
         "$1/$2 capture references expand"
     );
@@ -56,13 +76,19 @@ async fn captures_returns_full_groups_and_named() {
 #[tokio::test]
 async fn captures_no_match_is_null() {
     assert_eq!(
-        ok("regex.captures", json!({"pattern": "\\d+", "text": "no digits"})).await,
+        ok(
+            "regex.captures",
+            json!({"pattern": "\\d+", "text": "no digits"})
+        )
+        .await,
         json!(null)
     );
 }
 
 #[tokio::test]
 async fn invalid_pattern_is_an_error() {
-    let err = run("regex.match", json!({"pattern": "(unclosed", "text": "x"})).await.unwrap_err();
+    let err = run("regex.match", json!({"pattern": "(unclosed", "text": "x"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("regex compile error"), "got: {err}");
 }

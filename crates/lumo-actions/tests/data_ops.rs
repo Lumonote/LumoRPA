@@ -7,14 +7,20 @@ use serde_json::json;
 #[tokio::test]
 async fn json_parse_reads_a_value() {
     assert_eq!(
-        ok("data.json_parse", json!({"text": "{\"a\":[1,2],\"b\":true}"})).await,
+        ok(
+            "data.json_parse",
+            json!({"text": "{\"a\":[1,2],\"b\":true}"})
+        )
+        .await,
         json!({"a": [1, 2], "b": true})
     );
 }
 
 #[tokio::test]
 async fn json_parse_rejects_malformed() {
-    let err = run("data.json_parse", json!({"text": "{not json"})).await.unwrap_err();
+    let err = run("data.json_parse", json!({"text": "{not json"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("json parse error"), "got: {err}");
 }
 
@@ -25,7 +31,11 @@ async fn json_format_compact_and_pretty() {
         json!("{\"a\":1}"),
         "compact by default"
     );
-    let pretty = ok("data.json_format", json!({"value": {"a": 1}, "pretty": true})).await;
+    let pretty = ok(
+        "data.json_format",
+        json!({"value": {"a": 1}, "pretty": true}),
+    )
+    .await;
     assert!(
         pretty.as_str().unwrap().contains('\n'),
         "pretty output is multi-line: {pretty}"

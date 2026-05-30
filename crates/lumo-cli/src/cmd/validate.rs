@@ -111,9 +111,7 @@ fn validate_schema(
         let input_obj = match input {
             serde_json::Value::Null => &empty,
             serde_json::Value::Object(map) => map,
-            _ => anyhow::bail!(
-                "step `{step_id}` action `{action_id}` with: must be an object"
-            ),
+            _ => anyhow::bail!("step `{step_id}` action `{action_id}` with: must be an object"),
         };
         if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
             for key in required.iter().filter_map(serde_json::Value::as_str) {

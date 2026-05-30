@@ -34,14 +34,22 @@ fn list_schema() -> &'static Value {
 }
 
 #[derive(Deserialize)]
-struct ItemsIn { items: Vec<Value> }
+struct ItemsIn {
+    items: Vec<Value>,
+}
 
 pub struct LengthAction;
 #[async_trait]
 impl Action for LengthAction {
-    fn id(&self) -> &'static str { "list.length" }
-    fn summary(&self) -> &'static str { "Number of elements" }
-    fn schema(&self) -> &'static Value { list_schema() }
+    fn id(&self) -> &'static str {
+        "list.length"
+    }
+    fn summary(&self) -> &'static str {
+        "Number of elements"
+    }
+    fn schema(&self) -> &'static Value {
+        list_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.length invalid: {e}")))?;
@@ -57,18 +65,24 @@ struct AppendIn {
 }
 #[async_trait]
 impl Action for AppendAction {
-    fn id(&self) -> &'static str { "list.append" }
-    fn summary(&self) -> &'static str { "Return `items` with `value` appended" }
+    fn id(&self) -> &'static str {
+        "list.append"
+    }
+    fn summary(&self) -> &'static str {
+        "Return `items` with `value` appended"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items", "value"],
-            "properties": {
-                "items": { "type": "array" },
-                "value": {}
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "value"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "value": {}
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -90,23 +104,33 @@ struct SortIn {
 }
 #[async_trait]
 impl Action for SortAction {
-    fn id(&self) -> &'static str { "list.sort" }
-    fn summary(&self) -> &'static str { "Sort items; supports `by: <key>` for arrays of objects" }
+    fn id(&self) -> &'static str {
+        "list.sort"
+    }
+    fn summary(&self) -> &'static str {
+        "Sort items; supports `by: <key>` for arrays of objects"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items"],
-            "properties": {
-                "items": { "type": "array" },
-                "desc":  { "type": "boolean", "default": false },
-                "by":    { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "desc":  { "type": "boolean", "default": false },
+                    "by":    { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let SortIn { mut items, desc, by } = serde_json::from_value(input)
+        let SortIn {
+            mut items,
+            desc,
+            by,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.sort invalid: {e}")))?;
         items.sort_by(|a, b| {
             let av = by.as_ref().and_then(|k| a.get(k)).unwrap_or(a);
@@ -140,9 +164,15 @@ fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
 pub struct UniqueAction;
 #[async_trait]
 impl Action for UniqueAction {
-    fn id(&self) -> &'static str { "list.unique" }
-    fn summary(&self) -> &'static str { "De-duplicate items preserving order" }
-    fn schema(&self) -> &'static Value { list_schema() }
+    fn id(&self) -> &'static str {
+        "list.unique"
+    }
+    fn summary(&self) -> &'static str {
+        "De-duplicate items preserving order"
+    }
+    fn schema(&self) -> &'static Value {
+        list_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.unique invalid: {e}")))?;
@@ -167,23 +197,31 @@ struct RangeIn {
     #[serde(default = "default_step")]
     step: i64,
 }
-fn default_step() -> i64 { 1 }
+fn default_step() -> i64 {
+    1
+}
 
 #[async_trait]
 impl Action for RangeAction {
-    fn id(&self) -> &'static str { "list.range" }
-    fn summary(&self) -> &'static str { "Generate [start, end) array with step" }
+    fn id(&self) -> &'static str {
+        "list.range"
+    }
+    fn summary(&self) -> &'static str {
+        "Generate [start, end) array with step"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["end"],
-            "properties": {
-                "start": { "type": "integer", "default": 0 },
-                "end":   { "type": "integer" },
-                "step":  { "type": "integer", "default": 1 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["end"],
+                "properties": {
+                    "start": { "type": "integer", "default": 0 },
+                    "end":   { "type": "integer" },
+                    "step":  { "type": "integer", "default": 1 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -209,47 +247,67 @@ impl Action for RangeAction {
 
 pub struct ContainsAction;
 #[derive(Deserialize)]
-struct ContainsIn { items: Vec<Value>, value: Value }
+struct ContainsIn {
+    items: Vec<Value>,
+    value: Value,
+}
 #[async_trait]
 impl Action for ContainsAction {
-    fn id(&self) -> &'static str { "list.contains" }
-    fn summary(&self) -> &'static str { "Whether `items` contains `value` (deep eq via JSON)" }
+    fn id(&self) -> &'static str {
+        "list.contains"
+    }
+    fn summary(&self) -> &'static str {
+        "Whether `items` contains `value` (deep eq via JSON)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items", "value"],
-            "properties": {
-                "items": { "type": "array" },
-                "value": {}
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "value"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "value": {}
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ContainsIn { items, value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.contains invalid: {e}")))?;
-        Ok(ActionResult::from(Value::Bool(items.iter().any(|v| v == &value))))
+        Ok(ActionResult::from(Value::Bool(
+            items.iter().any(|v| v == &value),
+        )))
     }
 }
 
 pub struct GetAction;
 #[derive(Deserialize)]
-struct GetIn { items: Vec<Value>, index: i64 }
+struct GetIn {
+    items: Vec<Value>,
+    index: i64,
+}
 #[async_trait]
 impl Action for GetAction {
-    fn id(&self) -> &'static str { "list.get" }
-    fn summary(&self) -> &'static str { "Element at index (negatives count from end); null if out of range" }
+    fn id(&self) -> &'static str {
+        "list.get"
+    }
+    fn summary(&self) -> &'static str {
+        "Element at index (negatives count from end); null if out of range"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items", "index"],
-            "properties": {
-                "items": { "type": "array" },
-                "index": { "type": "integer" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "index"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "index": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -276,26 +334,38 @@ struct SliceIn {
 }
 #[async_trait]
 impl Action for SliceAction {
-    fn id(&self) -> &'static str { "list.slice" }
-    fn summary(&self) -> &'static str { "Slice items[start:end]; negatives count from end" }
+    fn id(&self) -> &'static str {
+        "list.slice"
+    }
+    fn summary(&self) -> &'static str {
+        "Slice items[start:end]; negatives count from end"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items", "start"],
-            "properties": {
-                "items": { "type": "array" },
-                "start": { "type": "integer" },
-                "end":   { "type": "integer" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "start"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "start": { "type": "integer" },
+                    "end":   { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SliceIn { items, start, end } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.slice invalid: {e}")))?;
         let len = items.len() as i64;
-        let norm = |i: i64| if i < 0 { (len + i).max(0) as usize } else { i.min(len).max(0) as usize };
+        let norm = |i: i64| {
+            if i < 0 {
+                (len + i).max(0) as usize
+            } else {
+                i.min(len).max(0) as usize
+            }
+        };
         let s = norm(start);
         let e = end.map(norm).unwrap_or(items.len());
         let lo = s.min(e);
@@ -307,9 +377,15 @@ impl Action for SliceAction {
 pub struct ReverseAction;
 #[async_trait]
 impl Action for ReverseAction {
-    fn id(&self) -> &'static str { "list.reverse" }
-    fn summary(&self) -> &'static str { "Reverse the array" }
-    fn schema(&self) -> &'static Value { list_schema() }
+    fn id(&self) -> &'static str {
+        "list.reverse"
+    }
+    fn summary(&self) -> &'static str {
+        "Reverse the array"
+    }
+    fn schema(&self) -> &'static Value {
+        list_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { mut items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.reverse invalid: {e}")))?;
@@ -326,18 +402,24 @@ struct PluckIn {
 }
 #[async_trait]
 impl Action for PluckAction {
-    fn id(&self) -> &'static str { "list.pluck" }
-    fn summary(&self) -> &'static str { "Extract `key` field from every object element" }
+    fn id(&self) -> &'static str {
+        "list.pluck"
+    }
+    fn summary(&self) -> &'static str {
+        "Extract `key` field from every object element"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items", "key"],
-            "properties": {
-                "items": { "type": "array" },
-                "key":   { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "key"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "key":   { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

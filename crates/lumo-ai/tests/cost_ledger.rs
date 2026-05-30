@@ -61,7 +61,12 @@ async fn ai_hooks_meter_each_call_for_the_cost_ledger() {
     assert!(hooks.take_usage().is_empty());
 
     let healed = hooks
-        .heal_selector("#missing", "the OK button", None, Some("openai-test/gpt-4o-mini"))
+        .heal_selector(
+            "#missing",
+            "the OK button",
+            None,
+            Some("openai-test/gpt-4o-mini"),
+        )
         .await
         .expect("heal_selector should succeed against the mock");
     assert_eq!(healed.css.as_deref(), Some("#ok"));

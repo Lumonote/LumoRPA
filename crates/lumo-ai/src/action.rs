@@ -96,7 +96,12 @@ impl Action for ChatAction {
             .await
             .map_err(|e| StepError::msg(format!("ai.chat: {e}")))?;
         let latency_ms = t0.elapsed().as_millis() as i64;
-        let cost = cost_micro(&resp.provider, &resp.model, resp.input_tokens, resp.output_tokens);
+        let cost = cost_micro(
+            &resp.provider,
+            &resp.model,
+            resp.input_tokens,
+            resp.output_tokens,
+        );
 
         // X-10: persist a row per call so `lumo runs cost` + Studio can show
         // tokens / $ per step. Best-effort — a failed insert never blocks the

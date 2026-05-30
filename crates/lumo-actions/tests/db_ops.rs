@@ -79,7 +79,11 @@ async fn query_limit_marks_truncation() {
     )
     .await;
     assert_eq!(rows["count"], json!(1));
-    assert_eq!(rows["truncated"], json!(true), "hitting the limit flags truncation");
+    assert_eq!(
+        rows["truncated"],
+        json!(true),
+        "hitting the limit flags truncation"
+    );
 }
 
 #[tokio::test]

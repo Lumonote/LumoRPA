@@ -1,5 +1,6 @@
 //! P1-5: provider transient-error backoff + image-size guard.
 
+use bytes::Bytes;
 use lumo_ai::{
     budget::RunBudget,
     config::{ProviderProfile, ProvidersConfig},
@@ -7,7 +8,6 @@ use lumo_ai::{
     provider::{ChatMessage, ChatRequest, Role},
     AiRouter,
 };
-use bytes::Bytes;
 use serde_json::json;
 use std::sync::OnceLock;
 use tokio::sync::{Mutex, MutexGuard};

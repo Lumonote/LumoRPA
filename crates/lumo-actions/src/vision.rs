@@ -156,11 +156,7 @@ fn bbox_center((x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32) {
 /// Run `document.elementFromPoint(x, y)` and tag the result with
 /// `data-lumo-resolved="1"` so callers can `page.find_element` it. Returns
 /// `None` when the point is outside the viewport or hits nothing useful.
-async fn mark_element_at_point(
-    page: &Page,
-    x: f32,
-    y: f32,
-) -> Result<Option<Element>, StepError> {
+async fn mark_element_at_point(page: &Page, x: f32, y: f32) -> Result<Option<Element>, StepError> {
     let js = format!(
         r#"
 (() => {{
@@ -188,10 +184,7 @@ async fn mark_element_at_point(
 
 /// Look up an element previously tagged with `data-lumo-mark="N"` by
 /// [`inject_som_overlay`] and promote it to `data-lumo-resolved="1"`.
-async fn mark_element_by_index(
-    page: &Page,
-    index: u32,
-) -> Result<Option<Element>, StepError> {
+async fn mark_element_by_index(page: &Page, index: u32) -> Result<Option<Element>, StepError> {
     let js = format!(
         r#"
 (() => {{

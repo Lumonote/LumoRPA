@@ -281,7 +281,8 @@ pub async fn vision_locate(
             "You are a Vision-LLM grounding assistant for RPA. Given a screenshot of a web page \
              and a natural-language target, return STRICT JSON only (no Markdown fences): \
              {\"bbox\": [x, y, w, h] | null, \"confidence\": number 0..1, \"reasoning\": string}. \
-             Coordinates are CSS pixels in the screenshot. Return null when uncertain.".to_string(),
+             Coordinates are CSS pixels in the screenshot. Return null when uncertain."
+                .to_string(),
             format!("Target: {target_description}"),
         )
     } else {
@@ -291,7 +292,12 @@ pub async fn vision_locate(
                 "{} → {} {:?} {}\n",
                 m.index,
                 m.tag,
-                (m.bbox.0 as i32, m.bbox.1 as i32, m.bbox.2 as i32, m.bbox.3 as i32),
+                (
+                    m.bbox.0 as i32,
+                    m.bbox.1 as i32,
+                    m.bbox.2 as i32,
+                    m.bbox.3 as i32
+                ),
                 m.label
             ));
         }
@@ -300,7 +306,8 @@ pub async fn vision_locate(
              on candidate elements. Pick the single number whose element best matches the \
              target. Return STRICT JSON only (no Markdown fences): \
              {\"mark\": integer | null, \"confidence\": number 0..1, \"reasoning\": string}. \
-             Use `null` when none of the marks fits.".to_string(),
+             Use `null` when none of the marks fits."
+                .to_string(),
             format!("Target: {target_description}\n\nMarks (index → tag bbox label):\n{listing}"),
         )
     };

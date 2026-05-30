@@ -67,28 +67,41 @@ struct QueryIn {
     #[serde(default = "default_limit")]
     limit: usize,
 }
-fn default_limit() -> usize { 1_000 }
+fn default_limit() -> usize {
+    1_000
+}
 
 #[async_trait]
 impl Action for SqliteQueryAction {
-    fn id(&self) -> &'static str { "db.sqlite_query" }
-    fn summary(&self) -> &'static str { "Run a SELECT against a SQLite file; rows returned as JSON" }
+    fn id(&self) -> &'static str {
+        "db.sqlite_query"
+    }
+    fn summary(&self) -> &'static str {
+        "Run a SELECT against a SQLite file; rows returned as JSON"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["db", "sql"],
-            "properties": {
-                "db":    { "type": "string" },
-                "sql":   { "type": "string" },
-                "args":  { "type": "array" },
-                "limit": { "type": "integer", "minimum": 1, "default": 1000 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["db", "sql"],
+                "properties": {
+                    "db":    { "type": "string" },
+                    "sql":   { "type": "string" },
+                    "args":  { "type": "array" },
+                    "limit": { "type": "integer", "minimum": 1, "default": 1000 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let QueryIn { db, sql, args, limit } = serde_json::from_value(input)
+        let QueryIn {
+            db,
+            sql,
+            args,
+            limit,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.sqlite_query invalid: {e}")))?;
         ctx.ensure_fs_read(&db)?;
         let path = db.clone();
@@ -141,19 +154,25 @@ struct ExecIn {
 }
 #[async_trait]
 impl Action for SqliteExecAction {
-    fn id(&self) -> &'static str { "db.sqlite_exec" }
-    fn summary(&self) -> &'static str { "Run an INSERT/UPDATE/DELETE/DDL against a SQLite file" }
+    fn id(&self) -> &'static str {
+        "db.sqlite_exec"
+    }
+    fn summary(&self) -> &'static str {
+        "Run an INSERT/UPDATE/DELETE/DDL against a SQLite file"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["db", "sql"],
-            "properties": {
-                "db":   { "type": "string" },
-                "sql":  { "type": "string" },
-                "args": { "type": "array" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["db", "sql"],
+                "properties": {
+                    "db":   { "type": "string" },
+                    "sql":  { "type": "string" },
+                    "args": { "type": "array" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

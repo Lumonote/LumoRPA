@@ -150,7 +150,8 @@ fn walk(
                 ),
             ));
         }
-        if (action.starts_with("file.") && matches!(action, "file.read" | "file.exists" | "csv.read")
+        if (action.starts_with("file.")
+            && matches!(action, "file.read" | "file.exists" | "csv.read")
             || matches!(action, "csv.read"))
             && !ctx.has_fs_read
         {
@@ -158,13 +159,13 @@ fn walk(
                 LintSeverity::Warn,
                 "capability.fs_read",
                 Some(&s.id),
-                format!(
-                    "Action `{action}` reads files but spec.capabilities.\"fs.read\" is empty"
-                ),
+                format!("Action `{action}` reads files but spec.capabilities.\"fs.read\" is empty"),
             ));
         }
-        if matches!(action, "file.write" | "csv.write" | "excel.write_row" | "db.sqlite_exec")
-            && !ctx.has_fs_write
+        if matches!(
+            action,
+            "file.write" | "csv.write" | "excel.write_row" | "db.sqlite_exec"
+        ) && !ctx.has_fs_write
         {
             out.push(LintIssue::at(
                 LintSeverity::Warn,
@@ -177,15 +178,15 @@ fn walk(
         }
         if action.starts_with("ai.")
             && !ctx.has_llm_cap
-            && s.ai.as_ref().map_or(action == "ai.chat", |a| a.is_enabled())
+            && s.ai
+                .as_ref()
+                .map_or(action == "ai.chat", |a| a.is_enabled())
         {
             out.push(LintIssue::at(
                 LintSeverity::Warn,
                 "capability.llm",
                 Some(&s.id),
-                format!(
-                    "Action `{action}` calls an LLM but spec.capabilities.llm is empty"
-                ),
+                format!("Action `{action}` calls an LLM but spec.capabilities.llm is empty"),
             ));
         }
         if action.starts_with("mcp.") && !ctx.has_mcp_cap {
@@ -193,9 +194,7 @@ fn walk(
                 LintSeverity::Warn,
                 "capability.mcp",
                 Some(&s.id),
-                format!(
-                    "Action `{action}` calls an MCP tool but spec.capabilities.mcp is empty"
-                ),
+                format!("Action `{action}` calls an MCP tool but spec.capabilities.mcp is empty"),
             ));
         }
         if let Some(ai) = &s.ai {
@@ -315,7 +314,10 @@ fn check_ref(
                         LintSeverity::Warn,
                         "template.unknown_step",
                         Some(cur_step),
-                        format!("`{}` references step id `{}` that does not exist", r.raw, name),
+                        format!(
+                            "`{}` references step id `{}` that does not exist",
+                            r.raw, name
+                        ),
                     ));
                 }
             }
@@ -436,7 +438,9 @@ spec:
 "#;
         let issues = lint(y);
         assert!(
-            !issues.iter().any(|i| matches!(i.severity, LintSeverity::Warn | LintSeverity::Error)),
+            !issues
+                .iter()
+                .any(|i| matches!(i.severity, LintSeverity::Warn | LintSeverity::Error)),
             "expected clean flow, got: {issues:?}"
         );
     }

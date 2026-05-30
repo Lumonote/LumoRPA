@@ -41,8 +41,12 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         Format::Pretty => print_pretty(&issues),
     }
 
-    let has_error = issues.iter().any(|i| matches!(i.severity, LintSeverity::Error));
-    let has_warn = issues.iter().any(|i| matches!(i.severity, LintSeverity::Warn));
+    let has_error = issues
+        .iter()
+        .any(|i| matches!(i.severity, LintSeverity::Error));
+    let has_warn = issues
+        .iter()
+        .any(|i| matches!(i.severity, LintSeverity::Warn));
     if has_error || (args.strict && has_warn) {
         std::process::exit(1);
     }

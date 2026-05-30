@@ -201,7 +201,12 @@ fn cost_summary(repo: &Repo, json: bool) -> anyhow::Result<()> {
         }
         grand_tokens += r.cost_token;
         grand_micro += r.cost_usd_micro;
-        rows.push((r.id.clone(), r.flow_id.clone(), r.cost_token, r.cost_usd_micro));
+        rows.push((
+            r.id.clone(),
+            r.flow_id.clone(),
+            r.cost_token,
+            r.cost_usd_micro,
+        ));
     }
     if json {
         println!(

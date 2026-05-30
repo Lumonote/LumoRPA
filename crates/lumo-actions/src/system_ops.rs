@@ -28,27 +28,39 @@ struct ShellIn {
     #[serde(default = "default_shell_timeout")]
     timeout_ms: u64,
 }
-fn default_shell_timeout() -> u64 { 30_000 }
+fn default_shell_timeout() -> u64 {
+    30_000
+}
 
 #[async_trait]
 impl Action for ShellAction {
-    fn id(&self) -> &'static str { "system.shell" }
-    fn summary(&self) -> &'static str { "Run `command` in the platform shell (requires LUMO_ALLOW_SHELL=1)" }
+    fn id(&self) -> &'static str {
+        "system.shell"
+    }
+    fn summary(&self) -> &'static str {
+        "Run `command` in the platform shell (requires LUMO_ALLOW_SHELL=1)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["command"],
-            "properties": {
-                "command":    { "type": "string" },
-                "cwd":        { "type": "string" },
-                "timeout_ms": { "type": "integer", "minimum": 100, "default": 30000 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command":    { "type": "string" },
+                    "cwd":        { "type": "string" },
+                    "timeout_ms": { "type": "integer", "minimum": 100, "default": 30000 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ShellIn { command, cwd, timeout_ms } = serde_json::from_value(input)
+        let ShellIn {
+            command,
+            cwd,
+            timeout_ms,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("system.shell invalid: {e}")))?;
         if std::env::var("LUMO_ALLOW_SHELL").ok().as_deref() != Some("1") {
             return Err(StepError::msg(
@@ -87,18 +99,24 @@ struct EnvIn {
 }
 #[async_trait]
 impl Action for EnvGetAction {
-    fn id(&self) -> &'static str { "system.env_get" }
-    fn summary(&self) -> &'static str { "Read env var by name; optional `default` when missing" }
+    fn id(&self) -> &'static str {
+        "system.env_get"
+    }
+    fn summary(&self) -> &'static str {
+        "Read env var by name; optional `default` when missing"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["name"],
-            "properties": {
-                "name":    { "type": "string" },
-                "default": { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name":    { "type": "string" },
+                    "default": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -111,18 +129,26 @@ impl Action for EnvGetAction {
 
 pub struct SleepAction;
 #[derive(Deserialize)]
-struct SleepIn { ms: u64 }
+struct SleepIn {
+    ms: u64,
+}
 #[async_trait]
 impl Action for SleepAction {
-    fn id(&self) -> &'static str { "system.sleep" }
-    fn summary(&self) -> &'static str { "Pause for `ms` milliseconds" }
+    fn id(&self) -> &'static str {
+        "system.sleep"
+    }
+    fn summary(&self) -> &'static str {
+        "Pause for `ms` milliseconds"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["ms"],
-            "properties": { "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["ms"],
+                "properties": { "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -136,14 +162,20 @@ impl Action for SleepAction {
 pub struct PlatformAction;
 #[async_trait]
 impl Action for PlatformAction {
-    fn id(&self) -> &'static str { "system.platform" }
-    fn summary(&self) -> &'static str { "Report `{ os, arch, family }`" }
+    fn id(&self) -> &'static str {
+        "system.platform"
+    }
+    fn summary(&self) -> &'static str {
+        "Report `{ os, arch, family }`"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {

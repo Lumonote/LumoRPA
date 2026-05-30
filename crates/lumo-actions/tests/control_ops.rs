@@ -8,7 +8,13 @@ use serde_json::json;
 
 #[tokio::test]
 async fn if_reports_truthiness() {
-    for truthy in [json!(true), json!(1), json!("yes"), json!([1]), json!({"a": 1})] {
+    for truthy in [
+        json!(true),
+        json!(1),
+        json!("yes"),
+        json!([1]),
+        json!({"a": 1}),
+    ] {
         assert_eq!(
             ok("control.if", json!({"cond": truthy.clone()})).await,
             json!(true),
@@ -16,8 +22,15 @@ async fn if_reports_truthiness() {
         );
     }
     for falsy in [
-        json!(false), json!(0), json!(null), json!(""),
-        json!("false"), json!("0"), json!("no"), json!([]), json!({}),
+        json!(false),
+        json!(0),
+        json!(null),
+        json!(""),
+        json!("false"),
+        json!("0"),
+        json!("no"),
+        json!([]),
+        json!({}),
     ] {
         assert_eq!(
             ok("control.if", json!({"cond": falsy.clone()})).await,
@@ -29,7 +42,9 @@ async fn if_reports_truthiness() {
 
 #[tokio::test]
 async fn fail_propagates_a_user_message() {
-    let err = run("control.fail", json!({"message": "boom"})).await.unwrap_err();
+    let err = run("control.fail", json!({"message": "boom"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("boom"), "got: {err}");
     // An empty message falls back to a default.
     let err = run("control.fail", json!({})).await.unwrap_err();
@@ -39,7 +54,9 @@ async fn fail_propagates_a_user_message() {
 #[tokio::test]
 async fn set_var_writes_into_the_context() {
     let mut ctx = ctx_with(Capabilities::default());
-    let action = ctx.lookup_action("control.set_var").expect("control.set_var registered");
+    let action = ctx
+        .lookup_action("control.set_var")
+        .expect("control.set_var registered");
     let out = action
         .execute(&mut ctx, json!({"name": "greeting", "value": "hi"}))
         .await
@@ -75,7 +92,10 @@ async fn loop_and_block_markers_are_noops() {
     // The VM drives do:/else:/catch: children; the actions themselves are null
     // markers that only validate their own config.
     assert_eq!(ok("control.for", json!({"to": 3})).await, json!(null));
-    assert_eq!(ok("control.for_each", json!({"in": [1, 2, 3]})).await, json!(null));
+    assert_eq!(
+        ok("control.for_each", json!({"in": [1, 2, 3]})).await,
+        json!(null)
+    );
     assert_eq!(ok("control.parallel", json!({})).await, json!(null));
     assert_eq!(ok("control.try", json!({})).await, json!(null));
     // `control.for` still requires its bound — bad config is rejected.

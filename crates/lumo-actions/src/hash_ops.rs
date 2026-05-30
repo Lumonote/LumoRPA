@@ -34,14 +34,22 @@ fn text_schema() -> &'static Value {
 }
 
 #[derive(Deserialize)]
-struct TextIn { text: String }
+struct TextIn {
+    text: String,
+}
 
 pub struct Sha256Action;
 #[async_trait]
 impl Action for Sha256Action {
-    fn id(&self) -> &'static str { "hash.sha256" }
-    fn summary(&self) -> &'static str { "SHA-256 hex digest of `text`" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "hash.sha256"
+    }
+    fn summary(&self) -> &'static str {
+        "SHA-256 hex digest of `text`"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("hash.sha256 invalid: {e}")))?;
@@ -55,9 +63,15 @@ impl Action for Sha256Action {
 pub struct Sha512Action;
 #[async_trait]
 impl Action for Sha512Action {
-    fn id(&self) -> &'static str { "hash.sha512" }
-    fn summary(&self) -> &'static str { "SHA-512 hex digest of `text`" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "hash.sha512"
+    }
+    fn summary(&self) -> &'static str {
+        "SHA-512 hex digest of `text`"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("hash.sha512 invalid: {e}")))?;
@@ -71,9 +85,15 @@ impl Action for Sha512Action {
 pub struct Sha1Action;
 #[async_trait]
 impl Action for Sha1Action {
-    fn id(&self) -> &'static str { "hash.sha1" }
-    fn summary(&self) -> &'static str { "SHA-1 hex digest of `text` (legacy)" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "hash.sha1"
+    }
+    fn summary(&self) -> &'static str {
+        "SHA-1 hex digest of `text` (legacy)"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("hash.sha1 invalid: {e}")))?;
@@ -87,9 +107,15 @@ impl Action for Sha1Action {
 pub struct Md5Action;
 #[async_trait]
 impl Action for Md5Action {
-    fn id(&self) -> &'static str { "hash.md5" }
-    fn summary(&self) -> &'static str { "MD5 hex digest of `text` (legacy)" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "hash.md5"
+    }
+    fn summary(&self) -> &'static str {
+        "MD5 hex digest of `text` (legacy)"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("hash.md5 invalid: {e}")))?;
@@ -103,9 +129,15 @@ impl Action for Md5Action {
 pub struct Base64EncodeAction;
 #[async_trait]
 impl Action for Base64EncodeAction {
-    fn id(&self) -> &'static str { "util.base64_encode" }
-    fn summary(&self) -> &'static str { "Base64 (standard) encode UTF-8 text" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "util.base64_encode"
+    }
+    fn summary(&self) -> &'static str {
+        "Base64 (standard) encode UTF-8 text"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("util.base64_encode invalid: {e}")))?;
@@ -117,9 +149,15 @@ impl Action for Base64EncodeAction {
 pub struct Base64DecodeAction;
 #[async_trait]
 impl Action for Base64DecodeAction {
-    fn id(&self) -> &'static str { "util.base64_decode" }
-    fn summary(&self) -> &'static str { "Base64 decode → UTF-8 text" }
-    fn schema(&self) -> &'static Value { text_schema() }
+    fn id(&self) -> &'static str {
+        "util.base64_decode"
+    }
+    fn summary(&self) -> &'static str {
+        "Base64 decode → UTF-8 text"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("util.base64_decode invalid: {e}")))?;
@@ -135,18 +173,26 @@ impl Action for Base64DecodeAction {
 pub struct UuidAction;
 #[async_trait]
 impl Action for UuidAction {
-    fn id(&self) -> &'static str { "util.uuid" }
-    fn summary(&self) -> &'static str { "Generate a random UUID v4" }
+    fn id(&self) -> &'static str {
+        "util.uuid"
+    }
+    fn summary(&self) -> &'static str {
+        "Generate a random UUID v4"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
-        Ok(ActionResult::from(Value::String(uuid::Uuid::new_v4().to_string())))
+        Ok(ActionResult::from(Value::String(
+            uuid::Uuid::new_v4().to_string(),
+        )))
     }
 }
 

@@ -48,9 +48,15 @@ struct TextIn {
 pub struct UpperAction;
 #[async_trait]
 impl Action for UpperAction {
-    fn id(&self) -> &'static str { "string.upper" }
-    fn summary(&self) -> &'static str { "Uppercase a string" }
-    fn schema(&self) -> &'static Value { text_only_schema() }
+    fn id(&self) -> &'static str {
+        "string.upper"
+    }
+    fn summary(&self) -> &'static str {
+        "Uppercase a string"
+    }
+    fn schema(&self) -> &'static Value {
+        text_only_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.upper invalid: {e}")))?;
@@ -61,9 +67,15 @@ impl Action for UpperAction {
 pub struct LowerAction;
 #[async_trait]
 impl Action for LowerAction {
-    fn id(&self) -> &'static str { "string.lower" }
-    fn summary(&self) -> &'static str { "Lowercase a string" }
-    fn schema(&self) -> &'static Value { text_only_schema() }
+    fn id(&self) -> &'static str {
+        "string.lower"
+    }
+    fn summary(&self) -> &'static str {
+        "Lowercase a string"
+    }
+    fn schema(&self) -> &'static Value {
+        text_only_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.lower invalid: {e}")))?;
@@ -74,9 +86,15 @@ impl Action for LowerAction {
 pub struct TrimAction;
 #[async_trait]
 impl Action for TrimAction {
-    fn id(&self) -> &'static str { "string.trim" }
-    fn summary(&self) -> &'static str { "Trim leading/trailing whitespace" }
-    fn schema(&self) -> &'static Value { text_only_schema() }
+    fn id(&self) -> &'static str {
+        "string.trim"
+    }
+    fn summary(&self) -> &'static str {
+        "Trim leading/trailing whitespace"
+    }
+    fn schema(&self) -> &'static Value {
+        text_only_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.trim invalid: {e}")))?;
@@ -87,9 +105,15 @@ impl Action for TrimAction {
 pub struct LengthAction;
 #[async_trait]
 impl Action for LengthAction {
-    fn id(&self) -> &'static str { "string.length" }
-    fn summary(&self) -> &'static str { "Count characters (not bytes)" }
-    fn schema(&self) -> &'static Value { text_only_schema() }
+    fn id(&self) -> &'static str {
+        "string.length"
+    }
+    fn summary(&self) -> &'static str {
+        "Count characters (not bytes)"
+    }
+    fn schema(&self) -> &'static Value {
+        text_only_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.length invalid: {e}")))?;
@@ -106,23 +130,31 @@ struct SplitIn {
     #[serde(default)]
     limit: Option<usize>,
 }
-fn default_sep() -> String { ",".into() }
+fn default_sep() -> String {
+    ",".into()
+}
 
 #[async_trait]
 impl Action for SplitAction {
-    fn id(&self) -> &'static str { "string.split" }
-    fn summary(&self) -> &'static str { "Split text by separator into an array" }
+    fn id(&self) -> &'static str {
+        "string.split"
+    }
+    fn summary(&self) -> &'static str {
+        "Split text by separator into an array"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text"],
-            "properties": {
-                "text":  { "type": "string" },
-                "sep":   { "type": "string", "default": "," },
-                "limit": { "type": "integer", "minimum": 1 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text":  { "type": "string" },
+                    "sep":   { "type": "string", "default": "," },
+                    "limit": { "type": "integer", "minimum": 1 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -150,18 +182,24 @@ struct JoinIn {
 }
 #[async_trait]
 impl Action for JoinAction {
-    fn id(&self) -> &'static str { "string.join" }
-    fn summary(&self) -> &'static str { "Join array elements into a single string" }
+    fn id(&self) -> &'static str {
+        "string.join"
+    }
+    fn summary(&self) -> &'static str {
+        "Join array elements into a single string"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["items"],
-            "properties": {
-                "items": { "type": "array" },
-                "sep":   { "type": "string", "default": "," }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "sep":   { "type": "string", "default": "," }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -189,26 +227,41 @@ struct ReplaceIn {
 }
 #[async_trait]
 impl Action for ReplaceAction {
-    fn id(&self) -> &'static str { "string.replace" }
-    fn summary(&self) -> &'static str { "Replace `from` with `to` (literal, not regex)" }
+    fn id(&self) -> &'static str {
+        "string.replace"
+    }
+    fn summary(&self) -> &'static str {
+        "Replace `from` with `to` (literal, not regex)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "from", "to"],
-            "properties": {
-                "text": { "type": "string" },
-                "from": { "type": "string" },
-                "to":   { "type": "string" },
-                "once": { "type": "boolean", "default": false }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "from", "to"],
+                "properties": {
+                    "text": { "type": "string" },
+                    "from": { "type": "string" },
+                    "to":   { "type": "string" },
+                    "once": { "type": "boolean", "default": false }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ReplaceIn { text, from, to, once } = serde_json::from_value(input)
+        let ReplaceIn {
+            text,
+            from,
+            to,
+            once,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.replace invalid: {e}")))?;
-        let out = if once { text.replacen(&from, &to, 1) } else { text.replace(&from, &to) };
+        let out = if once {
+            text.replacen(&from, &to, 1)
+        } else {
+            text.replace(&from, &to)
+        };
         Ok(ActionResult::from(Value::String(out)))
     }
 }
@@ -221,27 +274,39 @@ struct ContainsIn {
     #[serde(default = "default_true")]
     case_sensitive: bool,
 }
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[async_trait]
 impl Action for ContainsAction {
-    fn id(&self) -> &'static str { "string.contains" }
-    fn summary(&self) -> &'static str { "Test whether `text` contains `needle`" }
+    fn id(&self) -> &'static str {
+        "string.contains"
+    }
+    fn summary(&self) -> &'static str {
+        "Test whether `text` contains `needle`"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "needle"],
-            "properties": {
-                "text":   { "type": "string" },
-                "needle": { "type": "string" },
-                "case_sensitive": { "type": "boolean", "default": true }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "needle"],
+                "properties": {
+                    "text":   { "type": "string" },
+                    "needle": { "type": "string" },
+                    "case_sensitive": { "type": "boolean", "default": true }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ContainsIn { text, needle, case_sensitive } = serde_json::from_value(input)
+        let ContainsIn {
+            text,
+            needle,
+            case_sensitive,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.contains invalid: {e}")))?;
         let hit = if case_sensitive {
             text.contains(&needle)
@@ -254,21 +319,30 @@ impl Action for ContainsAction {
 
 pub struct StartsWithAction;
 #[derive(Deserialize)]
-struct StartsIn { text: String, prefix: String }
+struct StartsIn {
+    text: String,
+    prefix: String,
+}
 #[async_trait]
 impl Action for StartsWithAction {
-    fn id(&self) -> &'static str { "string.starts_with" }
-    fn summary(&self) -> &'static str { "Test whether `text` starts with prefix" }
+    fn id(&self) -> &'static str {
+        "string.starts_with"
+    }
+    fn summary(&self) -> &'static str {
+        "Test whether `text` starts with prefix"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "prefix"],
-            "properties": {
-                "text":   { "type": "string" },
-                "prefix": { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "prefix"],
+                "properties": {
+                    "text":   { "type": "string" },
+                    "prefix": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -280,21 +354,30 @@ impl Action for StartsWithAction {
 
 pub struct EndsWithAction;
 #[derive(Deserialize)]
-struct EndsIn { text: String, suffix: String }
+struct EndsIn {
+    text: String,
+    suffix: String,
+}
 #[async_trait]
 impl Action for EndsWithAction {
-    fn id(&self) -> &'static str { "string.ends_with" }
-    fn summary(&self) -> &'static str { "Test whether `text` ends with suffix" }
+    fn id(&self) -> &'static str {
+        "string.ends_with"
+    }
+    fn summary(&self) -> &'static str {
+        "Test whether `text` ends with suffix"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "suffix"],
-            "properties": {
-                "text":   { "type": "string" },
-                "suffix": { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "suffix"],
+                "properties": {
+                    "text":   { "type": "string" },
+                    "suffix": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -314,19 +397,25 @@ struct SubIn {
 }
 #[async_trait]
 impl Action for SubstringAction {
-    fn id(&self) -> &'static str { "string.substring" }
-    fn summary(&self) -> &'static str { "Character slice; negatives count from end" }
+    fn id(&self) -> &'static str {
+        "string.substring"
+    }
+    fn summary(&self) -> &'static str {
+        "Character slice; negatives count from end"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "start"],
-            "properties": {
-                "text":  { "type": "string" },
-                "start": { "type": "integer" },
-                "end":   { "type": "integer" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "start"],
+                "properties": {
+                    "text":  { "type": "string" },
+                    "start": { "type": "integer" },
+                    "end":   { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -334,7 +423,13 @@ impl Action for SubstringAction {
             .map_err(|e| StepError::msg(format!("string.substring invalid: {e}")))?;
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len() as i64;
-        let norm = |i: i64| if i < 0 { (len + i).max(0) as usize } else { i.min(len).max(0) as usize };
+        let norm = |i: i64| {
+            if i < 0 {
+                (len + i).max(0) as usize
+            } else {
+                i.min(len).max(0) as usize
+            }
+        };
         let s = norm(start);
         let e = end.map(norm).unwrap_or(chars.len());
         let lo = s.min(e);
@@ -346,27 +441,38 @@ impl Action for SubstringAction {
 
 pub struct RepeatAction;
 #[derive(Deserialize)]
-struct RepIn { text: String, times: u32 }
+struct RepIn {
+    text: String,
+    times: u32,
+}
 #[async_trait]
 impl Action for RepeatAction {
-    fn id(&self) -> &'static str { "string.repeat" }
-    fn summary(&self) -> &'static str { "Repeat `text` n times" }
+    fn id(&self) -> &'static str {
+        "string.repeat"
+    }
+    fn summary(&self) -> &'static str {
+        "Repeat `text` n times"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text", "times"],
-            "properties": {
-                "text":  { "type": "string" },
-                "times": { "type": "integer", "minimum": 0 }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text", "times"],
+                "properties": {
+                    "text":  { "type": "string" },
+                    "times": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RepIn { text, times } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.repeat invalid: {e}")))?;
-        Ok(ActionResult::from(Value::String(text.repeat(times as usize))))
+        Ok(ActionResult::from(Value::String(
+            text.repeat(times as usize),
+        )))
     }
 }
 
@@ -377,22 +483,26 @@ struct PadIn {
     #[serde(default = "default_pad")]
     pad: String,
 }
-fn default_pad() -> String { " ".into() }
+fn default_pad() -> String {
+    " ".into()
+}
 
 pub struct PadLeftAction;
 pub struct PadRightAction;
 
 fn pad_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-        "type": "object",
-        "required": ["text", "width"],
-        "properties": {
-            "text":  { "type": "string" },
-            "width": { "type": "integer", "minimum": 0 },
-            "pad":   { "type": "string", "default": " " }
-        },
-        "additionalProperties": false
-    }));
+    static S: Lazy<Value> = Lazy::new(|| {
+        serde_json::json!({
+            "type": "object",
+            "required": ["text", "width"],
+            "properties": {
+                "text":  { "type": "string" },
+                "width": { "type": "integer", "minimum": 0 },
+                "pad":   { "type": "string", "default": " " }
+            },
+            "additionalProperties": false
+        })
+    });
     &S
 }
 
@@ -416,25 +526,41 @@ fn do_pad(text: &str, width: usize, pad: &str, left: bool) -> String {
 
 #[async_trait]
 impl Action for PadLeftAction {
-    fn id(&self) -> &'static str { "string.pad_left" }
-    fn summary(&self) -> &'static str { "Pad string to fixed width from the left" }
-    fn schema(&self) -> &'static Value { pad_schema() }
+    fn id(&self) -> &'static str {
+        "string.pad_left"
+    }
+    fn summary(&self) -> &'static str {
+        "Pad string to fixed width from the left"
+    }
+    fn schema(&self) -> &'static Value {
+        pad_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PadIn { text, width, pad } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.pad_left invalid: {e}")))?;
-        Ok(ActionResult::from(Value::String(do_pad(&text, width, &pad, true))))
+        Ok(ActionResult::from(Value::String(do_pad(
+            &text, width, &pad, true,
+        ))))
     }
 }
 
 #[async_trait]
 impl Action for PadRightAction {
-    fn id(&self) -> &'static str { "string.pad_right" }
-    fn summary(&self) -> &'static str { "Pad string to fixed width from the right" }
-    fn schema(&self) -> &'static Value { pad_schema() }
+    fn id(&self) -> &'static str {
+        "string.pad_right"
+    }
+    fn summary(&self) -> &'static str {
+        "Pad string to fixed width from the right"
+    }
+    fn schema(&self) -> &'static Value {
+        pad_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PadIn { text, width, pad } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.pad_right invalid: {e}")))?;
-        Ok(ActionResult::from(Value::String(do_pad(&text, width, &pad, false))))
+        Ok(ActionResult::from(Value::String(do_pad(
+            &text, width, &pad, false,
+        ))))
     }
 }
 
@@ -447,18 +573,24 @@ struct FmtIn {
 }
 #[async_trait]
 impl Action for FormatAction {
-    fn id(&self) -> &'static str { "string.format" }
-    fn summary(&self) -> &'static str { "Replace {key} placeholders in template" }
+    fn id(&self) -> &'static str {
+        "string.format"
+    }
+    fn summary(&self) -> &'static str {
+        "Replace {key} placeholders in template"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["template"],
-            "properties": {
-                "template": { "type": "string" },
-                "values":   { "type": "object" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["template"],
+                "properties": {
+                    "template": { "type": "string" },
+                    "values":   { "type": "object" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

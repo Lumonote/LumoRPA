@@ -50,7 +50,11 @@ async fn write_row_appends_to_an_existing_sheet() {
         caps.clone(),
     )
     .await;
-    assert_eq!(second, json!({"rows": 2}), "second append reports two data rows");
+    assert_eq!(
+        second,
+        json!({"rows": 2}),
+        "second append reports two data rows"
+    );
 
     let rows = ok_with(
         "excel.read_rows",

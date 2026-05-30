@@ -22,7 +22,11 @@ fn parse_any(value: &str) -> Result<DateTime<Utc>, StepError> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
         return Ok(dt.with_timezone(&Utc));
     }
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S"] {
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ] {
         if let Ok(ndt) = NaiveDateTime::parse_from_str(value, fmt) {
             return Ok(Utc.from_utc_datetime(&ndt));
         }
@@ -44,14 +48,20 @@ struct NowIn {
 }
 #[async_trait]
 impl Action for NowAction {
-    fn id(&self) -> &'static str { "date.now" }
-    fn summary(&self) -> &'static str { "Current UTC timestamp (RFC3339 or custom strftime)" }
+    fn id(&self) -> &'static str {
+        "date.now"
+    }
+    fn summary(&self) -> &'static str {
+        "Current UTC timestamp (RFC3339 or custom strftime)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "properties": { "format": { "type": "string" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "format": { "type": "string" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -77,15 +87,21 @@ struct ParseIn {
 }
 #[async_trait]
 impl Action for ParseAction {
-    fn id(&self) -> &'static str { "date.parse" }
-    fn summary(&self) -> &'static str { "Normalize a date string into RFC3339 UTC" }
+    fn id(&self) -> &'static str {
+        "date.parse"
+    }
+    fn summary(&self) -> &'static str {
+        "Normalize a date string into RFC3339 UTC"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": { "value": { "type": "string" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": { "value": { "type": "string" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -104,25 +120,33 @@ struct FmtIn {
 }
 #[async_trait]
 impl Action for FormatAction {
-    fn id(&self) -> &'static str { "date.format" }
-    fn summary(&self) -> &'static str { "Format an RFC3339 timestamp via strftime" }
+    fn id(&self) -> &'static str {
+        "date.format"
+    }
+    fn summary(&self) -> &'static str {
+        "Format an RFC3339 timestamp via strftime"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value", "format"],
-            "properties": {
-                "value":  { "type": "string" },
-                "format": { "type": "string" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value", "format"],
+                "properties": {
+                    "value":  { "type": "string" },
+                    "format": { "type": "string" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let FmtIn { value, format } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("date.format invalid: {e}")))?;
         let dt = parse_any(&value)?;
-        Ok(ActionResult::from(Value::String(dt.format(&format).to_string())))
+        Ok(ActionResult::from(Value::String(
+            dt.format(&format).to_string(),
+        )))
     }
 }
 
@@ -141,28 +165,41 @@ struct AddIn {
 }
 #[async_trait]
 impl Action for AddAction {
-    fn id(&self) -> &'static str { "date.add" }
-    fn summary(&self) -> &'static str { "Offset a timestamp by days/hours/minutes/seconds (may be negative)" }
+    fn id(&self) -> &'static str {
+        "date.add"
+    }
+    fn summary(&self) -> &'static str {
+        "Offset a timestamp by days/hours/minutes/seconds (may be negative)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": {
-                "value":   { "type": "string" },
-                "days":    { "type": "integer" },
-                "hours":   { "type": "integer" },
-                "minutes": { "type": "integer" },
-                "seconds": { "type": "integer" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value":   { "type": "string" },
+                    "days":    { "type": "integer" },
+                    "hours":   { "type": "integer" },
+                    "minutes": { "type": "integer" },
+                    "seconds": { "type": "integer" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let AddIn { value, days, hours, minutes, seconds } = serde_json::from_value(input)
+        let AddIn {
+            value,
+            days,
+            hours,
+            minutes,
+            seconds,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("date.add invalid: {e}")))?;
         let dt = parse_any(&value)?;
-        let d = dt + Duration::days(days)
+        let d = dt
+            + Duration::days(days)
             + Duration::hours(hours)
             + Duration::minutes(minutes)
             + Duration::seconds(seconds);
@@ -178,23 +215,31 @@ struct DiffIn {
     #[serde(default = "default_unit")]
     unit: String,
 }
-fn default_unit() -> String { "seconds".into() }
+fn default_unit() -> String {
+    "seconds".into()
+}
 
 #[async_trait]
 impl Action for DiffAction {
-    fn id(&self) -> &'static str { "date.diff" }
-    fn summary(&self) -> &'static str { "Return a - b in the chosen unit (days/hours/minutes/seconds)" }
+    fn id(&self) -> &'static str {
+        "date.diff"
+    }
+    fn summary(&self) -> &'static str {
+        "Return a - b in the chosen unit (days/hours/minutes/seconds)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["a", "b"],
-            "properties": {
-                "a":    { "type": "string" },
-                "b":    { "type": "string" },
-                "unit": { "type": "string", "enum": ["days","hours","minutes","seconds"], "default": "seconds" }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["a", "b"],
+                "properties": {
+                    "a":    { "type": "string" },
+                    "b":    { "type": "string" },
+                    "unit": { "type": "string", "enum": ["days","hours","minutes","seconds"], "default": "seconds" }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -204,8 +249,8 @@ impl Action for DiffAction {
         let db = parse_any(&b)?;
         let secs = (da - db).num_seconds();
         let out = match unit.as_str() {
-            "days"    => secs as f64 / 86_400.0,
-            "hours"   => secs as f64 / 3_600.0,
+            "days" => secs as f64 / 86_400.0,
+            "hours" => secs as f64 / 3_600.0,
             "minutes" => secs as f64 / 60.0,
             _ => secs as f64,
         };
@@ -219,18 +264,26 @@ impl Action for DiffAction {
 
 pub struct WeekdayAction;
 #[derive(Deserialize)]
-struct WIn { value: String }
+struct WIn {
+    value: String,
+}
 #[async_trait]
 impl Action for WeekdayAction {
-    fn id(&self) -> &'static str { "date.weekday" }
-    fn summary(&self) -> &'static str { "Return weekday (1=Mon..7=Sun) for the given date" }
+    fn id(&self) -> &'static str {
+        "date.weekday"
+    }
+    fn summary(&self) -> &'static str {
+        "Return weekday (1=Mon..7=Sun) for the given date"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": { "value": { "type": "string" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": { "value": { "type": "string" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

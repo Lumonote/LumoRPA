@@ -328,12 +328,14 @@ spec:
     assert!(report.success);
     let out = report.outputs.expect("outputs");
     assert_eq!(
-        out.pointer("/read0/result").and_then(serde_json::Value::as_str),
+        out.pointer("/read0/result")
+            .and_then(serde_json::Value::as_str),
         Some("aaa"),
         "branch 0 must see its own item, not branch 1's"
     );
     assert_eq!(
-        out.pointer("/read1/result").and_then(serde_json::Value::as_str),
+        out.pointer("/read1/result")
+            .and_then(serde_json::Value::as_str),
         Some("bbb"),
         "branch 1 must see its own item, not branch 0's"
     );

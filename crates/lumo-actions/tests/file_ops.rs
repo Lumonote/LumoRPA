@@ -11,7 +11,12 @@ async fn write_then_read_round_trips_content() {
     let path = dir.path().join("note.txt");
     let caps = fs_caps(dir.path());
 
-    ok_with("file.write", json!({"path": path, "content": "hello"}), caps.clone()).await;
+    ok_with(
+        "file.write",
+        json!({"path": path, "content": "hello"}),
+        caps.clone(),
+    )
+    .await;
     assert_eq!(
         ok_with("file.read", json!({"path": path}), caps).await,
         json!("hello")
@@ -24,9 +29,22 @@ async fn write_append_extends_the_file() {
     let path = dir.path().join("log.txt");
     let caps = fs_caps(dir.path());
 
-    ok_with("file.write", json!({"path": path, "content": "a"}), caps.clone()).await;
-    ok_with("file.write", json!({"path": path, "content": "b", "append": true}), caps.clone()).await;
-    assert_eq!(ok_with("file.read", json!({"path": path}), caps).await, json!("ab"));
+    ok_with(
+        "file.write",
+        json!({"path": path, "content": "a"}),
+        caps.clone(),
+    )
+    .await;
+    ok_with(
+        "file.write",
+        json!({"path": path, "content": "b", "append": true}),
+        caps.clone(),
+    )
+    .await;
+    assert_eq!(
+        ok_with("file.read", json!({"path": path}), caps).await,
+        json!("ab")
+    );
 }
 
 #[tokio::test]
@@ -40,7 +58,12 @@ async fn exists_reflects_presence() {
         json!(false),
         "absent before writing"
     );
-    ok_with("file.write", json!({"path": path, "content": "x"}), caps.clone()).await;
+    ok_with(
+        "file.write",
+        json!({"path": path, "content": "x"}),
+        caps.clone(),
+    )
+    .await;
     assert_eq!(
         ok_with("file.exists", json!({"path": path}), caps).await,
         json!(true),

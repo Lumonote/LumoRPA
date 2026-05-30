@@ -71,12 +71,7 @@ async fn write_then_read_round_trips_through_a_file() {
     .await;
     assert_eq!(wrote["rows"], json!(2));
 
-    let read = ok_with(
-        "csv.read",
-        json!({"path": path, "headers": true}),
-        caps,
-    )
-    .await;
+    let read = ok_with("csv.read", json!({"path": path, "headers": true}), caps).await;
     assert_eq!(read, json!([{"a": "1", "b": "2"}]));
 }
 

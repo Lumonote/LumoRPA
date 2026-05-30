@@ -5,12 +5,15 @@ use common::{ok, run};
 use serde_json::json;
 
 fn f(v: &serde_json::Value) -> f64 {
-    v.as_f64().unwrap_or_else(|| panic!("expected a number, got {v}"))
+    v.as_f64()
+        .unwrap_or_else(|| panic!("expected a number, got {v}"))
 }
 
 #[tokio::test]
 async fn round_to_digits() {
-    assert!((f(&ok("math.round", json!({"value": 1.23456, "digits": 2})).await) - 1.23).abs() < 1e-9);
+    assert!(
+        (f(&ok("math.round", json!({"value": 1.23456, "digits": 2})).await) - 1.23).abs() < 1e-9
+    );
     assert!((f(&ok("math.round", json!({"value": 2.567, "digits": 1})).await) - 2.6).abs() < 1e-9);
     // Default digits = 0, half rounds away from zero.
     assert!((f(&ok("math.round", json!({"value": 1.5})).await) - 2.0).abs() < 1e-9);
@@ -46,11 +49,16 @@ async fn random_respects_range_and_integer_flag() {
     }
     // Default is a float in [0,1).
     let d = f(&ok("math.random", json!({})).await);
-    assert!((0.0..1.0).contains(&d), "default random {d} must be in [0,1)");
+    assert!(
+        (0.0..1.0).contains(&d),
+        "default random {d} must be in [0,1)"
+    );
 }
 
 #[tokio::test]
 async fn random_rejects_inverted_range() {
-    let err = run("math.random", json!({"min": 10, "max": 1})).await.unwrap_err();
+    let err = run("math.random", json!({"min": 10, "max": 1}))
+        .await
+        .unwrap_err();
     assert!(err.contains("max must be > min"), "got: {err}");
 }

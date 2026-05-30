@@ -33,23 +33,33 @@ struct GetIn {
 }
 #[async_trait]
 impl Action for GetPathAction {
-    fn id(&self) -> &'static str { "json.get" }
-    fn summary(&self) -> &'static str { "Read `value` at dotted path (`a.b.0.c`)" }
+    fn id(&self) -> &'static str {
+        "json.get"
+    }
+    fn summary(&self) -> &'static str {
+        "Read `value` at dotted path (`a.b.0.c`)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value", "path"],
-            "properties": {
-                "value":   {},
-                "path":    { "type": "string" },
-                "default": {}
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value", "path"],
+                "properties": {
+                    "value":   {},
+                    "path":    { "type": "string" },
+                    "default": {}
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let GetIn { value, path, default } = serde_json::from_value(input)
+        let GetIn {
+            value,
+            path,
+            default,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.get invalid: {e}")))?;
         let mut cur = &value;
         for part in split_path(&path) {
@@ -84,23 +94,33 @@ struct SetIn {
 }
 #[async_trait]
 impl Action for SetPathAction {
-    fn id(&self) -> &'static str { "json.set" }
-    fn summary(&self) -> &'static str { "Set `new` at dotted path inside `value`; returns new value" }
+    fn id(&self) -> &'static str {
+        "json.set"
+    }
+    fn summary(&self) -> &'static str {
+        "Set `new` at dotted path inside `value`; returns new value"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value", "path", "new"],
-            "properties": {
-                "value": {},
-                "path":  { "type": "string" },
-                "new":   {}
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value", "path", "new"],
+                "properties": {
+                    "value": {},
+                    "path":  { "type": "string" },
+                    "new":   {}
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let SetIn { mut value, path, new } = serde_json::from_value(input)
+        let SetIn {
+            mut value,
+            path,
+            new,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.set invalid: {e}")))?;
         let parts = split_path(&path);
         if parts.is_empty() {
@@ -139,18 +159,27 @@ fn set_in(target: &mut Value, parts: &[String], new: Value) {
 
 pub struct MergeAction;
 #[derive(Deserialize)]
-struct MergeIn { a: Value, b: Value }
+struct MergeIn {
+    a: Value,
+    b: Value,
+}
 #[async_trait]
 impl Action for MergeAction {
-    fn id(&self) -> &'static str { "json.merge" }
-    fn summary(&self) -> &'static str { "Shallow-merge object `b` into object `a` (b wins on key collision)" }
+    fn id(&self) -> &'static str {
+        "json.merge"
+    }
+    fn summary(&self) -> &'static str {
+        "Shallow-merge object `b` into object `a` (b wins on key collision)"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["a", "b"],
-            "properties": { "a": { "type": "object" }, "b": { "type": "object" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["a", "b"],
+                "properties": { "a": { "type": "object" }, "b": { "type": "object" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -167,7 +196,9 @@ impl Action for MergeAction {
 }
 
 #[derive(Deserialize)]
-struct ValueIn { value: Value }
+struct ValueIn {
+    value: Value,
+}
 fn value_schema() -> &'static Value {
     static S: Lazy<Value> = Lazy::new(|| {
         serde_json::json!({
@@ -183,9 +214,15 @@ fn value_schema() -> &'static Value {
 pub struct KeysAction;
 #[async_trait]
 impl Action for KeysAction {
-    fn id(&self) -> &'static str { "json.keys" }
-    fn summary(&self) -> &'static str { "List keys of an object value" }
-    fn schema(&self) -> &'static Value { value_schema() }
+    fn id(&self) -> &'static str {
+        "json.keys"
+    }
+    fn summary(&self) -> &'static str {
+        "List keys of an object value"
+    }
+    fn schema(&self) -> &'static Value {
+        value_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ValueIn { value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.keys invalid: {e}")))?;
@@ -200,9 +237,15 @@ impl Action for KeysAction {
 pub struct ValuesAction;
 #[async_trait]
 impl Action for ValuesAction {
-    fn id(&self) -> &'static str { "json.values" }
-    fn summary(&self) -> &'static str { "List values of an object" }
-    fn schema(&self) -> &'static Value { value_schema() }
+    fn id(&self) -> &'static str {
+        "json.values"
+    }
+    fn summary(&self) -> &'static str {
+        "List values of an object"
+    }
+    fn schema(&self) -> &'static Value {
+        value_schema()
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ValueIn { value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.values invalid: {e}")))?;
@@ -216,18 +259,27 @@ impl Action for ValuesAction {
 
 pub struct DeleteAction;
 #[derive(Deserialize)]
-struct DelIn { value: Value, path: String }
+struct DelIn {
+    value: Value,
+    path: String,
+}
 #[async_trait]
 impl Action for DeleteAction {
-    fn id(&self) -> &'static str { "json.delete" }
-    fn summary(&self) -> &'static str { "Remove `path` from `value`, return result" }
+    fn id(&self) -> &'static str {
+        "json.delete"
+    }
+    fn summary(&self) -> &'static str {
+        "Remove `path` from `value`, return result"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value", "path"],
-            "properties": { "value": {}, "path": { "type": "string" } },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value", "path"],
+                "properties": { "value": {}, "path": { "type": "string" } },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

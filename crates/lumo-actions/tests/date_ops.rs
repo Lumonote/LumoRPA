@@ -37,14 +37,20 @@ async fn parse_normalizes_several_shapes_to_rfc3339() {
 
 #[tokio::test]
 async fn parse_rejects_unrecognized_input() {
-    let err = run("date.parse", json!({"value": "not a date"})).await.unwrap_err();
+    let err = run("date.parse", json!({"value": "not a date"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("cannot parse"), "got: {err}");
 }
 
 #[tokio::test]
 async fn format_applies_strftime() {
     assert_eq!(
-        ok("date.format", json!({"value": "2026-05-29T12:30:00Z", "format": "%Y/%m/%d %H:%M"})).await,
+        ok(
+            "date.format",
+            json!({"value": "2026-05-29T12:30:00Z", "format": "%Y/%m/%d %H:%M"})
+        )
+        .await,
         json!("2026/05/29 12:30")
     );
 }
@@ -52,11 +58,19 @@ async fn format_applies_strftime() {
 #[tokio::test]
 async fn add_offsets_in_both_directions() {
     assert_eq!(
-        ok("date.add", json!({"value": "2026-05-29T00:00:00Z", "days": 1, "hours": 2})).await,
+        ok(
+            "date.add",
+            json!({"value": "2026-05-29T00:00:00Z", "days": 1, "hours": 2})
+        )
+        .await,
         json!("2026-05-30T02:00:00+00:00")
     );
     assert_eq!(
-        ok("date.add", json!({"value": "2026-05-29T00:00:00Z", "days": -1})).await,
+        ok(
+            "date.add",
+            json!({"value": "2026-05-29T00:00:00Z", "days": -1})
+        )
+        .await,
         json!("2026-05-28T00:00:00+00:00"),
         "negative offsets go backwards"
     );
@@ -65,7 +79,11 @@ async fn add_offsets_in_both_directions() {
 #[tokio::test]
 async fn diff_respects_the_unit() {
     let args = json!({"a": "2026-05-29T01:00:00Z", "b": "2026-05-29T00:00:00Z"});
-    assert_eq!(ok("date.diff", args.clone()).await, json!(3600.0), "default unit is seconds");
+    assert_eq!(
+        ok("date.diff", args.clone()).await,
+        json!(3600.0),
+        "default unit is seconds"
+    );
     let mut minutes = args.clone();
     minutes["unit"] = json!("minutes");
     assert_eq!(ok("date.diff", minutes).await, json!(60.0));
@@ -74,7 +92,16 @@ async fn diff_respects_the_unit() {
 #[tokio::test]
 async fn weekday_is_one_indexed_from_monday() {
     // 2024-01-01 was a Monday; 2024-01-06 Saturday; 2024-01-07 Sunday.
-    assert_eq!(ok("date.weekday", json!({"value": "2024-01-01"})).await, json!(1));
-    assert_eq!(ok("date.weekday", json!({"value": "2024-01-06"})).await, json!(6));
-    assert_eq!(ok("date.weekday", json!({"value": "2024-01-07"})).await, json!(7));
+    assert_eq!(
+        ok("date.weekday", json!({"value": "2024-01-01"})).await,
+        json!(1)
+    );
+    assert_eq!(
+        ok("date.weekday", json!({"value": "2024-01-06"})).await,
+        json!(6)
+    );
+    assert_eq!(
+        ok("date.weekday", json!({"value": "2024-01-07"})).await,
+        json!(7)
+    );
 }

@@ -18,13 +18,20 @@ async fn platform_reports_this_host() {
 async fn env_get_reads_a_present_var() {
     // PATH is set in every sane test environment.
     let out = ok("system.env_get", json!({"name": "PATH"})).await;
-    assert!(!out.as_str().unwrap().is_empty(), "PATH should be non-empty");
+    assert!(
+        !out.as_str().unwrap().is_empty(),
+        "PATH should be non-empty"
+    );
 }
 
 #[tokio::test]
 async fn env_get_falls_back_to_default_then_empty() {
     assert_eq!(
-        ok("system.env_get", json!({"name": "LUMO_NO_SUCH_VAR_X9", "default": "fallback"})).await,
+        ok(
+            "system.env_get",
+            json!({"name": "LUMO_NO_SUCH_VAR_X9", "default": "fallback"})
+        )
+        .await,
         json!("fallback")
     );
     assert_eq!(
@@ -45,6 +52,8 @@ async fn sleep_returns_the_duration_it_waited() {
 #[tokio::test]
 async fn shell_is_denied_without_the_opt_in() {
     // Without LUMO_ALLOW_SHELL=1 the action must refuse rather than spawn.
-    let err = run("system.shell", json!({"command": "echo hi"})).await.unwrap_err();
+    let err = run("system.shell", json!({"command": "echo hi"}))
+        .await
+        .unwrap_err();
     assert!(err.contains("disabled"), "got: {err}");
 }

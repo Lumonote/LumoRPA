@@ -106,5 +106,8 @@ spec:
         1,
         "teardown must fire on the failure path too (this is the leak fix)"
     );
-    assert!(!seen[0].is_empty(), "teardown still gets a run id on failure");
+    assert!(
+        !seen[0].is_empty(),
+        "teardown still gets a run id on failure"
+    );
 }

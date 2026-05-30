@@ -80,7 +80,8 @@ impl Action for InvokeAction {
         // P0-5: clamp the skill's declared capabilities to the caller's sandbox
         // so an invoked skill can never perform actions the calling flow was not
         // itself permitted to perform.
-        let clamped = lumo_core::clamp_capabilities(&skill.flow.spec.capabilities, ctx.capabilities());
+        let clamped =
+            lumo_core::clamp_capabilities(&skill.flow.spec.capabilities, ctx.capabilities());
 
         // Run the skill's flow with the *same* action registry — so any
         // built-in / ai / skill actions stay available recursively — but with

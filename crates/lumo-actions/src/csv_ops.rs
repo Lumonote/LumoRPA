@@ -101,7 +101,10 @@ fn rows_to_value(rows: Vec<Vec<String>>, headers: bool) -> Value {
     Value::Array(body)
 }
 
-fn value_to_rows(value: &Value, headers: Option<&Vec<String>>) -> Result<Vec<Vec<String>>, StepError> {
+fn value_to_rows(
+    value: &Value,
+    headers: Option<&Vec<String>>,
+) -> Result<Vec<Vec<String>>, StepError> {
     let arr = value
         .as_array()
         .ok_or_else(|| StepError::msg("csv input: expected an array"))?;
@@ -173,23 +176,31 @@ struct ParseIn {
     #[serde(default)]
     headers: bool,
 }
-fn default_sep() -> char { ',' }
+fn default_sep() -> char {
+    ','
+}
 
 #[async_trait]
 impl Action for ParseAction {
-    fn id(&self) -> &'static str { "csv.parse" }
-    fn summary(&self) -> &'static str { "Parse CSV text; with `headers: true` returns array of objects" }
+    fn id(&self) -> &'static str {
+        "csv.parse"
+    }
+    fn summary(&self) -> &'static str {
+        "Parse CSV text; with `headers: true` returns array of objects"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["text"],
-            "properties": {
-                "text":    { "type": "string" },
-                "sep":     { "type": "string", "default": "," },
-                "headers": { "type": "boolean", "default": false }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text":    { "type": "string" },
+                    "sep":     { "type": "string", "default": "," },
+                    "headers": { "type": "boolean", "default": false }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -211,23 +222,33 @@ struct StringifyIn {
 }
 #[async_trait]
 impl Action for StringifyAction {
-    fn id(&self) -> &'static str { "csv.stringify" }
-    fn summary(&self) -> &'static str { "Render array-of-array or array-of-object as CSV text" }
+    fn id(&self) -> &'static str {
+        "csv.stringify"
+    }
+    fn summary(&self) -> &'static str {
+        "Render array-of-array or array-of-object as CSV text"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": {
-                "value":   {},
-                "sep":     { "type": "string", "default": "," },
-                "headers": { "type": "array", "items": { "type": "string" } }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value":   {},
+                    "sep":     { "type": "string", "default": "," },
+                    "headers": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let StringifyIn { value, sep, headers } = serde_json::from_value(input)
+        let StringifyIn {
+            value,
+            sep,
+            headers,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("csv.stringify invalid: {e}")))?;
         let rows = value_to_rows(&value, headers.as_ref())?;
         Ok(ActionResult::from(Value::String(stringify_csv(&rows, sep))))
@@ -245,19 +266,25 @@ struct ReadIn {
 }
 #[async_trait]
 impl Action for ReadAction {
-    fn id(&self) -> &'static str { "csv.read" }
-    fn summary(&self) -> &'static str { "Read a CSV file and parse to rows / objects" }
+    fn id(&self) -> &'static str {
+        "csv.read"
+    }
+    fn summary(&self) -> &'static str {
+        "Read a CSV file and parse to rows / objects"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["path"],
-            "properties": {
-                "path":    { "type": "string" },
-                "sep":     { "type": "string", "default": "," },
-                "headers": { "type": "boolean", "default": false }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path":    { "type": "string" },
+                    "sep":     { "type": "string", "default": "," },
+                    "headers": { "type": "boolean", "default": false }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -267,7 +294,10 @@ impl Action for ReadAction {
         let text = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| StepError::msg(format!("read {}: {e}", path.display())))?;
-        Ok(ActionResult::from(rows_to_value(parse_csv(&text, sep), headers)))
+        Ok(ActionResult::from(rows_to_value(
+            parse_csv(&text, sep),
+            headers,
+        )))
     }
 }
 
@@ -283,24 +313,35 @@ struct WriteIn {
 }
 #[async_trait]
 impl Action for WriteAction {
-    fn id(&self) -> &'static str { "csv.write" }
-    fn summary(&self) -> &'static str { "Write `value` (array of arrays/objects) to a CSV file" }
+    fn id(&self) -> &'static str {
+        "csv.write"
+    }
+    fn summary(&self) -> &'static str {
+        "Write `value` (array of arrays/objects) to a CSV file"
+    }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| serde_json::json!({
-            "type": "object",
-            "required": ["path", "value"],
-            "properties": {
-                "path":    { "type": "string" },
-                "value":   {},
-                "sep":     { "type": "string", "default": "," },
-                "headers": { "type": "array", "items": { "type": "string" } }
-            },
-            "additionalProperties": false
-        }));
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["path", "value"],
+                "properties": {
+                    "path":    { "type": "string" },
+                    "value":   {},
+                    "sep":     { "type": "string", "default": "," },
+                    "headers": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+            })
+        });
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let WriteIn { path, value, sep, headers } = serde_json::from_value(input)
+        let WriteIn {
+            path,
+            value,
+            sep,
+            headers,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("csv.write invalid: {e}")))?;
         ctx.ensure_fs_write(&path)?;
         let rows = value_to_rows(&value, headers.as_ref())?;
