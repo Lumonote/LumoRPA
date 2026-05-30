@@ -7,7 +7,7 @@
 use crate::{
     error::StorageError,
     schema,
-    types::{AiCallInsert, AiCallRow, ArtifactRow, FlowRunRow, StepRunRow},
+    types::{AiCallInsert, AiCallRow, ArtifactRow, FlowRunRow, StepRunRow, VaultRow},
 };
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::Mutex;
@@ -238,6 +238,78 @@ impl Repo {
             )
             .optional()?;
         Ok(row)
+    }
+
+    // ─── vault_items (P1-3) ───────────────────────────────────────────────────
+    /// Insert or replace a vault item (P1-3).
+    pub fn vault_put(
+        &self,
+        name: &str,
+        age_ciphertext: &[u8],
+        metadata: &str,
+        updated_at: i64,
+    ) -> Result<(), StorageError> {
+        let c = self.inner.lock();
+        c.execute(
+            "INSERT INTO vault_items (name, age_ciphertext, metadata, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET
+               age_ciphertext = excluded.age_ciphertext,
+               metadata       = excluded.metadata,
+               updated_at     = excluded.updated_at",
+            params![name, age_ciphertext, metadata, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch one vault item by name (`None` if absent).
+    pub fn vault_get(&self, name: &str) -> Result<Option<VaultRow>, StorageError> {
+        let c = self.inner.lock();
+        let row = c
+            .query_row(
+                "SELECT name, age_ciphertext, metadata, updated_at
+                 FROM vault_items WHERE name = ?1",
+                params![name],
+                |r| {
+                    Ok(VaultRow {
+                        name: r.get(0)?,
+                        age_ciphertext: r.get(1)?,
+                        metadata: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List all vault items, ordered by name.
+    pub fn vault_list(&self) -> Result<Vec<VaultRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT name, age_ciphertext, metadata, updated_at
+             FROM vault_items ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(VaultRow {
+                name: r.get(0)?,
+                age_ciphertext: r.get(1)?,
+                metadata: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Delete one vault item by name (no-op if absent).
+    pub fn vault_delete(&self, name: &str) -> Result<(), StorageError> {
+        let c = self.inner.lock();
+        c.execute("DELETE FROM vault_items WHERE name = ?1", params![name])?;
+        Ok(())
     }
 
     // ─── ai_calls (X-10) ────────────────────────────────────────────────────

@@ -79,3 +79,13 @@ pub struct AiCallInsert<'a> {
     pub latency_ms: i64,
     pub cost_usd_micro: i64,
 }
+
+/// A row of the `vault_items` table (P1-3). `age_ciphertext` is opaque age
+/// binary; `metadata` is non-sensitive JSON (field names only).
+#[derive(Debug, Clone)]
+pub struct VaultRow {
+    pub name: String,
+    pub age_ciphertext: Vec<u8>,
+    pub metadata: String,
+    pub updated_at: i64,
+}
