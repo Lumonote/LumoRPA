@@ -76,8 +76,9 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         });
     }
 
-    let vm =
-        super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow).with_cancel(cancel);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow)
+        .with_vault(super::load_vault_identity(&home))
+        .with_cancel(cancel);
     let report = match vm.run(&flow, opts).await {
         Ok(report) => report,
         Err(ExecError::Cancelled) => {

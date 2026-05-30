@@ -344,7 +344,8 @@ impl Server {
         let registry = build_action_registry(&self.home, Some(&path));
         let repo =
             Some(Repo::open(self.home.join("lumo.db")).map_err(|e| (-32002, e.to_string()))?);
-        let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &self.home, &flow);
+        let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &self.home, &flow)
+            .with_vault(super::load_vault_identity(&self.home));
         let report = vm
             .run(
                 &flow,

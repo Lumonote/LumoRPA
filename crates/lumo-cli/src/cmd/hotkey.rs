@@ -245,16 +245,13 @@ pub enum PermissionStatus {
 
 /// Run one flow when its hotkey fires. Mirrors `run_cron_flow` / `run_file_flow`
 /// in `serve.rs` so all trigger lanes record runs through the same `Repo`.
-pub async fn run_hotkey_flow(
-    flow_path: &Path,
-    home: &Path,
-    label: &str,
-) -> anyhow::Result<()> {
+pub async fn run_hotkey_flow(flow_path: &Path, home: &Path, label: &str) -> anyhow::Result<()> {
     let flow = lumo_dsl::parse_file(flow_path)?;
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow);
+    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow)
+        .with_vault(super::load_vault_identity(home));
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "trigger".into(),
@@ -279,11 +276,7 @@ pub async fn run_hotkey_flow(
 /// On each successful `wait` the flow is dispatched; errors are logged but
 /// never tear the listener down — a transient X11 / WinAPI hiccup
 /// shouldn't disable the hotkey for the rest of the session.
-pub async fn dispatch_loop(
-    flow: HotkeyFlow,
-    home: PathBuf,
-    listener: Arc<dyn Listener>,
-) {
+pub async fn dispatch_loop(flow: HotkeyFlow, home: PathBuf, listener: Arc<dyn Listener>) {
     loop {
         if let Err(e) = listener.wait().await {
             tracing::warn!("hotkey listener {}: {e}", flow.name);

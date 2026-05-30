@@ -37,6 +37,23 @@ pub(crate) fn vault_identity_path(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join("age-identity.txt"))
 }
 
+/// Load the vault identity for a run if one exists. Missing file ⇒ `None`
+/// (env-only resolution); a present-but-corrupt file is warned about and also
+/// degrades to `None` so a run never hard-fails on vault wiring alone (P1-3).
+pub(crate) fn load_vault_identity(home: &Path) -> Option<Arc<lumo_storage::VaultIdentity>> {
+    let path = vault_identity_path(home);
+    if !path.exists() {
+        return None;
+    }
+    match lumo_storage::VaultIdentity::load(&path) {
+        Ok(id) => Some(Arc::new(id)),
+        Err(e) => {
+            tracing::warn!("vault identity at {} unreadable: {e}", path.display());
+            None
+        }
+    }
+}
+
 pub(crate) fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> ActionRegistry {
     let providers_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
     let router = Arc::new(AiRouter::from_config(&providers_cfg));
