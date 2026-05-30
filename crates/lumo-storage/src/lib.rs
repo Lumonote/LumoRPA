@@ -13,4 +13,4 @@ pub mod vault;
 pub use error::StorageError;
 pub use repo::Repo;
 pub use types::*;
-pub use vault::VaultIdentity;
+pub use vault::{Vault, VaultIdentity, VaultListed};

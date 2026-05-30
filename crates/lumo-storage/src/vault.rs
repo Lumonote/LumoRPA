@@ -6,7 +6,10 @@
 //! handle is threaded through the VM, so `lumo-core` never links `age`.
 
 use crate::error::StorageError;
+use crate::repo::Repo;
 use age::secrecy::ExposeSecret;
+use chrono::Utc;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Opaque handle around an age X25519 identity (private key). `Clone` so the
@@ -83,4 +86,93 @@ pub fn encrypt(
 /// Decrypt age `ciphertext` with `identity`.
 pub fn decrypt(identity: &VaultIdentity, ciphertext: &[u8]) -> Result<Vec<u8>, StorageError> {
     age::decrypt(&identity.0, ciphertext).map_err(|e| StorageError::Crypto(e.to_string()))
+}
+
+/// Non-sensitive listing of a stored item (no ciphertext, no plaintext).
+#[derive(Debug, Clone)]
+pub struct VaultListed {
+    pub name: String,
+    pub keys: Vec<String>,
+    pub updated_at: i64,
+}
+
+/// A `Repo`-backed encrypted vault. Borrows the repo + identity; reads decrypt
+/// on demand, writes encrypt before hitting the DB.
+pub struct Vault<'a> {
+    repo: &'a Repo,
+    identity: &'a VaultIdentity,
+}
+
+impl<'a> Vault<'a> {
+    pub fn new(repo: &'a Repo, identity: &'a VaultIdentity) -> Self {
+        Self { repo, identity }
+    }
+
+    /// Encrypt `fields` as a JSON object under `name` (UPSERT). `metadata`
+    /// stores only the field names so `list` never has to decrypt.
+    pub fn put(&self, name: &str, fields: &BTreeMap<String, String>) -> Result<(), StorageError> {
+        let plaintext = serde_json::to_vec(fields)?;
+        let ciphertext = encrypt(&self.identity.recipient(), &plaintext)?;
+        let keys: Vec<&String> = fields.keys().collect();
+        let metadata = serde_json::to_string(&serde_json::json!({ "keys": keys }))?;
+        let updated_at = Utc::now().timestamp_millis();
+        self.repo
+            .vault_put(name, &ciphertext, &metadata, updated_at)
+    }
+
+    /// Decrypt and return all fields under `name`, or `None` if absent.
+    pub fn get(&self, name: &str) -> Result<Option<BTreeMap<String, String>>, StorageError> {
+        let Some(row) = self.repo.vault_get(name)? else {
+            return Ok(None);
+        };
+        let plaintext = decrypt(self.identity, &row.age_ciphertext)?;
+        let fields: BTreeMap<String, String> = serde_json::from_slice(&plaintext)?;
+        Ok(Some(fields))
+    }
+
+    pub fn delete(&self, name: &str) -> Result<(), StorageError> {
+        self.repo.vault_delete(name)
+    }
+}
+
+/// List stored items without an identity — metadata only, never decrypts.
+pub fn list(repo: &Repo) -> Result<Vec<VaultListed>, StorageError> {
+    let rows = repo.vault_list()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        // `put` always writes valid JSON here, so a parse failure means the
+        // metadata column was corrupted or tampered with — fail loudly.
+        let meta: serde_json::Value = serde_json::from_str(&r.metadata)?;
+        let keys = meta
+            .get("keys")
+            .and_then(|k| k.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(VaultListed {
+            name: r.name,
+            keys,
+            updated_at: r.updated_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Decrypt a namespace and return one field for runtime resolution (called by
+/// `lumo-core`'s `${{ vault.* }}` resolver). One encrypted blob holds the whole
+/// namespace, so this decrypts it and selects `key`. `Ok(None)` if the item or
+/// key is absent.
+pub fn get_field(
+    repo: &Repo,
+    identity: &VaultIdentity,
+    name: &str,
+    key: &str,
+) -> Result<Option<String>, StorageError> {
+    match Vault::new(repo, identity).get(name)? {
+        Some(fields) => Ok(fields.get(key).cloned()),
+        None => Ok(None),
+    }
 }

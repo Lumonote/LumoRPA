@@ -2,13 +2,8 @@
 //! Repo CRUD, and the Vault façade.
 
 use lumo_storage::vault;
-use lumo_storage::Repo;
-use lumo_storage::VaultIdentity;
-// NOTE(P1-3): `Vault` and `BTreeMap` are used by the Vault-façade tests added
-// in Task 3. They stay commented out here because the `Vault` type does not
-// exist yet (Task 3); restore them when that task appends its tests.
-// use lumo_storage::Vault;
-// use std::collections::BTreeMap;
+use lumo_storage::{Repo, Vault, VaultIdentity};
+use std::collections::BTreeMap;
 
 #[test]
 fn crypto_encrypt_decrypt_roundtrip() {
@@ -50,8 +45,13 @@ fn crypto_save_then_load_roundtrips_and_chmods_0600() {
 #[test]
 fn repo_put_get_roundtrip() {
     let repo = Repo::open_in_memory().unwrap();
-    repo.vault_put("smtp", b"\x01\x02ciphertext", r#"{"keys":["user"]}"#, 1_700_000_000_000)
-        .unwrap();
+    repo.vault_put(
+        "smtp",
+        b"\x01\x02ciphertext",
+        r#"{"keys":["user"]}"#,
+        1_700_000_000_000,
+    )
+    .unwrap();
     let row = repo.vault_get("smtp").unwrap().expect("row present");
     assert_eq!(row.name, "smtp");
     assert_eq!(row.age_ciphertext, b"\x01\x02ciphertext");
@@ -81,7 +81,12 @@ fn repo_list_is_sorted_by_name() {
     let repo = Repo::open_in_memory().unwrap();
     repo.vault_put("b", b"x", "{}", 1).unwrap();
     repo.vault_put("a", b"x", "{}", 1).unwrap();
-    let names: Vec<String> = repo.vault_list().unwrap().into_iter().map(|r| r.name).collect();
+    let names: Vec<String> = repo
+        .vault_list()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
     assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
 }
 
@@ -91,4 +96,81 @@ fn repo_delete_removes_row() {
     repo.vault_put("smtp", b"x", "{}", 1).unwrap();
     repo.vault_delete("smtp").unwrap();
     assert!(repo.vault_get("smtp").unwrap().is_none());
+}
+
+fn one_field(key: &str, val: &str) -> BTreeMap<String, String> {
+    let mut f = BTreeMap::new();
+    f.insert(key.to_string(), val.to_string());
+    f
+}
+
+#[test]
+fn facade_put_get_roundtrip() {
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    let vault = Vault::new(&repo, &id);
+    let mut fields = one_field("user", "alice");
+    fields.insert("pass".to_string(), "s3cr3t".to_string());
+    vault.put("smtp", &fields).unwrap();
+
+    let got = vault.get("smtp").unwrap().expect("present");
+    assert_eq!(got.get("user").map(String::as_str), Some("alice"));
+    assert_eq!(got.get("pass").map(String::as_str), Some("s3cr3t"));
+}
+
+#[test]
+fn facade_get_missing_is_none() {
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    assert!(Vault::new(&repo, &id).get("nope").unwrap().is_none());
+}
+
+#[test]
+fn facade_metadata_has_no_plaintext_and_list_shows_keys() {
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    Vault::new(&repo, &id)
+        .put("smtp", &one_field("user", "alice"))
+        .unwrap();
+
+    // The metadata column must not leak the secret value.
+    let row = repo.vault_get("smtp").unwrap().unwrap();
+    assert!(!row.metadata.contains("alice"), "metadata leaked plaintext");
+
+    let listed = vault::list(&repo).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "smtp");
+    assert_eq!(listed[0].keys, vec!["user".to_string()]);
+}
+
+#[test]
+fn facade_get_field_hits_and_misses() {
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    Vault::new(&repo, &id)
+        .put("smtp", &one_field("user", "alice"))
+        .unwrap();
+
+    assert_eq!(
+        vault::get_field(&repo, &id, "smtp", "user").unwrap(),
+        Some("alice".to_string())
+    );
+    assert_eq!(
+        vault::get_field(&repo, &id, "smtp", "missing").unwrap(),
+        None
+    );
+    assert_eq!(
+        vault::get_field(&repo, &id, "noitem", "user").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn facade_delete_removes_item() {
+    let repo = Repo::open_in_memory().unwrap();
+    let id = VaultIdentity::generate();
+    let vault = Vault::new(&repo, &id);
+    vault.put("smtp", &one_field("user", "alice")).unwrap();
+    vault.delete("smtp").unwrap();
+    assert!(vault.get("smtp").unwrap().is_none());
 }
