@@ -1,0 +1,44 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: browser-scrape
+  version: 0.2.0
+  name: 浏览器抓取示例 (AI 兜底)
+  description: |
+    无头打开 example.com，提取 H1。
+    新增：metadata.ai 启用流程级 AI 策略；步骤级 ai.mode: fallback 让
+    AI 在选择器失败 / 抽取为空时介入自愈与视觉提取。失败时附带 AI 诊断。
+  tags: [example, browser, ai-fallback]
+  ai:
+    enabled: true
+    diagnose_on_failure: true
+    budget:
+      max_calls_per_run: 5
+
+spec:
+  inputs:
+    - { name: url, type: string, default: "https://example.com" }
+
+  capabilities:
+    network: ["example.com"]
+    llm: ["*"]
+
+  steps:
+    - id: open
+      action: browser.open
+      with: { url: "{{ inputs.url }}", headless: true }
+
+    - id: title
+      action: browser.extract
+      with: { selector: "h1" }
+      ai:
+        mode: fallback
+        prompt: "页面主标题（通常是 H1 元素的可见文本）"
+
+    - id: report
+      action: control.log
+      with: { message: "h1 = {{ steps.title.result }}" }
+
+    - id: close
+      action: browser.close
+      with: {}

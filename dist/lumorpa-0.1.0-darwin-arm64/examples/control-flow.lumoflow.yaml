@@ -1,0 +1,62 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: control-flow-smoke
+  version: 0.1.0
+  name: 控制流冒烟测试
+  description: 演练 control.if / control.for / control.for_each / control.try 四种控制结构。
+
+spec:
+  inputs:
+    - { name: items, type: array, default: ["apple", "banana", "cherry"] }
+    - { name: target, type: number, default: 3 }
+
+  steps:
+    - id: greet
+      action: control.log
+      with: { message: "control-flow smoke begin" }
+
+    - id: branch
+      action: control.if
+      with:
+        cond: "{{ inputs.target }}"
+      do:
+        - { id: branch_true,  action: control.log, with: { message: "branch: truthy ({{ inputs.target }})" } }
+      else:
+        - { id: branch_false, action: control.log, with: { message: "branch: falsy" } }
+
+    - id: loop_n
+      action: control.for
+      with:
+        from: 1
+        to: 4
+        bind: i
+      do:
+        - id: iter_log
+          action: control.log
+          with: { message: "i={{ vars.i if vars.i else index }} index={{ index }}" }
+
+    - id: loop_each
+      action: control.for_each
+      with:
+        in: "{{ inputs.items }}"
+        bind: item
+      do:
+        - id: each_log
+          action: control.log
+          with: { message: "item[{{ index }}] = {{ item }}" }
+
+    - id: protected
+      action: control.try
+      with: {}
+      do:
+        - { id: try_log,  action: control.log, with: { message: "try block running" } }
+        - { id: blowup,   action: control.fail, with: { message: "intentional blowup" } }
+      catch:
+        - { id: caught,   action: control.log, with: { message: "caught: {{ vars.error }}" } }
+      finally:
+        - { id: cleanup,  action: control.log, with: { message: "finally cleanup" } }
+
+    - id: done
+      action: control.log
+      with: { message: "control-flow smoke OK" }

@@ -37,6 +37,23 @@ cargo run -p lumo-cli -- run --no-store examples/skill-driver.lumoflow.yaml
 
 The CLI loads installed skills from `$LUMO_HOME/skills` and also loads a `skills/` directory next to the flow file when present.
 
+## Packaging the CLI
+
+Build a standalone `lumo` release archive under `dist/`:
+
+```bash
+# Host platform
+scripts/package-cli.sh
+
+# Cross-compile (run `rustup target add <triple>` first)
+scripts/package-cli.sh x86_64-unknown-linux-gnu
+scripts/package-cli.sh aarch64-unknown-linux-gnu
+scripts/package-cli.sh x86_64-pc-windows-msvc
+```
+
+This produces `dist/lumorpa-<version>-<os>-<arch>.tar.gz` (a `.zip` for Windows
+targets) containing `bin/lumo`, the bundled `examples/`, `README.md`, and `LICENSE`.
+
 ## Desktop App
 
 Run or package the Tauri desktop workbench:

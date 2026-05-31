@@ -1,0 +1,40 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: vision-fallback-demo
+  ai:
+    enabled: true
+    diagnose_on_failure: false
+    budget:
+      max_calls_per_run: 8
+spec:
+  capabilities:
+    network: ["example.com"]
+    llm: ["*"]
+  triggers:
+    - kind: manual
+  steps:
+    - id: open
+      action: browser.open
+      with:
+        url: "https://example.com"
+    # S-11/S-12: the `selectors` block ships every DOM fingerprint we know
+    # about; on failure the runtime asks the Vision-LLM to look at a
+    # screenshot of the page and pick the matching element. `prompt:` is
+    # the natural-language target description the model gets.
+    - id: click_more_info
+      action: browser.click
+      with:
+        selectors:
+          css: "a.maybe-renamed-class"
+          xpath: "//a[contains(.,'More information')]"
+          aria_label: "More information"
+          text_includes: "More information"
+        prompt: "the 'More information' link in the page body"
+        # `model:` is optional. Empty inherits from `metadata.ai.model`.
+        # model: "anthropic/claude-sonnet-4-5"
+        timeout_ms: 4000
+    - id: report
+      action: control.log
+      with:
+        message: "resolved via ${{ steps.click_more_info.result.resolved_by }}"

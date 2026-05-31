@@ -1,0 +1,22 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: hotkey-quick-capture
+  ai:
+    enabled: false
+spec:
+  triggers:
+    # T-05: bind Ctrl+Shift+L as a global hotkey. macOS will prompt for
+    # Accessibility permission on first press; with it granted the combo
+    # fires the flow no matter which app is in focus. To bind a different
+    # combo, change `keys` (e.g. "Cmd+Alt+F2").
+    - kind: hotkey
+      with:
+        keys: "Ctrl+Shift+L"
+  steps:
+    # The hotkey dispatcher injects `inputs.trigger = { kind: "hotkey", keys, at }`
+    # so the flow can confirm where it was called from in its log line.
+    - id: greet
+      action: control.log
+      with:
+        message: "hotkey fired at ${{ inputs.trigger.at }} via ${{ inputs.trigger.keys }}"

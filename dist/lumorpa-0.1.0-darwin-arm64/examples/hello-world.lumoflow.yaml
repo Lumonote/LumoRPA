@@ -1,0 +1,31 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: hello-world
+  version: 0.1.0
+  name: 你好，LumoRPA
+  description: 冒烟测试 — 使用 flow 输入打印一句问候。
+  tags: [example, smoke]
+
+spec:
+  inputs:
+    - { name: who, type: string, default: world }
+
+  steps:
+    - id: greet
+      action: control.log
+      with:
+        message: "hello, {{ inputs.who }} — powered by LumoRPA"
+
+    - id: think
+      action: control.sleep
+      with: { ms: 50 }
+
+    - id: store
+      action: control.set_var
+      with: { name: motto, value: "open · ai-native · flow-as-code" }
+
+    - id: echo
+      action: control.log
+      with:
+        message: "motto = {{ vars.motto }}"
