@@ -22,6 +22,7 @@ pub mod selector_stats;
 pub mod selectors;
 pub mod string_ops;
 pub mod system_ops;
+pub mod table_ops;
 pub mod vision;
 
 use lumo_core::ActionRegistry;
@@ -50,4 +51,5 @@ pub fn register_all(registry: &mut ActionRegistry) {
     db_ops::register(registry);
     notify::register(registry);
     clipboard::register(registry);
+    table_ops::register(registry);
 }

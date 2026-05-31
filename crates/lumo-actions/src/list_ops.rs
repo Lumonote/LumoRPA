@@ -144,7 +144,7 @@ impl Action for SortAction {
     }
 }
 
-fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub(crate) fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x
