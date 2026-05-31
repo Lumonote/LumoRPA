@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 pub fn register(r: &mut ActionRegistry) {
     r.register(FilterAction);
     r.register(GroupByAction);
+    r.register(JoinAction);
 }
 
 // ---- data.filter ----------------------------------------------------------
@@ -396,4 +397,139 @@ fn num(f: f64) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null)
     }
+}
+
+// ---- data.join ------------------------------------------------------------
+
+pub struct JoinAction;
+
+#[derive(Deserialize)]
+struct JoinIn {
+    left: Vec<Value>,
+    right: Vec<Value>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    left_key: Option<String>,
+    #[serde(default)]
+    right_key: Option<String>,
+    #[serde(rename = "type", default = "default_join_type")]
+    join_type: String,
+    #[serde(default = "default_right_prefix")]
+    right_prefix: String,
+}
+
+fn default_join_type() -> String {
+    "inner".to_string()
+}
+
+fn default_right_prefix() -> String {
+    "right_".to_string()
+}
+
+#[async_trait]
+impl Action for JoinAction {
+    fn id(&self) -> &'static str {
+        "data.join"
+    }
+    fn summary(&self) -> &'static str {
+        "Join two arrays of objects on a key (inner or left)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["left", "right"],
+                "properties": {
+                    "left": { "type": "array" },
+                    "right": { "type": "array" },
+                    "key": { "type": "string" },
+                    "left_key": { "type": "string" },
+                    "right_key": { "type": "string" },
+                    "type": { "type": "string", "enum": ["inner", "left"], "default": "inner" },
+                    "right_prefix": { "type": "string", "default": "right_" }
+                },
+                "additionalProperties": false
+            })
+        });
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let JoinIn {
+            left,
+            right,
+            key,
+            left_key,
+            right_key,
+            join_type,
+            right_prefix,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("data.join invalid: {e}")))?;
+
+        let (lkey, rkey) = match (key.as_deref(), left_key.as_deref(), right_key.as_deref()) {
+            (Some(k), None, None) => (k.to_string(), k.to_string()),
+            (None, Some(l), Some(r)) => (l.to_string(), r.to_string()),
+            _ => {
+                return Err(StepError::msg(
+                    "data.join: specify `key`, or both `left_key` and `right_key`",
+                ))
+            }
+        };
+        let left_join = match join_type.as_str() {
+            "inner" => false,
+            "left" => true,
+            other => return Err(StepError::msg(format!("data.join: unknown type `{other}`"))),
+        };
+
+        // Index the right rows by the JSON form of their join key (the same
+        // strategy `list.unique` uses for dedup). Right rows missing the key
+        // can never match and are left out of the index.
+        let mut index: HashMap<String, Vec<&Value>> = HashMap::new();
+        for r in &right {
+            if let Some(v) = r.get(&rkey) {
+                index.entry(v.to_string()).or_default().push(r);
+            }
+        }
+
+        let mut out = Vec::new();
+        for l in &left {
+            let matched = l.get(&lkey).and_then(|v| index.get(&v.to_string()));
+            match matched {
+                Some(rows) if !rows.is_empty() => {
+                    for &r in rows {
+                        out.push(merge_rows(l, r, &rkey, &right_prefix));
+                    }
+                }
+                _ => {
+                    if left_join {
+                        out.push(l.clone());
+                    }
+                }
+            }
+        }
+        Ok(ActionResult::from(Value::Array(out)))
+    }
+}
+
+/// Combine a left row with a matched right row: all left fields, then every
+/// right field except the join key, with `prefix` applied to right field names
+/// that collide with an existing left field.
+fn merge_rows(left: &Value, right: &Value, right_key: &str, prefix: &str) -> Value {
+    let mut obj = match left {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if let Value::Object(rm) = right {
+        for (k, v) in rm {
+            if k.as_str() == right_key {
+                continue;
+            }
+            if obj.contains_key(k) {
+                obj.insert(format!("{prefix}{k}"), v.clone());
+            } else {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(obj)
 }

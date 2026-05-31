@@ -411,3 +411,193 @@ async fn group_by_unknown_aggregation_op_errors() {
         "got: {err}"
     );
 }
+
+// ---- data.join ------------------------------------------------------------
+
+/// Users keyed by `id`; Carol (id 3) deliberately has no matching order.
+fn users() -> Value {
+    json!([
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"},
+        {"id": 3, "name": "Carol"}
+    ])
+}
+
+/// Orders keyed by `user_id`; Alice (1) has two, Bob (2) has one.
+fn orders() -> Value {
+    json!([
+        {"user_id": 1, "item": "book"},
+        {"user_id": 1, "item": "pen"},
+        {"user_id": 2, "item": "lamp"}
+    ])
+}
+
+#[tokio::test]
+async fn join_inner_explicit_keys_many_to_many() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left": users(),
+            "right": orders(),
+            "left_key": "id",
+            "right_key": "user_id"
+        }),
+    )
+    .await;
+    // Alice fans out to two rows; Carol (no order) is dropped by inner join;
+    // the right join key (`user_id`) is not duplicated into the output.
+    assert_eq!(
+        out,
+        json!([
+            {"id": 1, "name": "Alice", "item": "book"},
+            {"id": 1, "name": "Alice", "item": "pen"},
+            {"id": 2, "name": "Bob",   "item": "lamp"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn join_left_keeps_unmatched_left_rows() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left": users(),
+            "right": orders(),
+            "left_key": "id",
+            "right_key": "user_id",
+            "type": "left"
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"id": 1, "name": "Alice", "item": "book"},
+            {"id": 1, "name": "Alice", "item": "pen"},
+            {"id": 2, "name": "Bob",   "item": "lamp"},
+            {"id": 3, "name": "Carol"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn join_key_shorthand_drops_right_key() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left":  [{"id": 1, "a": "x"}, {"id": 2, "a": "y"}],
+            "right": [{"id": 1, "b": "p"}, {"id": 2, "b": "q"}],
+            "key": "id"
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"id": 1, "a": "x", "b": "p"},
+            {"id": 2, "a": "y", "b": "q"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn join_prefixes_colliding_right_fields() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left":  [{"id": 1, "name": "Alice"}],
+            "right": [{"id": 1, "name": "Boss", "dept": "eng"}],
+            "key": "id"
+        }),
+    )
+    .await;
+    // `name` collides → right_name; `dept` is unique → kept as-is.
+    assert_eq!(
+        out,
+        json!([{"id": 1, "name": "Alice", "right_name": "Boss", "dept": "eng"}])
+    );
+}
+
+#[tokio::test]
+async fn join_custom_right_prefix() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left":  [{"id": 1, "name": "Alice"}],
+            "right": [{"id": 1, "name": "Boss"}],
+            "key": "id",
+            "right_prefix": "r_"
+        }),
+    )
+    .await;
+    assert_eq!(out, json!([{"id": 1, "name": "Alice", "r_name": "Boss"}]));
+}
+
+#[tokio::test]
+async fn join_many_to_many_is_cartesian() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left":  [{"k": 1, "l": "a"}, {"k": 1, "l": "b"}],
+            "right": [{"k": 1, "r": "x"}, {"k": 1, "r": "y"}],
+            "key": "k"
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"k": 1, "l": "a", "r": "x"},
+            {"k": 1, "l": "a", "r": "y"},
+            {"k": 1, "l": "b", "r": "x"},
+            {"k": 1, "l": "b", "r": "y"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn join_inner_with_no_matches_is_empty() {
+    let out = ok(
+        "data.join",
+        json!({
+            "left":  [{"id": 1}],
+            "right": [{"id": 99, "x": 1}],
+            "key": "id"
+        }),
+    )
+    .await;
+    assert_eq!(out, json!([]));
+}
+
+#[tokio::test]
+async fn join_missing_key_spec_errors() {
+    let err = run("data.join", json!({"left": users(), "right": orders()}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("key"), "got: {err}");
+
+    // left_key without right_key is incomplete.
+    let err = run(
+        "data.join",
+        json!({"left": users(), "right": orders(), "left_key": "id"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("key"), "got: {err}");
+}
+
+#[tokio::test]
+async fn join_unknown_type_errors() {
+    let err = run(
+        "data.join",
+        json!({
+            "left":  [{"id": 1}],
+            "right": [{"id": 1}],
+            "key": "id",
+            "type": "outer"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("outer"), "got: {err}");
+}
