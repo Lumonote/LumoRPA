@@ -281,8 +281,9 @@ impl Action for DownloadAction {
         let mut downloaded: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| StepError::msg(format!("http.download stream: {}", e.without_url())))?;
+            let chunk = chunk.map_err(|e| {
+                StepError::msg(format!("http.download stream: {}", e.without_url()))
+            })?;
             downloaded += chunk.len() as u64;
             // Streaming guard: also catches chunked / unknown-length responses
             // that the Content-Length pre-check can't see — delete the partial.
