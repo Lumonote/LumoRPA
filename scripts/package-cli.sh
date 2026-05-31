@@ -9,6 +9,8 @@ set -euo pipefail
 #   TARGET   Optional Rust target triple for cross-compilation, e.g.
 #            x86_64-unknown-linux-gnu, aarch64-apple-darwin,
 #            x86_64-pc-windows-msvc. When omitted, builds for the host.
+#            The pseudo-target `universal-apple-darwin` builds both macOS
+#            arches and `lipo`-merges them into one fat binary (Intel + ARM).
 #
 # Layout (matches the existing dist/ release packages):
 #   dist/lumorpa-<version>-<os>-<arch>/
@@ -33,7 +35,24 @@ fi
 BIN_NAME="lumo"
 ARCHIVE="tar.gz"
 
-if [[ -n "$TARGET" ]]; then
+if [[ "$TARGET" == "universal-apple-darwin" ]]; then
+  # cargo has no native universal target: build each arch, then lipo-merge the
+  # two release binaries into a single fat Mach-O (one package, Intel + ARM).
+  if ! command -v lipo >/dev/null 2>&1; then
+    echo "error: 'lipo' not found (macOS-only; required for universal builds)" >&2
+    exit 1
+  fi
+  cargo build --release -p lumo-cli --target x86_64-apple-darwin
+  cargo build --release -p lumo-cli --target aarch64-apple-darwin
+  BIN_DIR="target/universal-apple-darwin/release"
+  mkdir -p "$BIN_DIR"
+  lipo -create \
+    "target/x86_64-apple-darwin/release/$BIN_NAME" \
+    "target/aarch64-apple-darwin/release/$BIN_NAME" \
+    -output "$BIN_DIR/$BIN_NAME"
+  OS="darwin"
+  ARCH="universal"
+elif [[ -n "$TARGET" ]]; then
   cargo build --release -p lumo-cli --target "$TARGET"
   BIN_DIR="target/$TARGET/release"
   ARCH="${TARGET%%-*}"

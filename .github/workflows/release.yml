@@ -1,0 +1,204 @@
+name: release
+
+# Cross-platform packaging pipeline. For each platform it produces BOTH the
+# desktop installer (scripts/build-desktop.sh → cargo tauri) and the CLI archive
+# (scripts/package-cli.sh), uploads them as workflow artifacts, and on a v* tag
+# attaches them to the GitHub Release.
+#
+# NOTE (honest limitation): the Windows / Linux / loongarch64 packages cannot be
+# built or verified on a macOS dev machine — each Tauri bundler needs the target
+# OS's own WebKit/GTK + native bundler (the same reason ci.yml's cross-check only
+# runs `cargo check --exclude lumorpa-desktop`). This file is validated for
+# syntax locally; its cross-platform jobs are first exercised by a real tag run
+# on GitHub-hosted runners.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # softprops/action-gh-release creates/updates the Release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (universal · Intel + Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (+ both macOS arches)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build desktop (universal .app + .dmg)
+        run: scripts/build-desktop.sh universal-apple-darwin app,dmg
+      - name: Package CLI (universal)
+        run: scripts/package-cli.sh universal-apple-darwin
+      - name: Stage artifacts
+        run: |
+          mkdir -p out
+          cp dist/lumorpa-*-darwin-universal.tar.gz out/
+          find target/universal-apple-darwin/release/bundle \
+            -name '*.dmg' -exec cp {} out/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumorpa-macos-universal
+          path: out/*
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build desktop (.exe NSIS + .msi)
+        shell: bash
+        run: scripts/build-desktop.sh x86_64-pc-windows-msvc nsis,msi
+      - name: Package CLI
+        shell: bash
+        run: scripts/package-cli.sh x86_64-pc-windows-msvc
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          cp dist/lumorpa-*-windows-*.zip out/
+          find target/x86_64-pc-windows-msvc/release/bundle \
+            \( -name '*.exe' -o -name '*.msi' \) -exec cp {} out/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumorpa-windows-x86_64
+          path: out/*
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+
+  linux-x64:
+    name: Linux (x86_64 · deb/rpm/AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install desktop build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build desktop (.deb / .rpm / AppImage)
+        run: scripts/build-desktop.sh "" deb,rpm,appimage
+      - name: Package CLI
+        run: scripts/package-cli.sh
+      - name: Stage artifacts
+        run: |
+          mkdir -p out
+          cp dist/lumorpa-*-linux-*.tar.gz out/
+          find target/release/bundle \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \
+            -exec cp {} out/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumorpa-linux-x86_64
+          path: out/*
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+
+  linux-arm64:
+    name: Linux (aarch64 · 麒麟 ARM 基线)
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install desktop build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build desktop (.deb / .rpm)
+        run: scripts/build-desktop.sh "" deb,rpm
+      - name: Package CLI
+        run: scripts/package-cli.sh
+      - name: Stage artifacts
+        run: |
+          mkdir -p out
+          cp dist/lumorpa-*-linux-*.tar.gz out/
+          find target/release/bundle \
+            \( -name '*.deb' -o -name '*.rpm' \) -exec cp {} out/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumorpa-linux-aarch64
+          path: out/*
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+
+  loongarch64:
+    name: loongarch64 (龙芯 · best-effort CLI)
+    runs-on: ubuntu-22.04
+    continue-on-error: true # no GitHub-hosted loong runner; informational only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: loongarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14-loongarch64-linux-gnu
+      # GitHub has no loongarch64 runner and the Tauri bundler needs the target's
+      # own GTK/WebKit, so only the CLI is cross-built — a best-effort convenience
+      # binary. A full desktop package needs a native 麒麟/龙芯 or QEMU
+      # self-hosted runner. ring/rusqlite compile C for the target, so the cross
+      # CC must be wired in via cc-crate's per-triple env (mirrors ci.yml).
+      - name: Package CLI (cross)
+        env:
+          CROSS_CC: loongarch64-linux-gnu-gcc-14
+        run: |
+          export CC_loongarch64_unknown_linux_gnu="$CROSS_CC"
+          export CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC"
+          scripts/package-cli.sh loongarch64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumorpa-linux-loongarch64
+          path: dist/lumorpa-*-linux-loongarch64.tar.gz
+          if-no-files-found: warn
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/lumorpa-*-linux-loongarch64.tar.gz
