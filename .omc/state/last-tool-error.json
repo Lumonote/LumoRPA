@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"grep -n \\\"set_current_step_path\\\\|Instrument\\\\|info_span\\\\|instrument\\\" crates/lumo-core/src/vm.rs | head && echo \\\"=== lib.rs ===\\\" && grep -n \\\"list_artifacts\\\" apps/desktop/src-tauri/sr...",
-  "error": "Exit code 1\n27:use tracing::Instrument;\n287:    ctx.set_current_step_path(&path);\n297:        // subscriber/exporter consumes; we use `Instrument` (not `enter()`)\n299:        let exec_span = tracing::info_span!(\n307:        match action.execute(ctx, try_input).instrument(exec_span).await {\n=== lib.rs ===",
-  "timestamp": "2026-05-29T03:11:54.726Z",
+  "tool_input_preview": "{\"command\":\"cd /Users/palmer/IdeaProjects/projectSync/AI/project/LumoRPA\\necho \\\"=== bash -n package-cli.sh ===\\\"\\nbash -n scripts/package-cli.sh && echo \\\"package-cli.sh 语法 OK\\\"\\necho \\\"=== shellchec...",
+  "error": "Exit code 2\n=== bash -n package-cli.sh ===\npackage-cli.sh 语法 OK\n=== shellcheck? ===\n(无 shellcheck，跳过)\n=== YAML 结构校验 release.yml ===\n(PyYAML 未安装，改用最小行解析)",
+  "timestamp": "2026-05-31T08:48:43.550Z",
   "retry_count": 1
 }

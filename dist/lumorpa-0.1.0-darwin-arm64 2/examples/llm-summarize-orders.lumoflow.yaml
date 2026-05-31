@@ -1,0 +1,61 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: llm-summarize-orders
+  version: 0.1.0
+  name: LLM 驱动的 Excel 行处理
+  description: |
+    读取 Excel 每一行，调用 LLM 用一句中文总结，并把结果写回汇总工作簿。
+    演示 control.for_each + ai.chat + excel.write_row 的组合。
+  tags: [example, llm, excel, for_each]
+
+spec:
+  inputs:
+    - { name: in_path,  type: file, default: "./examples/data/orders.xlsx" }
+    - { name: out_path, type: file, default: "/tmp/orders-summary.xlsx" }
+    # `model` may be:
+    #   * "" — use the active profile's default_model
+    #   * "openai/gpt-4o-mini"            — explicit profile prefix
+    #   * "deepseek/deepseek-chat"        — DeepSeek via OpenAI-compatible
+    #   * "anthropic/claude-opus-4-7[1m]" — Anthropic (or its proxy) directly
+    #   * "claude-opus-4-7[1m]"           — auto-routed to the anthropic profile
+    - { name: model, type: string, default: "" }
+
+  capabilities:
+    llm: ["*"]
+    fs.read: ["./examples/data/**"]
+    fs.write: ["${HOME}/**", "/tmp/**"]
+
+  steps:
+    - id: read
+      action: excel.read_rows
+      with:
+        file: "{{ inputs.in_path }}"
+        header: true
+
+    - id: each
+      action: control.for_each
+      with:
+        in: "{{ steps.read.result }}"
+        bind: row
+      do:
+        - id: ask
+          action: ai.chat
+          with:
+            model: "{{ inputs.model }}"
+            system: "You are an order analyst. Reply with ONE short Chinese sentence."
+            prompt: "Summarize this order: {{ row | tojson }}"
+
+        - id: write
+          action: excel.write_row
+          with:
+            file: "{{ inputs.out_path }}"
+            sheet: summary
+            row:
+              order: "{{ row | tojson }}"
+              summary: "{{ steps.ask.result.content }}"
+
+    - id: report
+      action: control.log
+      with:
+        message: "wrote {{ steps.each.result.iterations }} summarized rows to {{ inputs.out_path }}"

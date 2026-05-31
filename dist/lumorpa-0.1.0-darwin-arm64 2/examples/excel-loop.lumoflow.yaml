@@ -1,0 +1,43 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: excel-loop
+  version: 0.1.0
+  name: Excel 行驱动循环
+  description: |
+    读取输入工作簿的每一行，转换后将汇总行写回输出工作簿。
+    演示「一行 Excel = 一个任务」这一影刀经典模式。
+  tags: [example, excel]
+
+spec:
+  inputs:
+    - { name: in_path,  type: file, default: "./examples/data/orders.xlsx" }
+    - { name: out_path, type: file, default: "./out/orders-summary.xlsx" }
+  capabilities:
+    fs.read: ["./examples/data/**"]
+    fs.write: ["./out/**", "/tmp/**"]
+
+  steps:
+    - id: read
+      action: excel.read_rows
+      with:
+        file: "{{ inputs.in_path }}"
+        header: true
+
+    - id: log_count
+      action: control.log
+      with:
+        message: "read {{ steps.read.result | length }} rows"
+
+    - id: each
+      action: control.for_each
+      with:
+        in: "{{ steps.read.result }}"
+        bind: row
+      do:
+        - id: write_summary
+          action: excel.write_row
+          with:
+            file: "{{ inputs.out_path }}"
+            sheet: summary
+            row: "{{ row }}"

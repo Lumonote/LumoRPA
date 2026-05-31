@@ -1,0 +1,23 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: dump-xlsx
+  version: 0.1.0
+  name: 导出 Excel 为 JSON
+  description: 读取 Excel 工作簿后以 JSON 格式写入目标路径。
+spec:
+  inputs:
+    - { name: file, type: file, required: true }
+    - { name: out,  type: file, default: "/tmp/dump.json" }
+  capabilities:
+    fs.read: ["*"]
+    fs.write: ["/tmp/**"]
+  steps:
+    - id: read
+      action: excel.read_rows
+      with: { file: "{{ inputs.file }}", header: true }
+    - id: write
+      action: file.write
+      with:
+        path: "{{ inputs.out }}"
+        content: "{{ steps.read.result | tojson }}"
