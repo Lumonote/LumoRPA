@@ -11,6 +11,21 @@ cargo tauri build --bundles app,dmg
 
 macOS outputs are written under `src-tauri/target/release/bundle/` when built from this directory, or the workspace `target/release/bundle/` when Cargo uses the workspace target directory.
 
+### Universal (Intel + Apple Silicon)
+
+Tauri builds a single universal `.app`/`.dmg` natively from the universal target
+(it `lipo`-merges both arches internally — no manual merge step):
+
+```bash
+# from the repo root
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+scripts/build-desktop.sh universal-apple-darwin app,dmg
+```
+
+Output: `target/universal-apple-darwin/release/bundle/dmg/LumoRPA_<version>_universal.dmg`.
+This is what the `release` CI workflow ships for macOS, so one download runs on
+both Intel and Apple Silicon Macs.
+
 ## Windows
 
 Build on a Windows runner with MSVC, WebView2 and the NSIS/MSI toolchain installed:

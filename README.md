@@ -49,6 +49,11 @@ scripts/package-cli.sh
 scripts/package-cli.sh x86_64-unknown-linux-gnu
 scripts/package-cli.sh aarch64-unknown-linux-gnu
 scripts/package-cli.sh x86_64-pc-windows-msvc
+
+# Universal macOS archive — Intel + Apple Silicon in one binary (macOS only;
+# needs both apple-darwin targets installed). The script builds each arch and
+# `lipo`-merges them into a single fat `bin/lumo`.
+scripts/package-cli.sh universal-apple-darwin
 ```
 
 This produces `dist/lumorpa-<version>-<os>-<arch>.tar.gz` (a `.zip` for Windows
@@ -84,6 +89,39 @@ scripts/build-desktop.sh loongarch64-unknown-linux-gnu deb,rpm
 ```
 
 Desktop details live in `apps/desktop/README.md`.
+
+## Release (CI 出包)
+
+Desktop installers for Windows, Linux, and 信创 (麒麟/龙芯) platforms cannot be
+cross-built from macOS — each Tauri bundler needs its target OS's native
+WebKit/GTK. Release packages are therefore produced by the
+[`release`](.github/workflows/release.yml) GitHub Actions workflow, which builds
+the **desktop installer + CLI archive** for every platform on its own runner.
+
+Trigger it by pushing a `v*` tag (or via *Actions → release → Run workflow*):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+| Platform | Runner | Desktop | CLI archive |
+| --- | --- | --- | --- |
+| macOS universal (Intel + ARM) | `macos-14` | `.dmg` | `…-darwin-universal.tar.gz` |
+| Windows x86_64 | `windows-latest` | `.exe` (NSIS) + `.msi` | `…-windows-x86_64.zip` |
+| Linux x86_64 | `ubuntu-22.04` | `.deb` / `.rpm` / `.AppImage` | `…-linux-x86_64.tar.gz` |
+| Linux aarch64 (麒麟 ARM) | `ubuntu-22.04-arm` | `.deb` / `.rpm` | `…-linux-aarch64.tar.gz` |
+| loongarch64 (龙芯) | `ubuntu-22.04` (best-effort) | — | `…-linux-loongarch64.tar.gz` |
+
+On a tag, every job's artifacts are also attached to the GitHub Release.
+
+**信创 (Kylin / LoongArch) compatibility.** The Linux jobs build on Ubuntu, whose
+glibc may be newer than a given 麒麟/统信 release, so an Ubuntu-built binary can
+fail to load on an older 信创 target. For production 信创 packages, build natively
+on a matching 麒麟/龙芯 image (or a self-hosted runner). GitHub has no
+loongarch64 runner, so its CLI is cross-compiled best-effort and the desktop
+bundle must be built natively. Treat the Ubuntu artifacts as a convenience
+baseline, not a certified 信创 deliverable.
 
 ## AI Providers
 
