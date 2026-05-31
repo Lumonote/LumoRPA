@@ -244,3 +244,170 @@ async fn filter_unknown_operator_errors() {
         "got: {err}"
     );
 }
+
+// ---- data.group_by --------------------------------------------------------
+
+#[tokio::test]
+async fn group_by_count_preserves_first_seen_order() {
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {"n": {"op": "count"}}
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "n": 2},
+            {"dept": "sales", "n": 2}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_sum_yields_integer_for_integer_columns() {
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {"total_age": {"op": "sum", "field": "age"}}
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "total_age": 55},
+            {"dept": "sales", "total_age": 44}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_avg_keeps_fraction_but_normalizes_whole() {
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {"avg_age": {"op": "avg", "field": "age"}}
+        }),
+    )
+    .await;
+    // eng: 55/2 = 27.5 (fraction kept); sales: 44/2 = 22 (whole → integer).
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "avg_age": 27.5},
+            {"dept": "sales", "avg_age": 22}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_min_max_are_numeric() {
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {
+                "youngest": {"op": "min", "field": "age"},
+                "oldest":   {"op": "max", "field": "age"}
+            }
+        }),
+    )
+    .await;
+    // sales min is 9, not "35" — proves numeric (not lexical) comparison.
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "youngest": 25, "oldest": 30},
+            {"dept": "sales", "youngest": 9,  "oldest": 35}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_first_last_collect() {
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {
+                "first":   {"op": "first",   "field": "name"},
+                "last":    {"op": "last",    "field": "name"},
+                "members": {"op": "collect", "field": "name"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "first": "Alice", "last": "Bob",  "members": ["Alice", "Bob"]},
+            {"dept": "sales", "first": "Carol", "last": "Dave", "members": ["Carol", "Dave"]}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_multi_field_and_missing_key_becomes_null() {
+    // by [dept, city]: Bob has no city → groups under a null city key.
+    let out = ok(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": ["dept", "city"],
+            "aggregations": {"n": {"op": "count"}}
+        }),
+    )
+    .await;
+    assert_eq!(
+        out,
+        json!([
+            {"dept": "eng",   "city": "NYC", "n": 1},
+            {"dept": "eng",   "city": null,  "n": 1},
+            {"dept": "sales", "city": "LA",  "n": 1},
+            {"dept": "sales", "city": "NYC", "n": 1}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn group_by_sum_on_non_number_errors() {
+    let err = run(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {"x": {"op": "sum", "field": "name"}}
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("non-number"), "got: {err}");
+}
+
+#[tokio::test]
+async fn group_by_unknown_aggregation_op_errors() {
+    let err = run(
+        "data.group_by",
+        json!({
+            "items": people(),
+            "by": "dept",
+            "aggregations": {"x": {"op": "median", "field": "age"}}
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("unknown") && err.contains("median"),
+        "got: {err}"
+    );
+}

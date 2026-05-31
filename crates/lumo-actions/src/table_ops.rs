@@ -13,9 +13,11 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(FilterAction);
+    r.register(GroupByAction);
 }
 
 // ---- data.filter ----------------------------------------------------------
@@ -158,5 +160,240 @@ fn value_in(field: &Value, set: &Value) -> bool {
     match set {
         Value::Array(arr) => arr.iter().any(|e| cmp_value(field, e) == Ordering::Equal),
         _ => false,
+    }
+}
+
+// ---- data.group_by --------------------------------------------------------
+
+pub struct GroupByAction;
+
+#[derive(Deserialize)]
+struct GroupByIn {
+    items: Vec<Value>,
+    by: ByFields,
+    #[serde(default)]
+    aggregations: BTreeMap<String, AggSpec>,
+}
+
+/// `by` accepts a single field name or a list of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ByFields {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl ByFields {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            ByFields::One(s) => vec![s],
+            ByFields::Many(v) => v,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AggSpec {
+    op: String,
+    #[serde(default)]
+    field: Option<String>,
+}
+
+#[async_trait]
+impl Action for GroupByAction {
+    fn id(&self) -> &'static str {
+        "data.group_by"
+    }
+    fn summary(&self) -> &'static str {
+        "Group an array of objects by one or more fields with aggregations"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object",
+                "required": ["items", "by"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "by": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    },
+                    "aggregations": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "required": ["op"],
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": [
+                                        "count", "sum", "avg", "min", "max",
+                                        "first", "last", "collect"
+                                    ]
+                                },
+                                "field": { "type": "string" }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            })
+        });
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let GroupByIn {
+            items,
+            by,
+            aggregations,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("data.group_by invalid: {e}")))?;
+        let by = by.into_vec();
+
+        // Preserve first-seen group order: `order` keeps the group identity
+        // strings in insertion order; `groups` maps each to its (key values,
+        // member rows).
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, (Vec<Value>, Vec<Value>)> = HashMap::new();
+        for row in items {
+            let key_vals: Vec<Value> = by
+                .iter()
+                .map(|f| row.get(f).cloned().unwrap_or(Value::Null))
+                .collect();
+            let kstr = Value::Array(key_vals.clone()).to_string();
+            if let Some(g) = groups.get_mut(&kstr) {
+                g.1.push(row);
+            } else {
+                order.push(kstr.clone());
+                groups.insert(kstr, (key_vals, vec![row]));
+            }
+        }
+
+        let mut out = Vec::with_capacity(order.len());
+        for kstr in &order {
+            let (key_vals, rows) = &groups[kstr];
+            let mut obj = serde_json::Map::new();
+            for (f, v) in by.iter().zip(key_vals.iter()) {
+                obj.insert(f.clone(), v.clone());
+            }
+            for (name, spec) in &aggregations {
+                obj.insert(name.clone(), aggregate(spec, rows)?);
+            }
+            out.push(Value::Object(obj));
+        }
+        Ok(ActionResult::from(Value::Array(out)))
+    }
+}
+
+/// Compute one aggregation over a group's member `rows`.
+fn aggregate(spec: &AggSpec, rows: &[Value]) -> Result<Value, StepError> {
+    match spec.op.as_str() {
+        "count" => Ok(Value::from(rows.len() as u64)),
+        "sum" => {
+            let field = agg_field(spec)?;
+            let mut total = 0.0;
+            for r in rows {
+                if let Some(v) = r.get(field) {
+                    total += as_number(v, "sum", field)?;
+                }
+            }
+            Ok(num(total))
+        }
+        "avg" => {
+            let field = agg_field(spec)?;
+            let mut total = 0.0;
+            let mut count = 0u64;
+            for r in rows {
+                if let Some(v) = r.get(field) {
+                    total += as_number(v, "avg", field)?;
+                    count += 1;
+                }
+            }
+            Ok(if count == 0 {
+                Value::Null
+            } else {
+                num(total / count as f64)
+            })
+        }
+        "min" | "max" => {
+            let field = agg_field(spec)?;
+            let want_min = spec.op == "min";
+            let mut best: Option<&Value> = None;
+            for r in rows {
+                if let Some(v) = r.get(field) {
+                    best = Some(match best {
+                        None => v,
+                        Some(b) => {
+                            let ord = cmp_value(v, b);
+                            if (want_min && ord == Ordering::Less)
+                                || (!want_min && ord == Ordering::Greater)
+                            {
+                                v
+                            } else {
+                                b
+                            }
+                        }
+                    });
+                }
+            }
+            Ok(best.cloned().unwrap_or(Value::Null))
+        }
+        "first" | "last" => {
+            let field = agg_field(spec)?;
+            let row = if spec.op == "first" {
+                rows.first()
+            } else {
+                rows.last()
+            };
+            Ok(row
+                .and_then(|r| r.get(field).cloned())
+                .unwrap_or(Value::Null))
+        }
+        "collect" => {
+            let field = agg_field(spec)?;
+            let arr: Vec<Value> = rows
+                .iter()
+                .map(|r| r.get(field).cloned().unwrap_or(Value::Null))
+                .collect();
+            Ok(Value::Array(arr))
+        }
+        other => Err(StepError::msg(format!(
+            "data.group_by: unknown aggregation op `{other}`"
+        ))),
+    }
+}
+
+/// Resolve the `field` an aggregation operates on (required for everything but
+/// `count`).
+fn agg_field(spec: &AggSpec) -> Result<&str, StepError> {
+    spec.field.as_deref().ok_or_else(|| {
+        StepError::msg(format!(
+            "data.group_by: `{}` aggregation requires `field`",
+            spec.op
+        ))
+    })
+}
+
+/// Coerce a JSON value to f64 for numeric aggregations, erroring on non-numbers.
+fn as_number(v: &Value, op: &str, field: &str) -> Result<f64, StepError> {
+    v.as_f64().ok_or_else(|| {
+        StepError::msg(format!(
+            "data.group_by: `{op}` on non-number field `{field}`"
+        ))
+    })
+}
+
+/// Render an f64 as an integer `Value` when it is exactly whole (so sums/avgs
+/// over integer columns stay integers), else as a float. NaN/∞ → null.
+fn num(f: f64) -> Value {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 {
+        Value::from(f as i64)
+    } else {
+        serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
     }
 }
