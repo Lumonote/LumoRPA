@@ -320,7 +320,8 @@ async fn execute_step(
                 started_at: now,
                 finished_at: now,
             },
-        );
+        )
+        .await;
         return Err(ExecError::Cancelled);
     }
 
@@ -346,7 +347,8 @@ async fn execute_step(
                     started_at: now,
                     finished_at: now,
                 },
-            );
+            )
+            .await;
             return Ok(());
         }
     }
@@ -391,7 +393,8 @@ async fn execute_step(
                 started_at: now,
                 finished_at: now,
             },
-        );
+        )
+        .await;
         return Err(ExecError::Step {
             step: step.id.clone(),
             source: StepError::msg(format!("invalid `with`: {msg}")),
@@ -417,7 +420,8 @@ async fn execute_step(
                     started_at: now,
                     finished_at: now,
                 },
-            );
+            )
+            .await;
             return Err(ExecError::Step {
                 step: step.id.clone(),
                 source: e,
@@ -498,7 +502,8 @@ async fn execute_step(
                         started_at,
                         finished_at: Utc::now(),
                     },
-                );
+                )
+                .await;
                 return Err(ExecError::Cancelled);
             }
             StepOutcome::TimedOut => {
@@ -519,7 +524,8 @@ async fn execute_step(
                         started_at,
                         finished_at: Utc::now(),
                     },
-                );
+                )
+                .await;
                 return Err(ExecError::Timeout {
                     step: step.id.clone(),
                     ms,
@@ -536,7 +542,7 @@ async fn execute_step(
                 // `vision_locate` hook (the resolver has no `ctx` to book it
                 // itself); drain + record that spend, attributed to this step.
                 if let Some(provider) = ctx.ai_provider().cloned() {
-                    persist_ai_usage(ctx, &provider.take_usage());
+                    persist_ai_usage(ctx, &provider.take_usage()).await;
                 }
                 if let Some(bind) = &step.bind {
                     ctx.set_var(bind, result.output.clone());
@@ -557,7 +563,8 @@ async fn execute_step(
                         started_at,
                         finished_at,
                     },
-                );
+                )
+                .await;
                 return Ok(());
             }
             Err(e) if attempt <= times && retry_matches(&retry_on, e.kind()) => {
@@ -580,7 +587,8 @@ async fn execute_step(
                         started_at,
                         finished_at,
                     },
-                );
+                )
+                .await;
                 tracing::warn!(
                     "step `{}` failed attempt {}/{}: {}",
                     step.id,
@@ -626,7 +634,8 @@ async fn execute_step(
                                     started_at,
                                     finished_at: now,
                                 },
-                            );
+                            )
+                            .await;
                             return Ok(());
                         }
                         Ok(None) => {
@@ -661,7 +670,8 @@ async fn execute_step(
                         started_at,
                         finished_at,
                     },
-                );
+                )
+                .await;
                 return Err(ExecError::Step {
                     step: step.id.clone(),
                     source: e,
@@ -752,7 +762,8 @@ async fn run_if(
             started_at,
             finished_at,
         },
-    );
+    )
+    .await;
     result
 }
 
@@ -822,7 +833,8 @@ async fn run_for(
             started_at,
             finished_at,
         },
-    );
+    )
+    .await;
     result
 }
 
@@ -898,7 +910,8 @@ async fn run_for_each(
             started_at,
             finished_at,
         },
-    );
+    )
+    .await;
     result
 }
 
@@ -950,7 +963,8 @@ async fn run_try(
                 &output,
                 Some(error.clone()),
                 started_at,
-            );
+            )
+            .await;
             return Err(ExecError::Other(anyhow::anyhow!(error)));
         }
     }
@@ -982,7 +996,8 @@ async fn run_try(
         &output,
         final_result.as_ref().err().map(ToString::to_string),
         started_at,
-    );
+    )
+    .await;
     final_result
 }
 
@@ -1031,7 +1046,8 @@ async fn run_parallel(
             &Value::Null,
             None,
             started_at,
-        );
+        )
+        .await;
         return Ok(());
     }
 
@@ -1074,7 +1090,8 @@ async fn run_parallel(
         &Value::Null,
         first_err.as_ref().map(ToString::to_string),
         started_at,
-    );
+    )
+    .await;
     match first_err {
         Some(e) => Err(e),
         None => Ok(()),
@@ -1108,7 +1125,7 @@ struct StepPersist<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn persist_control_result(
+async fn persist_control_result(
     ctx: &StepCtx,
     step: &Step,
     path: &str,
@@ -1137,21 +1154,28 @@ fn persist_control_result(
             started_at,
             finished_at: Utc::now(),
         },
-    );
+    )
+    .await;
 }
 
-fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
+async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
     ctx.mark_step_state(row.state);
-    let Some(repo) = ctx.repo() else {
+    // A1: clone the (Arc-backed) repo handle out so the blocking SQLite write
+    // can move onto tokio's blocking pool. `seq` is assigned and the owned row
+    // built *here*, synchronously, before the hand-off — so rows keep their
+    // execution-order seq even when concurrent (`control.parallel`) branches
+    // race to persist; only the physical write completes off-thread.
+    let Some(repo) = ctx.repo().cloned() else {
         return;
     };
+    let step_id = row.step_id.to_string();
     let stored = StepRunRow {
         flow_run_id: ctx.run_id().to_string(),
         seq: ctx.next_step_seq(),
         path: row.path.to_string(),
         parent_path: row.parent_path.map(ToString::to_string),
         depth: row.depth,
-        step_id: row.step_id.to_string(),
+        step_id: step_id.clone(),
         idx: row.idx,
         state: row.state.to_string(),
         attempt: row.attempt,
@@ -1162,8 +1186,13 @@ fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
         finished_at: Some(row.finished_at),
         span_id: None,
     };
-    if let Err(e) = repo.insert_step(&stored) {
-        tracing::warn!("persist_step `{}`: {}", row.step_id, e);
+    // The parking_lot Mutex<Connection> + SQLite write (which can block up to
+    // `busy_timeout` under contention) runs on a blocking thread; the async
+    // worker stays free to drive other steps / parallel branches meanwhile.
+    match tokio::task::spawn_blocking(move || repo.insert_step(&stored)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("persist_step `{step_id}`: {e}"),
+        Err(e) => tracing::warn!("persist_step `{step_id}` join: {e}"),
     }
 }
 
@@ -1301,27 +1330,36 @@ fn input_type_matches(ty: &str, value: &Value) -> bool {
 /// accumulated for the current step. Best-effort — a failed insert never blocks
 /// the run, and a run with no repo (e.g. ad-hoc `lumo run` without persistence)
 /// simply skips the write.
-fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
+async fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
     if usage.is_empty() {
         return;
     }
-    let Some(repo) = ctx.repo() else {
+    let Some(repo) = ctx.repo().cloned() else {
         return;
     };
-    let run_id = ctx.run_id();
+    let run_id = ctx.run_id().to_string();
     let step_id = ctx.current_step_id();
-    for u in usage {
-        let _ = repo.record_ai_call(AiCallInsert {
-            flow_run_id: run_id,
-            step_id: step_id.as_deref(),
-            helper: &u.helper,
-            provider: &u.provider,
-            model: &u.model,
-            input_tokens: u.input_tokens as i64,
-            output_tokens: u.output_tokens as i64,
-            latency_ms: u.latency_ms,
-            cost_usd_micro: u.cost_usd_micro,
-        });
+    // A1: own the usage records + ids, then write the `ai_calls` ledger rows on
+    // the blocking pool so the inserts never block the async worker thread.
+    let usage = usage.to_vec();
+    let res = tokio::task::spawn_blocking(move || {
+        for u in &usage {
+            let _ = repo.record_ai_call(AiCallInsert {
+                flow_run_id: &run_id,
+                step_id: step_id.as_deref(),
+                helper: &u.helper,
+                provider: &u.provider,
+                model: &u.model,
+                input_tokens: u.input_tokens as i64,
+                output_tokens: u.output_tokens as i64,
+                latency_ms: u.latency_ms,
+                cost_usd_micro: u.cost_usd_micro,
+            });
+        }
+    })
+    .await;
+    if let Err(e) = res {
+        tracing::warn!("persist_ai_usage join: {e}");
     }
 }
 
@@ -1407,7 +1445,7 @@ async fn try_ai_recovery(
             let mut usage = provider.take_usage();
             let Some(new_sel) = healed.css.clone().or_else(|| healed.xpath.clone()) else {
                 // Heal still cost an LLM call even though it gave nothing usable.
-                persist_ai_usage(ctx, &usage);
+                persist_ai_usage(ctx, &usage).await;
                 return Ok(None);
             };
             tracing::info!(
@@ -1423,7 +1461,7 @@ async fn try_ai_recovery(
             let result = action.execute(ctx, new_input).await?;
             // The healed re-run may itself trigger a vision hook; fold it in.
             usage.extend(provider.take_usage());
-            persist_ai_usage(ctx, &usage);
+            persist_ai_usage(ctx, &usage).await;
             let mut trace = serde_json::json!({
                 "used": true,
                 "helper": "heal_selector",
@@ -1450,7 +1488,7 @@ async fn try_ai_recovery(
                 .extract_visual(screenshot, &target, None, None, model.as_deref())
                 .await?;
             let usage = provider.take_usage();
-            persist_ai_usage(ctx, &usage);
+            persist_ai_usage(ctx, &usage).await;
             tracing::info!(
                 "step `{}`: AI extract_visual produced value (image={})",
                 step.id,
@@ -1486,7 +1524,7 @@ async fn try_ai_decide(
     let vars = ctx.vars_snapshot();
     let decision = provider.decide(&vars, &prompt, model.as_deref()).await?;
     let usage = provider.take_usage();
-    persist_ai_usage(ctx, &usage);
+    persist_ai_usage(ctx, &usage).await;
     tracing::info!(
         "step `{}`: AI decide → {} (confidence {:.2}) — {}",
         step.id,
@@ -1510,7 +1548,7 @@ async fn maybe_diagnose(ctx: &StepCtx, step: &Step, error: &str) -> Option<Strin
         .diagnose(&step.id, &step.action, error, model.as_deref())
         .await;
     // diagnose has no `_ai` trace of its own, but it still spent budget — book it.
-    persist_ai_usage(ctx, &provider.take_usage());
+    persist_ai_usage(ctx, &provider.take_usage()).await;
     match outcome {
         Ok(s) if !s.trim().is_empty() => Some(s),
         Ok(_) => None,
