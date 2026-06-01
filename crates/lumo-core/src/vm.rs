@@ -370,6 +370,33 @@ async fn execute_step(
     let tc = ctx.template_ctx();
     let rendered_input = lumo_dsl::render(&raw_input, &tc)?;
     let input_hash = Sha256::digest(rendered_input.to_string().as_bytes()).to_vec();
+    // B2 (F-17): validate the rendered `with:` against the action's schema
+    // before dispatch — a missing / typo'd / mistyped param fails fast with a
+    // clear message instead of surfacing as a confusing error inside the action.
+    if let Err(msg) = crate::schema::validate_input(action.schema(), &rendered_input) {
+        let now = Utc::now();
+        persist_step(
+            ctx,
+            StepPersist {
+                step_id: &step.id,
+                path: &path,
+                parent_path: parent_path.as_deref(),
+                depth,
+                idx,
+                state: "failed",
+                attempt: 1,
+                input_hash: &input_hash,
+                output: None,
+                error: Some(format!("schema validation failed: {msg}")),
+                started_at: now,
+                finished_at: now,
+            },
+        );
+        return Err(ExecError::Step {
+            step: step.id.clone(),
+            source: StepError::msg(format!("invalid `with`: {msg}")),
+        });
+    }
     let action_input = match ctx.resolve_vault_placeholders(&rendered_input) {
         Ok(v) => v,
         Err(e) => {

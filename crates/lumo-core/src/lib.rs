@@ -8,6 +8,7 @@ pub mod ai_hook;
 pub mod ctx;
 pub mod error;
 pub mod registry;
+pub mod schema;
 pub mod vm;
 
 pub use action::{Action, ActionResult};
