@@ -79,6 +79,10 @@ pub struct FlowVm {
     /// P1-3: optional age identity, threaded into each run's `StepCtx` so
     /// `${{ vault.* }}` can fall back to the encrypted store.
     vault_identity: Option<Arc<lumo_storage::VaultIdentity>>,
+    /// F-13: when set, resume from this prior run id — steps it already
+    /// completed (matching path + input hash) are replayed from `step_runs`
+    /// instead of re-executed. Requires a repo.
+    resume_from: Option<String>,
 }
 
 impl FlowVm {
@@ -92,6 +96,7 @@ impl FlowVm {
             cancel: None,
             step_timeout: None,
             vault_identity: None,
+            resume_from: None,
         }
     }
 
@@ -134,6 +139,53 @@ impl FlowVm {
     pub fn with_vault(mut self, identity: Option<Arc<lumo_storage::VaultIdentity>>) -> Self {
         self.vault_identity = identity;
         self
+    }
+
+    /// Resume a prior run by id (F-13): steps it already completed are replayed
+    /// from `step_runs` instead of re-executed. Requires a repo; without one the
+    /// request is ignored (with a warning) and the flow runs fresh.
+    pub fn with_resume_from(mut self, run_id: Option<String>) -> Self {
+        self.resume_from = run_id;
+        self
+    }
+
+    /// F-13: build the replay memo from a prior run's `step_runs`. `None` when
+    /// not resuming, no repo is configured, or the prior run has no reusable
+    /// (terminal-success) steps — any of which simply runs the flow fresh.
+    fn load_resume_memo(&self) -> Option<Arc<crate::ctx::ResumeMemo>> {
+        let prior = self.resume_from.as_ref()?;
+        let Some(repo) = &self.repo else {
+            tracing::warn!("resume requested ({prior}) but no repo is configured; running fresh");
+            return None;
+        };
+        let rows = match repo.list_steps(prior) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("resume: cannot read prior run {prior}: {e}; running fresh");
+                return None;
+            }
+        };
+        // `list_steps` is ordered by seq, so a later successful attempt for a
+        // path overrides an earlier one. Only terminal-success states carry a
+        // reusable output; failed / retrying / timeout / cancelled steps are
+        // intentionally omitted so resume re-executes them.
+        let mut memo = crate::ctx::ResumeMemo::default();
+        for r in rows {
+            if matches!(r.state.as_str(), "ok" | "ai_healed" | "cached") {
+                if let Some(output) = r.output_json {
+                    memo.record(r.path, r.input_hash, output);
+                }
+            }
+        }
+        if memo.is_empty() {
+            tracing::warn!("resume: prior run {prior} has no reusable steps; running fresh");
+            return None;
+        }
+        tracing::info!(
+            "resume: replaying {} completed step(s) from run {prior}",
+            memo.len()
+        );
+        Some(Arc::new(memo))
     }
 
     pub fn registry(&self) -> &ActionRegistry {
@@ -189,7 +241,8 @@ impl FlowVm {
         .with_skill_depth(self.skill_depth)
         .with_cancel(self.cancel.clone())
         .with_step_timeout(self.step_timeout)
-        .with_vault(self.vault_identity.clone());
+        .with_vault(self.vault_identity.clone())
+        .with_resume_memo(self.load_resume_memo());
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
@@ -372,6 +425,36 @@ async fn execute_step(
     let tc = ctx.template_ctx();
     let rendered_input = lumo_dsl::render(&raw_input, &tc)?;
     let input_hash = Sha256::digest(rendered_input.to_string().as_bytes()).to_vec();
+    // F-13 (durable resume): if a prior run already completed this exact step
+    // (same path *and* same rendered-input hash), replay its persisted output
+    // instead of re-executing. Record it into ctx so downstream templates /
+    // binds observe the same value a fresh execution would have produced.
+    if let Some(output) = ctx.resume_hit(&path, &input_hash) {
+        ctx.record_step_output(&step.id, &output);
+        if let Some(bind) = &step.bind {
+            ctx.set_var(bind, output.clone());
+        }
+        let now = Utc::now();
+        persist_step(
+            ctx,
+            StepPersist {
+                step_id: &step.id,
+                path: &path,
+                parent_path: parent_path.as_deref(),
+                depth,
+                idx,
+                state: "cached",
+                attempt: 1,
+                input_hash: &input_hash,
+                output: Some(&output),
+                error: None,
+                started_at: now,
+                finished_at: now,
+            },
+        )
+        .await;
+        return Ok(());
+    }
     // B2 (F-17): validate the rendered `with:` against the action's schema
     // before dispatch — a missing / typo'd / mistyped param fails fast with a
     // clear message instead of surfacing as a confusing error inside the action.

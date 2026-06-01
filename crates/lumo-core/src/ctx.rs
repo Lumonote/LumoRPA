@@ -62,6 +62,47 @@ impl CancelToken {
     }
 }
 
+/// F-13 (durable resume): a prior run's reusable leaf-step outputs, keyed by
+/// step path. The VM builds this from `step_runs` when a run is resumed and
+/// consults it per leaf step, so an already-completed step whose rendered-input
+/// hash is unchanged is replayed from its persisted output instead of re-run.
+#[derive(Default)]
+pub struct ResumeMemo {
+    entries: std::collections::HashMap<String, ResumeEntry>,
+}
+
+struct ResumeEntry {
+    input_hash: Vec<u8>,
+    output: Value,
+}
+
+impl ResumeMemo {
+    /// Record a completed step's output. Called in `seq` order while loading a
+    /// prior run, so a later successful attempt for a path overrides an earlier.
+    pub fn record(&mut self, path: String, input_hash: Vec<u8>, output: Value) {
+        self.entries
+            .insert(path, ResumeEntry { input_hash, output });
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The replayable output for `path`, iff a recorded entry exists *and* its
+    /// input hash matches — so a step whose (rendered) inputs changed since the
+    /// prior run is re-executed rather than replayed with stale output.
+    fn hit(&self, path: &str, input_hash: &[u8]) -> Option<&Value> {
+        self.entries
+            .get(path)
+            .filter(|e| e.input_hash == input_hash)
+            .map(|e| &e.output)
+    }
+}
+
 #[derive(Clone)]
 pub struct StepCtx {
     pub run_id: String,
@@ -94,6 +135,10 @@ pub struct StepCtx {
     /// branch forks so the `step_runs (flow_run_id, seq)` primary key stays
     /// unique even when branches persist concurrently (P0-4).
     seq: Arc<AtomicI64>,
+    /// F-13: prior-run step outputs to replay on resume. Shared (`Arc`) across
+    /// parallel branch forks so resumed branches reuse outputs too. `None` for a
+    /// normal (non-resumed) run.
+    resume_memo: Option<Arc<ResumeMemo>>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -154,6 +199,7 @@ impl StepCtx {
             cancel: None,
             step_timeout: None,
             seq: Arc::new(AtomicI64::new(0)),
+            resume_memo: None,
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: Arc::new(inputs),
                 steps: Arc::new(Map::new()),
@@ -224,6 +270,22 @@ impl StepCtx {
     pub fn with_step_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.step_timeout = timeout;
         self
+    }
+
+    /// F-13: seed the prior-run replay memo so completed steps are reused
+    /// instead of re-run. `None` ⇒ a normal (non-resumed) run.
+    pub fn with_resume_memo(mut self, memo: Option<Arc<ResumeMemo>>) -> Self {
+        self.resume_memo = memo;
+        self
+    }
+
+    /// F-13: the replayable output for this step path on resume, if any — set
+    /// when the prior run completed this exact step with the same input hash.
+    pub fn resume_hit(&self, path: &str, input_hash: &[u8]) -> Option<Value> {
+        self.resume_memo
+            .as_ref()
+            .and_then(|m| m.hit(path, input_hash))
+            .cloned()
     }
 
     /// Whether the run has been cancelled. The VM checks this before each step.
@@ -339,6 +401,7 @@ impl StepCtx {
             cancel: self.cancel.clone(),
             step_timeout: self.step_timeout,
             seq: self.seq.clone(),
+            resume_memo: self.resume_memo.clone(),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: g.inputs.clone(),
                 steps: g.steps.clone(),
@@ -453,7 +516,7 @@ impl StepCtx {
         let mut g = self.inner.lock();
         g.stats.executed += 1;
         match state {
-            "ok" => g.stats.ok += 1,
+            "ok" | "cached" => g.stats.ok += 1,
             "failed" => g.stats.failed += 1,
             "skipped" => g.stats.skipped += 1,
             "retrying" => g.stats.retried += 1,

@@ -24,6 +24,11 @@ pub struct Args {
     /// Don't persist run history
     #[arg(long)]
     pub no_store: bool,
+    /// Resume a prior run by id: steps it already completed (with unchanged
+    /// inputs) are replayed from history instead of re-executed. List ids with
+    /// `lumo runs list`.
+    #[arg(long)]
+    pub resume: Option<String>,
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
@@ -78,6 +83,7 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
 
     let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow)
         .with_vault(super::load_vault_identity(&home))
+        .with_resume_from(args.resume)
         .with_cancel(cancel);
     let report = match vm.run(&flow, opts).await {
         Ok(report) => report,
