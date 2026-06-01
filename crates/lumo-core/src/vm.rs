@@ -404,6 +404,12 @@ async fn execute_step(
         .map(|r| r.backoff.clone())
         .unwrap_or_else(|| "fixed".into());
     let initial_ms = step.retry.as_ref().map(|r| r.initial_ms).unwrap_or(500);
+    // B3 (F-16): error-kind filter for retries. Empty ⇒ retry on any error.
+    let retry_on = step
+        .retry
+        .as_ref()
+        .map(|r| r.on.clone())
+        .unwrap_or_default();
 
     // Make the step id visible to the action so cost / OTel rows can be
     // attributed correctly (X-10). Also expose the full nested path so
@@ -526,7 +532,7 @@ async fn execute_step(
                 );
                 return Ok(());
             }
-            Err(e) if attempt <= times => {
+            Err(e) if attempt <= times && retry_matches(&retry_on, e.kind()) => {
                 let finished_at = Utc::now();
                 let _elapsed_ms = t0.elapsed().as_millis() as i64;
                 let error = e.to_string();
@@ -1170,6 +1176,17 @@ fn short_kind(v: &Value) -> &'static str {
     }
 }
 
+/// B3 (F-16): whether a failed attempt is eligible for retry under the step's
+/// `retry.on` filter. An empty `on` retries on any error (back-compat); a
+/// non-empty `on` retries only when the error's kind name (snake_case, matching
+/// [`ErrorKind::as_str`]) appears in the list (case- and whitespace-insensitive).
+fn retry_matches(on: &[String], kind: ErrorKind) -> bool {
+    on.is_empty()
+        || on
+            .iter()
+            .any(|s| s.trim().eq_ignore_ascii_case(kind.as_str()))
+}
+
 fn compute_backoff(strategy: &str, initial_ms: u64, attempt: u32) -> u64 {
     match strategy {
         "exponential" => initial_ms.saturating_mul(2u64.saturating_pow(attempt - 1)),
@@ -1499,5 +1516,24 @@ mod tests {
         assert_eq!(agg["output_tokens"], 22);
         assert_eq!(agg["latency_ms"], 8);
         assert_eq!(agg["cost_usd_micro"], 107);
+    }
+
+    #[test]
+    fn retry_matches_empty_on_retries_any_kind() {
+        assert!(retry_matches(&[], ErrorKind::Other));
+        assert!(retry_matches(&[], ErrorKind::SelectorNotFound));
+    }
+
+    #[test]
+    fn retry_matches_filters_by_kind_name() {
+        let on = vec!["selector_not_found".to_string()];
+        assert!(retry_matches(&on, ErrorKind::SelectorNotFound));
+        assert!(!retry_matches(&on, ErrorKind::Other));
+    }
+
+    #[test]
+    fn retry_matches_is_case_and_whitespace_insensitive() {
+        let on = vec![" Other ".to_string()];
+        assert!(retry_matches(&on, ErrorKind::Other));
     }
 }

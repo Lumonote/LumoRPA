@@ -103,6 +103,21 @@ pub enum ErrorKind {
     Other,
 }
 
+impl ErrorKind {
+    /// Stable snake_case spelling of the kind. Matches the serde representation
+    /// and the names accepted in a step's `retry.on` filter (F-16).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorKind::SelectorNotFound => "selector_not_found",
+            ErrorKind::ExtractFailed => "extract_failed",
+            ErrorKind::CondError => "cond_error",
+            ErrorKind::CapabilityDenied => "capability_denied",
+            ErrorKind::BudgetExceeded => "budget_exceeded",
+            ErrorKind::Other => "other",
+        }
+    }
+}
+
 impl StepError {
     pub fn kind(&self) -> ErrorKind {
         match self {
@@ -112,6 +127,34 @@ impl StepError {
             StepError::CapabilityDenied { .. } => ErrorKind::CapabilityDenied,
             StepError::BudgetExceeded { .. } => ErrorKind::BudgetExceeded,
             _ => ErrorKind::Other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ErrorKind::as_str` must stay aligned with the serde snake_case
+    /// representation: `retry.on` names are matched against `as_str`, while the
+    /// API/UI serialize the same kinds via serde — drift would silently break
+    /// `retry.on` matching.
+    #[test]
+    fn error_kind_as_str_matches_serde() {
+        for kind in [
+            ErrorKind::SelectorNotFound,
+            ErrorKind::ExtractFailed,
+            ErrorKind::CondError,
+            ErrorKind::CapabilityDenied,
+            ErrorKind::BudgetExceeded,
+            ErrorKind::Other,
+        ] {
+            let serde = serde_json::to_value(kind).unwrap();
+            assert_eq!(
+                serde,
+                serde_json::Value::String(kind.as_str().to_string()),
+                "as_str drifted from serde for {kind:?}"
+            );
         }
     }
 }
