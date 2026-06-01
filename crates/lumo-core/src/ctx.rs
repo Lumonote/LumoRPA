@@ -98,10 +98,10 @@ pub struct StepCtx {
 }
 
 struct CtxInner {
-    inputs: Value,
-    steps: Map<String, Value>,
-    vars: Map<String, Value>,
-    bindings: Map<String, Value>,
+    inputs: Arc<Value>,
+    steps: Arc<Map<String, Value>>,
+    vars: Arc<Map<String, Value>>,
+    bindings: Arc<Map<String, Value>>,
     log_buffer: Vec<String>,
     stats: RunStats,
     /// Step id currently being executed. Set by the VM right before
@@ -155,10 +155,10 @@ impl StepCtx {
             step_timeout: None,
             seq: Arc::new(AtomicI64::new(0)),
             inner: Arc::new(Mutex::new(CtxInner {
-                inputs,
-                steps: Map::new(),
-                vars: Map::new(),
-                bindings: Map::new(),
+                inputs: Arc::new(inputs),
+                steps: Arc::new(Map::new()),
+                vars: Arc::new(Map::new()),
+                bindings: Arc::new(Map::new()),
                 log_buffer: Vec::new(),
                 stats: RunStats::default(),
                 current_step_id: None,
@@ -245,10 +245,10 @@ impl StepCtx {
     pub fn template_ctx(&self) -> TemplateCtx {
         let g = self.inner.lock();
         TemplateCtx {
-            inputs: g.inputs.clone(),
-            steps: Value::Object(g.steps.clone()),
-            vars: Value::Object(g.vars.clone()),
-            bindings: Value::Object(g.bindings.clone()),
+            inputs: (*g.inputs).clone(),
+            steps: Value::Object((*g.steps).clone()),
+            vars: Value::Object((*g.vars).clone()),
+            bindings: Value::Object((*g.bindings).clone()),
             env: env_snapshot(),
             vault: self.vault_names.clone(),
         }
@@ -256,7 +256,7 @@ impl StepCtx {
 
     pub fn record_step_output(&self, step_id: &str, output: &Value) {
         let mut g = self.inner.lock();
-        g.steps
+        Arc::make_mut(&mut g.steps)
             .insert(step_id.to_string(), serde_json::json!({ "result": output }));
     }
 
@@ -266,7 +266,7 @@ impl StepCtx {
     /// reference contract. No-op if the step has no recorded output yet.
     pub fn record_step_ai(&self, step_id: &str, ai: Value) {
         let mut g = self.inner.lock();
-        if let Some(Value::Object(entry)) = g.steps.get_mut(step_id) {
+        if let Some(Value::Object(entry)) = Arc::make_mut(&mut g.steps).get_mut(step_id) {
             entry.insert("_ai".to_string(), ai);
         }
     }
@@ -284,23 +284,23 @@ impl StepCtx {
     }
 
     pub fn set_var(&self, key: &str, value: Value) {
-        self.inner.lock().vars.insert(key.to_string(), value);
+        Arc::make_mut(&mut self.inner.lock().vars).insert(key.to_string(), value);
     }
 
     pub fn vars_snapshot(&self) -> Value {
-        Value::Object(self.inner.lock().vars.clone())
+        Value::Object((*self.inner.lock().vars).clone())
     }
 
     pub fn outputs_snapshot(&self) -> Value {
-        Value::Object(self.inner.lock().steps.clone())
+        Value::Object((*self.inner.lock().steps).clone())
     }
 
     pub fn push_binding(&self, key: &str, value: Value) {
-        self.inner.lock().bindings.insert(key.into(), value);
+        Arc::make_mut(&mut self.inner.lock().bindings).insert(key.into(), value);
     }
 
     pub fn clear_binding(&self, key: &str) {
-        self.inner.lock().bindings.remove(key);
+        Arc::make_mut(&mut self.inner.lock().bindings).remove(key);
     }
 
     pub fn log(&self, line: impl Into<String>) {
@@ -360,11 +360,17 @@ impl StepCtx {
     pub fn merge_branch(&self, branch: &StepCtx) {
         let b = branch.inner.lock();
         let mut g = self.inner.lock();
-        for (k, v) in b.steps.iter() {
-            g.steps.insert(k.clone(), v.clone());
+        {
+            let steps = Arc::make_mut(&mut g.steps);
+            for (k, v) in b.steps.iter() {
+                steps.insert(k.clone(), v.clone());
+            }
         }
-        for (k, v) in b.vars.iter() {
-            g.vars.insert(k.clone(), v.clone());
+        {
+            let vars = Arc::make_mut(&mut g.vars);
+            for (k, v) in b.vars.iter() {
+                vars.insert(k.clone(), v.clone());
+            }
         }
         g.stats.executed += b.stats.executed;
         g.stats.ok += b.stats.ok;
@@ -1053,5 +1059,41 @@ mod tests {
         let clamped = clamp_capabilities(&child, &parent);
         assert_eq!(clamped.fs_read, child.fs_read);
         assert_eq!(clamped.network, child.network);
+    }
+
+    #[test]
+    fn fork_shares_state_until_write_then_copies() {
+        // A2: `fork()` must share the inputs/steps/vars/bindings allocations
+        // (cheap Arc clone) and only copy a map when it is mutated.
+        let parent = test_ctx();
+        parent.set_var("a", Value::from(1));
+        let child = parent.fork();
+        {
+            let p = parent.inner.lock();
+            let c = child.inner.lock();
+            assert!(
+                Arc::ptr_eq(&p.vars, &c.vars),
+                "fork must share the vars allocation until a write (copy-on-write)"
+            );
+        }
+        // A write after the fork copies (diverges) and must not touch the parent.
+        child.set_var("b", Value::from(2));
+        {
+            let p = parent.inner.lock();
+            let c = child.inner.lock();
+            assert!(
+                !Arc::ptr_eq(&p.vars, &c.vars),
+                "a write after fork must copy, diverging the allocations"
+            );
+            assert!(c.vars.contains_key("b"));
+            assert!(
+                !p.vars.contains_key("b"),
+                "the child's write must not leak back into the parent"
+            );
+            assert!(
+                p.vars.contains_key("a") && c.vars.contains_key("a"),
+                "state written before the fork stays visible to both"
+            );
+        }
     }
 }
