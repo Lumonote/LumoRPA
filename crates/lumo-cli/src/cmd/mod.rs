@@ -15,7 +15,7 @@ pub mod vault;
 use lumo_ai::{AiRouter, ChatAction, ProvidersConfig};
 use lumo_core::{ActionRegistry, FlowVm};
 use lumo_dsl::Flow;
-use lumo_skills::{register_skill_actions, SkillRegistry};
+use lumo_skills::{register_flow_call_action, register_skill_actions, SkillRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -64,6 +64,14 @@ pub(crate) fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> Ac
 
     let skill_reg = load_skill_registry(home, flow_path);
     register_skill_actions(&mut registry, skill_reg);
+
+    // F-15: `flow.call` resolves sub-flow files relative to the running flow's
+    // own directory (falling back to `$LUMO_HOME`), confined to that base.
+    let flow_base = flow_path
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.to_path_buf());
+    register_flow_call_action(&mut registry, flow_base);
     registry
 }
 

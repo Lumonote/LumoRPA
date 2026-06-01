@@ -10,10 +10,12 @@
 //! action, exposed automatically when [`register_skill_actions`] is called.
 
 pub mod action;
+pub mod flow_call;
 pub mod loader;
 pub mod model;
 pub mod registry;
 
 pub use action::register_skill_actions;
+pub use flow_call::register_flow_call_action;
 pub use model::{Skill, SkillFrontmatter};
 pub use registry::SkillRegistry;
