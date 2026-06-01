@@ -325,8 +325,9 @@ async fn execute_step(
     }
 
     if let Some(cond) = &step.when {
-        let rendered = render_string(ctx, cond)?;
-        if !is_truthy_str(&rendered) {
+        // B1 (F-14): evaluate `when` as a boolean expression (operators +
+        // identifier paths); `{{ }}` template mode is preserved for back-compat.
+        if !lumo_dsl::eval_predicate(cond, &ctx.template_ctx())? {
             tracing::debug!("step `{}` skipped by when clause", step.id);
             let now = Utc::now();
             persist_step(
@@ -662,6 +663,10 @@ async fn run_if(
     let started_at = Utc::now();
     let rendered = render_value_inline(ctx, &step.with)?;
     let input_hash = Sha256::digest(rendered.to_string().as_bytes()).to_vec();
+    // B1 (F-14): a raw-string `cond` is evaluated as a boolean expression via
+    // `eval_cond`; a non-string `cond` falls back to plain truthiness. The raw
+    // (pre-render) string is used so `{{ }}` and bare-expression forms both work.
+    let raw_cond = step.with.get("cond").and_then(|c| c.as_str());
     let cond = rendered.get("cond").cloned().unwrap_or(Value::Null);
     let ai_mode = effective_ai_mode(ctx, step);
     let need_ai = matches!(ai_mode, AiMode::Primary)
@@ -683,10 +688,10 @@ async fn run_if(
                 ai_trace = Some(trace);
                 decision.result
             }
-            _ => is_truthy(&cond),
+            _ => eval_cond(raw_cond, &cond, ctx)?,
         }
     } else {
-        is_truthy(&cond)
+        eval_cond(raw_cond, &cond, ctx)?
     };
     ctx.record_step_output(&step.id, &Value::Bool(truthy));
     if let Some(trace) = ai_trace {
@@ -1137,13 +1142,15 @@ fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-fn render_string(ctx: &StepCtx, src: &str) -> Result<String, ExecError> {
-    let tc = ctx.template_ctx();
-    let v = lumo_dsl::render(&Value::String(src.to_string()), &tc)?;
-    Ok(match v {
-        Value::String(s) => s,
-        other => other.to_string(),
-    })
+/// B1 (F-14): evaluate a `control.if` condition. A raw-string `cond` goes
+/// through the expression evaluator (operators + identifier paths, with `{{ }}`
+/// template mode preserved); a non-string `cond` (literal bool/number/…) falls
+/// back to plain truthiness.
+fn eval_cond(raw: Option<&str>, rendered: &Value, ctx: &StepCtx) -> Result<bool, ExecError> {
+    match raw {
+        Some(s) => Ok(lumo_dsl::eval_predicate(s, &ctx.template_ctx())?),
+        None => Ok(is_truthy(rendered)),
+    }
 }
 
 fn is_truthy_str(s: &str) -> bool {

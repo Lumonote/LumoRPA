@@ -148,7 +148,7 @@ fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
 /// Walk `path` against the template context's namespaces. The first segment
 /// is one of the reserved roots (`inputs`/`steps`/`vars`/`env`) or any loop
 /// binding name (`row`/`item`/`index` or a custom `bind:` like `n`).
-fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
+pub(crate) fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
     if path.is_empty() {
         return None;
     }
