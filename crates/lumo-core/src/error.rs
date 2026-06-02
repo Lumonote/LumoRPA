@@ -41,6 +41,7 @@ pub enum CapKind {
     FsWrite,
     Llm,
     Mcp,
+    Desktop,
 }
 
 impl std::fmt::Display for CapKind {
@@ -51,6 +52,7 @@ impl std::fmt::Display for CapKind {
             CapKind::FsWrite => write!(f, "fs.write"),
             CapKind::Llm => write!(f, "llm"),
             CapKind::Mcp => write!(f, "mcp"),
+            CapKind::Desktop => write!(f, "desktop"),
         }
     }
 }

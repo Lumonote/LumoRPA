@@ -1,0 +1,38 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: desktop-click-image
+  version: 0.1.0
+  name: 图像定位 + 桌面点击示例
+  description: |
+    F-2 图像匹配 × F-1 桌面输入的组合:在一张整屏截图（haystack）里用归一化互相关
+    定位目标按钮模板，拿到中心坐标后直接驱动桌面鼠标点击 —— 坐标 + 图像驱动，纯本地、
+    不依赖可访问性树。需 fs 读权限（读图）+ desktop 鼠标授权（点击）。
+    注：桌面输入动作族须以 `--features desktop` 构建 lumo-actions（rdev，OS 级输入 C API，
+    信创核心默认不含）；原生整屏截图暂缓，haystack 由 browser.screenshot 或外部提供。
+  tags: [example, desktop, image, vision, rpa, local]
+
+spec:
+  inputs:
+    - { name: screenshot, type: string, default: "/tmp/lumo-screen.png" }
+    - { name: button, type: string, default: "/tmp/lumo-ok-button.png" }
+
+  capabilities:
+    fs.read: ["/tmp/**"]
+    desktop: ["mouse"]
+
+  steps:
+    - id: find
+      action: image.locate
+      with:
+        image: "{{ inputs.screenshot }}"
+        template: "{{ inputs.button }}"
+        threshold: 0.9
+
+    - id: click
+      action: desktop.click
+      when: "{{ steps.find.result.found }}"
+      with:
+        x: "{{ steps.find.result.center_x }}"
+        y: "{{ steps.find.result.center_y }}"
+        button: left

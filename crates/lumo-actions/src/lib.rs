@@ -8,6 +8,8 @@ pub mod csv_ops;
 pub mod data;
 pub mod date_ops;
 pub mod db_ops;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod email;
 pub mod excel;
 pub mod file;
@@ -44,6 +46,10 @@ pub fn register_all(registry: &mut ActionRegistry) {
     mcp::register(registry);
     pdf::register(registry);
     image_match::register(registry);
+    // F-1 桌面输入(desktop.move/click/scroll/key/type)—— 默认关闭,信创核心不含;
+    // 桌面端 `--features desktop` 开启(rdev,需 OS 级输入 C API)。
+    #[cfg(feature = "desktop")]
+    desktop::register(registry);
 
     // 第二批：通用数据/系统/AI 周边指令
     string_ops::register(registry);

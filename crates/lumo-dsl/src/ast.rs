@@ -102,6 +102,11 @@ pub struct Capabilities {
     pub llm: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+    /// F-1 桌面输入自动化授权(粗粒度类别):`mouse`(移动/点击/滚轮)、`keyboard`
+    /// (按键/文本输入),或 `*` 全部;空 = 禁用桌面输入(默认)。桌面输入可驱动整机,
+    /// 故须显式授权。
+    #[serde(default)]
+    pub desktop: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -72,6 +72,16 @@ suppaftp = { version = "8", default-features = false, features = ["tokio", "toki
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 imageproc = { version = "0.25", default-features = false }
 
+# F-1 桌面输入自动化:rdev 模拟鼠标/键盘事件。**默认关闭**(feature `desktop`)——
+# 桌面输入必须调用 OS 级 C API(macOS CGEvent / Linux XTest / Windows SendInput),
+# 无纯 Rust 替代,故不进信创核心默认构建;实际桌面端(Tauri/CLI)按需开启。
+rdev = { version = "0.5", optional = true }
+
+[features]
+# 桌面输入动作族 desktop.*(rdev)。默认关闭 —— 信创/headless 交叉编译不受影响,
+# 文本输入走剪贴板粘贴(arboard,Unicode/中文安全)。
+desktop = ["dep:rdev"]
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

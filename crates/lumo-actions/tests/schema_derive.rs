@@ -94,6 +94,20 @@ const DERIVED_CLOSED: &[&str] = &[
     "image.locate", "image.compare",
 ];
 
+/// F-1 `desktop.*` actions live behind the optional `desktop` feature (rdev).
+/// They register — and need gating — only with that feature on, so they join the
+/// closed set conditionally; default CI builds omit them entirely.
+#[cfg(feature = "desktop")]
+const DESKTOP_CLOSED: &[&str] = &[
+    "desktop.move",
+    "desktop.click",
+    "desktop.scroll",
+    "desktop.key",
+    "desktop.type",
+];
+#[cfg(not(feature = "desktop"))]
+const DESKTOP_CLOSED: &[&str] = &[];
+
 fn registry() -> ActionRegistry {
     let mut reg = ActionRegistry::new();
     register_all(&mut reg);
@@ -164,7 +178,7 @@ fn assert_validator_safe(id: &str, v: &Value) {
 #[test]
 fn derived_schemas_are_validator_safe() {
     let reg = registry();
-    for id in DERIVED_CLOSED {
+    for id in DERIVED_CLOSED.iter().chain(DESKTOP_CLOSED) {
         let schema = schema_of(&reg, id);
         assert_eq!(schema["type"], json!("object"), "`{id}`: top-level schema must be an object");
         assert_eq!(
@@ -217,7 +231,7 @@ fn derived_schemas_enforce_required_unknown_and_types() {
     let reg = registry();
     let mut errs = Vec::new();
 
-    for id in DERIVED_CLOSED {
+    for id in DERIVED_CLOSED.iter().chain(DESKTOP_CLOSED) {
         let schema = schema_of(&reg, id);
         let base = valid_object(schema);
 

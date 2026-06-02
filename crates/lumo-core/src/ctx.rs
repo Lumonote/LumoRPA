@@ -619,6 +619,21 @@ impl StepCtx {
             target: format!("{server}:{tool}"),
         })
     }
+
+    /// F-1 capability gate for desktop input actuation. `category` is a coarse
+    /// bucket — `"mouse"` (move/click/scroll) or `"keyboard"` (key/type) —
+    /// checked against the `desktop:` allow-list (`"*"` grants all). Desktop
+    /// input can drive the whole machine, so it is denied unless explicitly
+    /// granted (empty allow-list ⇒ every category denied).
+    pub fn ensure_desktop(&self, category: &str) -> Result<(), StepError> {
+        if matches_any(category, &self.capabilities.desktop) {
+            return Ok(());
+        }
+        Err(StepError::CapabilityDenied {
+            kind: CapKind::Desktop,
+            target: category.to_string(),
+        })
+    }
 }
 
 fn env_snapshot() -> Value {
@@ -778,6 +793,7 @@ pub fn clamp_capabilities(child: &Capabilities, parent: &Capabilities) -> Capabi
         mcp: filter_covered(&child.mcp, |g| mcp_grant_covered(g, &parent.mcp)),
         fs_read: filter_covered(&child.fs_read, |g| path_grant_covered(g, &parent.fs_read)),
         fs_write: filter_covered(&child.fs_write, |g| path_grant_covered(g, &parent.fs_write)),
+        desktop: filter_covered(&child.desktop, |g| matches_any(g, &parent.desktop)),
     }
 }
 
