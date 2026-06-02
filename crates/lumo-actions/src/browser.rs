@@ -4,7 +4,9 @@
 //! (CSS / XPath / A11y / Vision) lands in M2.
 
 use async_trait::async_trait;
+use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
+use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ExecutionContextId};
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use lumo_core::error::StepError;
@@ -39,6 +41,10 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(SelectAction);
     r.register(CookiesAction);
     r.register(SetCookieAction);
+    // F-10 part 2: multi-tab + file upload.
+    r.register(TabsAction);
+    r.register(TabAction);
+    r.register(UploadAction);
     // P1-2: reclaim any browser process left open by a run that failed (or
     // forgot `browser.close`) once the VM finishes that run.
     r.register_teardown(Arc::new(BrowserTeardown));
@@ -516,6 +522,9 @@ struct ExtractIn {
     attr: Option<String>,
     #[serde(default)]
     all: bool,
+    /// Extract from inside this iframe instead of the main frame.
+    #[serde(default)]
+    frame: Option<FrameSel>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
@@ -538,9 +547,15 @@ impl Action for ExtractAction {
             map,
             attr,
             all,
+            frame,
             timeout_ms,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.extract input invalid: {e}")))?;
+        if frame.as_ref().is_some_and(FrameSel::is_empty) {
+            return Err(StepError::msg(
+                "browser.extract: `frame` requires `url_includes` or `name`",
+            ));
+        }
         let s = session_for_run(_ctx.run_id())?;
         let page = current_page(&s)?;
 
@@ -592,21 +607,35 @@ impl Action for ExtractAction {
             attr = attr_json
         );
 
-        let eval = tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js)).await;
-        let result: Value = match eval {
-            Err(_) => {
-                stash_on_extract_fail(_ctx, &page).await;
-                return Err(StepError::ExtractFailed(format!(
-                    "timeout extracting `{selector}`"
-                )));
+        let result: Value = if let Some(sel) = frame.as_ref() {
+            // iframe-scoped: run the same extraction script in the frame's context.
+            match eval_in_frame(&page, js, sel, timeout_ms).await {
+                Ok(v) => v,
+                Err(e) => {
+                    stash_on_extract_fail(_ctx, &page).await;
+                    return Err(StepError::ExtractFailed(format!(
+                        "frame extract `{selector}`: {e}"
+                    )));
+                }
             }
-            Ok(Err(e)) => {
-                stash_on_extract_fail(_ctx, &page).await;
-                return Err(StepError::ExtractFailed(format!(
-                    "extract eval `{selector}`: {e}"
-                )));
+        } else {
+            let eval =
+                tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js)).await;
+            match eval {
+                Err(_) => {
+                    stash_on_extract_fail(_ctx, &page).await;
+                    return Err(StepError::ExtractFailed(format!(
+                        "timeout extracting `{selector}`"
+                    )));
+                }
+                Ok(Err(e)) => {
+                    stash_on_extract_fail(_ctx, &page).await;
+                    return Err(StepError::ExtractFailed(format!(
+                        "extract eval `{selector}`: {e}"
+                    )));
+                }
+                Ok(Ok(v)) => v.into_value().unwrap_or(Value::Null),
             }
-            Ok(Ok(v)) => v.into_value().unwrap_or(Value::Null),
         };
         if result.is_null() {
             stash_on_extract_fail(_ctx, &page).await;
@@ -826,6 +855,98 @@ impl Action for WaitAction {
     }
 }
 
+// ─── iframe-scoped eval (F-10 part 2) ──────────────────────────────────────────
+// chromiumoxide's high-level API (find_element/evaluate) only sees the main frame.
+// To run JS inside an <iframe> we match the frame (by URL substring or name), take
+// its JS execution context, and issue Runtime.evaluate against that context. This
+// backs the optional `frame:` on `browser.eval` / `browser.extract`. Driving the
+// selector engine *inside* a frame isn't supported by chromiumoxide 0.7, so DOM
+// strategies (click/type) stay main-frame; reach into frames via JS here.
+
+/// Address an iframe to run script in. Exactly one field is used (`url_includes`
+/// wins when both are set).
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+struct FrameSel {
+    /// Match the first frame whose URL contains this substring.
+    #[serde(default)]
+    url_includes: Option<String>,
+    /// Match the first frame whose name equals this.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl FrameSel {
+    fn is_empty(&self) -> bool {
+        self.url_includes.is_none() && self.name.is_none()
+    }
+}
+
+/// Resolve the JS execution context of the iframe matching `sel`.
+async fn resolve_frame_context(
+    page: &Page,
+    sel: &FrameSel,
+) -> Result<ExecutionContextId, StepError> {
+    let frames = page
+        .frames()
+        .await
+        .map_err(|e| StepError::msg(format!("frames: {e}")))?;
+    for fid in frames {
+        let hit = if let Some(sub) = sel.url_includes.as_deref() {
+            page.frame_url(fid.clone())
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|u| u.contains(sub))
+        } else if let Some(name) = sel.name.as_deref() {
+            page.frame_name(fid.clone())
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|n| n == name)
+        } else {
+            false
+        };
+        if hit {
+            return page
+                .frame_execution_context(fid)
+                .await
+                .map_err(|e| StepError::msg(format!("frame context: {e}")))?
+                .ok_or_else(|| {
+                    StepError::msg("matched iframe has no execution context yet (still loading?)")
+                });
+        }
+    }
+    Err(StepError::msg("no iframe matched `frame`"))
+}
+
+/// Evaluate `expr` inside the iframe matched by `sel`, returning its JSON value.
+/// A thrown JS exception surfaces as an error rather than a silent null.
+async fn eval_in_frame(
+    page: &Page,
+    expr: String,
+    sel: &FrameSel,
+    timeout_ms: u64,
+) -> Result<Value, StepError> {
+    let ctx_id = resolve_frame_context(page, sel).await?;
+    let params = EvaluateParams::builder()
+        .expression(expr)
+        .context_id(ctx_id)
+        .return_by_value(true)
+        .await_promise(true)
+        .build()
+        .map_err(|e| StepError::msg(format!("frame eval params: {e}")))?;
+    let resp = tokio::time::timeout(Duration::from_millis(timeout_ms), page.execute(params))
+        .await
+        .map_err(|_| StepError::msg("timed out"))?
+        .map_err(|e| StepError::msg(format!("{e}")))?;
+    let returns = resp.result;
+    if let Some(exc) = returns.exception_details {
+        return Err(StepError::msg(format!("threw: {}", exc.text)));
+    }
+    Ok(returns.result.value.unwrap_or(Value::Null))
+}
+
 // ─── browser.eval (F-10) ──────────────────────────────────────────────────────
 
 pub struct EvalAction;
@@ -836,6 +957,9 @@ struct EvalIn {
     /// the same page context as `browser.extract` — arbitrary script, no new
     /// capability (the flow already drives this browser).
     expr: String,
+    /// Run the script inside this iframe instead of the main frame.
+    #[serde(default)]
+    frame: Option<FrameSel>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
@@ -853,10 +977,26 @@ impl Action for EvalAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let EvalIn { expr, timeout_ms } = serde_json::from_value(input)
+        let EvalIn {
+            expr,
+            frame,
+            timeout_ms,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.eval input invalid: {e}")))?;
+        // Validate the frame address up front so a malformed call fails before Chrome.
+        if frame.as_ref().is_some_and(FrameSel::is_empty) {
+            return Err(StepError::msg(
+                "browser.eval: `frame` requires `url_includes` or `name`",
+            ));
+        }
         let s = session_for_run(ctx.run_id())?;
         let page = current_page(&s)?;
+        if let Some(sel) = frame.as_ref() {
+            let result = eval_in_frame(&page, expr, sel, timeout_ms)
+                .await
+                .map_err(|e| StepError::msg(format!("browser.eval: {e}")))?;
+            return Ok(ActionResult::from(result));
+        }
         let eval =
             tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(expr)).await;
         let result = match eval {
@@ -1299,5 +1439,273 @@ impl Action for SetCookieAction {
         Ok(ActionResult::from(
             serde_json::json!({ "ok": true, "name": name }),
         ))
+    }
+}
+
+// ─── browser.tabs / browser.tab (F-10 part 2) ──────────────────────────────────
+// chromiumoxide's `Browser` already tracks every open target — including tabs the
+// page spawns itself (`window.open`, `target=_blank`) — so tab support reads
+// `browser.pages()` rather than maintaining a parallel list. The session's `page`
+// pointer remains the "active tab" every other action drives; `activate` simply
+// repoints it. Tabs are addressed by Chrome's stable `target_id` or a URL
+// substring — never by position, since `pages()` iterates a `HashMap` (unordered).
+
+/// How `browser.tab` names the tab to act on. Exactly one form is accepted.
+enum TabBy {
+    Id(String),
+    Url(String),
+}
+
+/// All currently open pages for the run's browser session.
+async fn list_pages(s: &Session) -> Result<Vec<Page>, StepError> {
+    let browser = s.browser.lock().await;
+    browser
+        .pages()
+        .await
+        .map_err(|e| StepError::msg(format!("browser tabs: {e}")))
+}
+
+/// Find the page matching `by` among `pages`, consuming the list and returning
+/// the matched page so the caller can `activate`/`close` it.
+async fn resolve_tab(pages: Vec<Page>, by: &TabBy) -> Result<Page, StepError> {
+    match by {
+        TabBy::Id(id) => pages
+            .into_iter()
+            .find(|p| p.target_id().as_ref() == id.as_str())
+            .ok_or_else(|| {
+                StepError::msg(format!("browser.tab: no open tab with target_id `{id}`"))
+            }),
+        TabBy::Url(sub) => {
+            for p in pages {
+                if let Ok(Some(u)) = p.url().await {
+                    if u.contains(sub.as_str()) {
+                        return Ok(p);
+                    }
+                }
+            }
+            Err(StepError::msg(format!(
+                "browser.tab: no open tab whose URL contains `{sub}`"
+            )))
+        }
+    }
+}
+
+pub struct TabsAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TabsIn {}
+
+#[async_trait]
+impl Action for TabsAction {
+    fn id(&self) -> &'static str {
+        "browser.tabs"
+    }
+    fn summary(&self) -> &'static str {
+        "List open browser tabs (target_id, url, title, and which is active)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<TabsIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let TabsIn {} = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.tabs input invalid: {e}")))?;
+        let s = session_for_run(ctx.run_id())?;
+        let pages = list_pages(&s).await?;
+        // The active tab is the one the session pointer currently targets.
+        let active_id = s
+            .page
+            .lock()
+            .as_ref()
+            .map(|p| p.target_id().as_ref().to_string());
+        let mut out = Vec::with_capacity(pages.len());
+        for p in &pages {
+            let url = p.url().await.ok().flatten().unwrap_or_default();
+            let title = p.get_title().await.ok().flatten().unwrap_or_default();
+            let id = p.target_id().as_ref().to_string();
+            let active = active_id.as_deref() == Some(id.as_str());
+            out.push(serde_json::json!({
+                "target_id": id,
+                "url": url,
+                "title": title,
+                "active": active,
+            }));
+        }
+        Ok(ActionResult::from(Value::Array(out)))
+    }
+}
+
+/// `browser.tab` operations. A derived enum so the schema carries the
+/// `["activate","close"]` constraint (F-23), like `browser.wait`'s condition.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum TabOp {
+    /// Make the matched tab active: bring it to front; later actions target it.
+    Activate,
+    /// Close the matched tab; if it was active, activate another open tab (if any).
+    Close,
+}
+
+pub struct TabAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TabIn {
+    op: TabOp,
+    /// Match the tab whose Chrome target id equals this (from `browser.tabs`).
+    #[serde(default)]
+    target_id: Option<String>,
+    /// Match the first tab whose URL contains this substring.
+    #[serde(default)]
+    url_includes: Option<String>,
+}
+
+#[async_trait]
+impl Action for TabAction {
+    fn id(&self) -> &'static str {
+        "browser.tab"
+    }
+    fn summary(&self) -> &'static str {
+        "Activate or close a browser tab, addressed by target_id or url_includes"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<TabIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let TabIn {
+            op,
+            target_id,
+            url_includes,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.tab input invalid: {e}")))?;
+        // Resolve the addressing BEFORE any session work, so a malformed call
+        // fails fast (and is CI-testable) without ever launching Chrome.
+        let by = match (target_id, url_includes) {
+            (Some(id), None) => TabBy::Id(id),
+            (None, Some(url)) => TabBy::Url(url),
+            (None, None) => {
+                return Err(StepError::msg(
+                    "browser.tab requires `target_id` or `url_includes`",
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(StepError::msg(
+                    "browser.tab: set only one of `target_id` or `url_includes`",
+                ))
+            }
+        };
+        let s = session_for_run(ctx.run_id())?;
+        let matched = resolve_tab(list_pages(&s).await?, &by).await?;
+        let id = matched.target_id().as_ref().to_string();
+        match op {
+            TabOp::Activate => {
+                matched
+                    .bring_to_front()
+                    .await
+                    .map_err(|e| StepError::msg(format!("browser.tab activate `{id}`: {e}")))?;
+                *s.page.lock() = Some(matched);
+                Ok(ActionResult::from(serde_json::json!({ "activated": id })))
+            }
+            TabOp::Close => {
+                // Note whether we're closing the active tab before consuming it.
+                let was_active = {
+                    let g = s.page.lock();
+                    g.as_ref().map(|p| p.target_id().as_ref() == id.as_str()) == Some(true)
+                };
+                matched
+                    .close()
+                    .await
+                    .map_err(|e| StepError::msg(format!("browser.tab close `{id}`: {e}")))?;
+                if was_active {
+                    // Repoint the active pointer to another open tab, if any remain.
+                    let next = list_pages(&s)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|p| p.target_id().as_ref() != id.as_str());
+                    if let Some(p) = &next {
+                        let _ = p.bring_to_front().await;
+                    }
+                    *s.page.lock() = next;
+                }
+                Ok(ActionResult::from(serde_json::json!({ "closed": id })))
+            }
+        }
+    }
+}
+
+// ─── browser.upload (F-10 part 2) ──────────────────────────────────────────────
+// `<input type=file>` can't be driven by typing — its value is set out-of-band via
+// CDP `DOM.setFileInputFiles` against the input's backend node. chromiumoxide ships
+// no high-level wrapper, so we resolve the input with the normal selector engine
+// (whose `Element` exposes `backend_node_id`) and issue the raw command. Every local
+// path is gated by fs-read BEFORE the session, so an ungranted file fails fast
+// (capability error, no Chrome) — the same ordering as `browser.screenshot`.
+
+pub struct UploadAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UploadIn {
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    /// Local file path(s) to attach to the file input. Each is gated by fs-read.
+    files: Vec<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for UploadAction {
+    fn id(&self) -> &'static str {
+        "browser.upload"
+    }
+    fn summary(&self) -> &'static str {
+        "Set the file(s) on an <input type=file>, addressed by a selector spec"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<UploadIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let UploadIn {
+            selector,
+            selectors,
+            files,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.upload input invalid: {e}")))?;
+        if files.is_empty() {
+            return Err(StepError::msg(
+                "browser.upload requires at least one path in `files`",
+            ));
+        }
+        let spec = build_selector(selector, selectors)?;
+        // Gate every path on fs-read BEFORE touching Chrome — an ungranted file
+        // fails fast with a capability error, same ordering as browser.screenshot.
+        for f in &files {
+            ctx.ensure_fs_read(std::path::Path::new(f))?;
+        }
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let hint = spec.first_hint();
+        let (element, strategy) = resolve_element(&page, &spec, timeout_ms).await?;
+        let file_count = files.len();
+        page.execute(
+            SetFileInputFilesParams::builder()
+                .files(files)
+                .backend_node_id(element.backend_node_id)
+                .build()
+                .map_err(|e| StepError::msg(format!("browser.upload: {e}")))?,
+        )
+        .await
+        .map_err(|e| StepError::msg(format!("browser.upload `{hint}`: {e}")))?;
+        clear_marker(&page).await;
+        Ok(ActionResult::from(serde_json::json!({
+            "resolved_by": strategy,
+            "matched": hint,
+            "files": file_count,
+        })))
     }
 }

@@ -77,6 +77,10 @@ const DERIVED_CLOSED: &[&str] = &[
     // browser F-10 completions (scroll's `to` is a derived enum; screenshot gates fs-write).
     "browser.eval", "browser.screenshot", "browser.scroll", "browser.hover",
     "browser.select", "browser.cookies", "browser.set_cookie",
+    // browser F-10 part 2 — tab's `op` is a derived enum (activate/close); tabs
+    // takes no input (empty closed struct, like browser.close); upload's `files`
+    // is a required string array, gated by fs-read.
+    "browser.tabs", "browser.tab", "browser.upload",
 ];
 
 fn registry() -> ActionRegistry {

@@ -1,0 +1,44 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: browser-tabs
+  version: 0.1.0
+  name: 多标签页切换示例 (F-10)
+  description: |
+    每次 browser.open 都开一个新标签页：先开 A、再开 B（此时 B 为活动页）。
+    browser.tabs 列出全部标签页；按 URL 子串 activate 切回 A；再按 URL 子串
+    close 关掉 B。标签页按 target_id 或 url_includes 寻址，不按位置。
+  tags: [example, browser, tabs]
+
+spec:
+  inputs:
+    - { name: url_a, type: string, default: "https://example.com" }
+    - { name: url_b, type: string, default: "https://example.org" }
+
+  capabilities:
+    network: ["example.com", "example.org"]
+
+  steps:
+    - id: open_a
+      action: browser.open
+      with: { url: "{{ inputs.url_a }}", headless: true }
+
+    - id: open_b
+      action: browser.open
+      with: { url: "{{ inputs.url_b }}", headless: true }
+
+    - id: list
+      action: browser.tabs
+      with: {}
+
+    - id: back_to_a
+      action: browser.tab
+      with: { op: activate, url_includes: "example.com" }
+
+    - id: close_b
+      action: browser.tab
+      with: { op: close, url_includes: "example.org" }
+
+    - id: close
+      action: browser.close
+      with: {}
