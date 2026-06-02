@@ -15,8 +15,21 @@
 //!   reads the OS accessibility tree (NSAccessibility on macOS, UIA hooks
 //!   on Windows) on a 200 ms polling loop and emits `desktop.*` events
 //!   into the same channel the browser recorder uses.
+//!
+//! F-22 hardens the browser lane in three ways:
+//! - [`BrowserRecorder`] now tears its Chrome session down gracefully on
+//!   `stop()` *and* on `Drop` — close the CDP connection, then reap the child
+//!   process (`close` → fallback `kill` → `wait`) so a dropped recorder can't
+//!   orphan a head-ful Chrome. This mirrors `lumo-actions`' `BrowserTeardown`.
+//! - It can [`connect`](BrowserMode::Connect) to an *already-running* Chrome
+//!   via its DevTools endpoint instead of launching its own; in connect mode
+//!   teardown only disconnects — it never kills the user's browser.
+//! - The captured-element → YAML path scores candidate selectors
+//!   ([`selector_score`]) so the emitted `selectors:` block leads with the
+//!   most stable fingerprint (id / data-* > stable class > positional path).
 
 pub mod desktop;
+pub mod selector_score;
 
 use async_trait::async_trait;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -315,12 +328,39 @@ struct DomBindingPayload {
 
 pub struct BrowserRecorder {
     buffer: SharedBuffer,
+    /// How to obtain the Chrome handle: launch a fresh head-ful instance, or
+    /// attach to an already-running one over its DevTools endpoint (F-22).
+    mode: BrowserMode,
+    /// The live session, present only while recording. Behind a sync mutex for
+    /// cheap `is_some()` checks; the `Browser` inside is itself behind a tokio
+    /// mutex so the async teardown can hold the guard across `.await`.
     session: Mutex<Option<BrowserSession>>,
 }
 
+/// Where a [`BrowserRecorder`] gets its Chrome from.
+#[derive(Debug, Clone)]
+pub enum BrowserMode {
+    /// Launch a new head-ful Chromium and own its child process. Teardown
+    /// closes the CDP connection then reaps the process.
+    Launch,
+    /// Attach to an already-running Chrome via its DevTools endpoint
+    /// (`ws://…` or `http://127.0.0.1:9222`). Teardown only disconnects — the
+    /// user's browser is left running.
+    Connect { endpoint: String },
+}
+
 struct BrowserSession {
-    browser: Browser,
+    /// Chrome handle behind a tokio mutex: the graceful close/reap path
+    /// (`close`/`kill`/`wait`) needs `&mut Browser` and is async, so the guard
+    /// is held across `.await` — a sync mutex can't do that safely. Wrapped in
+    /// an `Arc` so `Drop` can move it onto a teardown task without `&mut self`.
+    browser: Arc<tokio::sync::Mutex<Browser>>,
+    /// The CDP event-pump and per-stream listener tasks. Aborted on teardown
+    /// so they don't linger detached after the socket closes.
     tasks: Vec<JoinHandle<()>>,
+    /// `true` when we attached to an existing Chrome (connect mode): teardown
+    /// must only disconnect, never `kill` the user's browser.
+    connected: bool,
 }
 
 impl Default for BrowserRecorder {
@@ -330,10 +370,94 @@ impl Default for BrowserRecorder {
 }
 
 impl BrowserRecorder {
+    /// A recorder that launches its own head-ful Chromium (the default).
     pub fn new() -> Self {
         Self {
             buffer: Arc::new(Mutex::new(Vec::new())),
+            mode: BrowserMode::Launch,
             session: Mutex::new(None),
+        }
+    }
+
+    /// A recorder that attaches to an already-running Chrome at `endpoint`
+    /// (a DevTools `ws://…` URL, or an `http://host:port` address whose
+    /// `json/version` is queried for the websocket). Teardown will disconnect
+    /// but never kill that browser (F-22).
+    pub fn connect_to(endpoint: impl Into<String>) -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            mode: BrowserMode::Connect {
+                endpoint: endpoint.into(),
+            },
+            session: Mutex::new(None),
+        }
+    }
+
+    /// Build with an explicit [`BrowserMode`].
+    pub fn with_mode(mode: BrowserMode) -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            mode,
+            session: Mutex::new(None),
+        }
+    }
+
+    /// Whether a session is currently live. Exposed for tests.
+    #[doc(hidden)]
+    pub fn is_running(&self) -> bool {
+        self.session.lock().is_some()
+    }
+}
+
+/// Gracefully tear a session down: abort its tasks, then close+reap (launch
+/// mode) or just disconnect (connect mode). Idempotent and panic-free so it's
+/// safe from both `stop()` and `Drop`.
+async fn teardown_session(mut session: BrowserSession) {
+    for t in session.tasks.drain(..) {
+        t.abort();
+    }
+    let mut browser = session.browser.lock().await;
+    if session.connected {
+        // Connect mode: don't touch the user's browser. Closing the CDP
+        // connection is enough — dropping the `Browser` after this releases
+        // the socket. We deliberately skip `close()` (which would tell the
+        // *remote* Chrome to quit) and `kill()`/`wait()` (no child to reap).
+    } else {
+        // Launch mode: graceful CDP `Browser.close`, fall back to `kill`, then
+        // `wait` to reap the child so it can't linger as a zombie.
+        if browser.close().await.is_err() {
+            let _ = browser.kill().await;
+        }
+        let _ = browser.wait().await;
+    }
+}
+
+impl Drop for BrowserRecorder {
+    fn drop(&mut self) {
+        let Some(session) = self.session.lock().take() else {
+            return;
+        };
+        // Abort the pump tasks synchronously so nothing keeps polling the
+        // (about-to-close) socket while we hand teardown to the runtime.
+        for t in &session.tasks {
+            t.abort();
+        }
+        // The async close/reap needs a runtime. If we're inside one, spawn a
+        // detached teardown task; otherwise (e.g. dropped on a plain thread)
+        // best-effort the reap on a throwaway current-thread runtime so a
+        // launched Chrome still gets cleaned up instead of orphaned.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(teardown_session(session));
+            }
+            Err(_) => {
+                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    rt.block_on(teardown_session(session));
+                }
+            }
         }
     }
 }
@@ -346,13 +470,25 @@ impl Recorder for BrowserRecorder {
             return Err(anyhow::anyhow!("BrowserRecorder already running"));
         }
 
-        let cfg = BrowserConfig::builder()
-            .with_head()
-            .build()
-            .map_err(|e| anyhow::anyhow!("chrome config: {e}"))?;
-        let (browser, mut handler) = Browser::launch(cfg)
-            .await
-            .map_err(|e| anyhow::anyhow!("chrome launch: {e} (is Chromium installed?)"))?;
+        // Launch a fresh Chrome, or attach to an existing one (F-22).
+        let (browser, mut handler, connected) = match &self.mode {
+            BrowserMode::Launch => {
+                let cfg = BrowserConfig::builder()
+                    .with_head()
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("chrome config: {e}"))?;
+                let (b, h) = Browser::launch(cfg)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("chrome launch: {e} (is Chromium installed?)"))?;
+                (b, h, false)
+            }
+            BrowserMode::Connect { endpoint } => {
+                let (b, h) = Browser::connect(endpoint.clone()).await.map_err(|e| {
+                    anyhow::anyhow!("chrome connect to `{endpoint}`: {e} (is it listening with --remote-debugging-port?)")
+                })?;
+                (b, h, true)
+            }
+        };
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
@@ -380,15 +516,18 @@ impl Recorder for BrowserRecorder {
         // Also eval into the current about:blank so the user can drive immediately.
         let _ = page.evaluate(recorder_injected_script()).await;
 
+        let launch_msg = if connected {
+            "Attached to running Chrome. DOM hook installed. Navigate or interact freely."
+        } else {
+            "Chromium launched. DOM hook installed. Navigate or interact freely."
+        };
         push_event(
             &self.buffer,
             &live,
             RawEvent::new(
                 "browser",
                 "launched",
-                serde_json::json!({
-                    "msg": "Chromium launched. DOM hook installed. Navigate or interact freely.",
-                }),
+                serde_json::json!({ "msg": launch_msg, "connected": connected }),
             ),
         );
 
@@ -469,18 +608,20 @@ impl Recorder for BrowserRecorder {
             }));
         }
 
-        *self.session.lock() = Some(BrowserSession { browser, tasks });
+        *self.session.lock() = Some(BrowserSession {
+            browser: Arc::new(tokio::sync::Mutex::new(browser)),
+            tasks,
+            connected,
+        });
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<Vec<RawEvent>> {
-        let mut session = self.session.lock().take();
-        if let Some(s) = &mut session {
-            for t in s.tasks.drain(..) {
-                t.abort();
-            }
-            // Best-effort browser shutdown — ignore errors so we still return events.
-            let _ = s.browser.close().await;
+        let session = self.session.lock().take();
+        if let Some(s) = session {
+            // Graceful close/reap (or disconnect, in connect mode). Awaited
+            // here so the caller knows the browser is actually down on return.
+            teardown_session(s).await;
         }
         Ok(std::mem::take(&mut *self.buffer.lock()))
     }
@@ -607,30 +748,98 @@ fn same_selector(a: &RawEvent, b: &RawEvent) -> bool {
 /// promotes them into a `selectors:` object that `browser.click` /
 /// `browser.type` consume with built-in self-healing fallback. We omit any
 /// strategy whose value is empty.
+///
+/// F-22: the captured CSS path is *scored* ([`selector_score`]). When the
+/// best-ranked candidate is an `#id` or `[data-testid]` path, we hoist it into
+/// the dedicated `id` / `data_testid` field (the runtime tries those first and
+/// they're the most stable), rather than burying it in the `css` string. The
+/// raw CSS path is still emitted as a lower-priority fallback. Brittle,
+/// volatile-class paths therefore never lead a selector block when a stronger
+/// anchor exists.
 fn selectors_block(payload: &serde_json::Value) -> serde_yaml::Mapping {
+    use selector_score::{best_candidate, SelectorKind};
+
     let mut sel = serde_yaml::Mapping::new();
-    if let Some(css) = payload.get("selector").and_then(|v| v.as_str()) {
-        if !css.is_empty() {
-            sel.insert("css".into(), css.into());
+    let css = payload
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let xpath = payload
+        .get("xpath")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let label = payload
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() < 80);
+
+    // Rank candidates. The DOM-walk path may itself be `#id` / `[data-testid]`;
+    // when the best-ranked one is such a single-token anchor, hoist it into the
+    // dedicated field so the emitted block leads with the most durable
+    // fingerprint. (The scorer routes those shapes to the strong-anchor score
+    // even when they arrive in the `css` field, so the winner reflects that.)
+    if let Some(best) = best_candidate(None, None, css, label, xpath) {
+        let s = best.selector.trim();
+        let is_anchor_kind =
+            matches!(best.kind, SelectorKind::Id | SelectorKind::DataTestId);
+        // Either it came in as a dedicated kind, or it's a css path whose whole
+        // value is just `#id` / `[data-testid=...]`.
+        if is_anchor_kind || s.starts_with('#') {
+            if let Some(id) = id_from_selector(s) {
+                sel.insert("id".into(), id.into());
+            }
         }
-    }
-    if let Some(xp) = payload.get("xpath").and_then(|v| v.as_str()) {
-        if !xp.is_empty() {
-            sel.insert("xpath".into(), xp.into());
-        }
-    }
-    if let Some(label) = payload.get("label").and_then(|v| v.as_str()) {
-        let trimmed = label.trim();
-        if !trimmed.is_empty() && trimmed.len() < 80 {
-            sel.insert("aria_label".into(), trimmed.into());
-            // `text_includes` is a softer fallback — only emit when label is
-            // short enough to be a button/link caption rather than free text.
-            if trimmed.len() < 32 {
-                sel.insert("text_includes".into(), trimmed.into());
+        if s.starts_with("[data-testid") || s.starts_with("[data-test") {
+            if let Some(val) = parse_data_testid(s) {
+                sel.insert("data_testid".into(), val.into());
             }
         }
     }
+
+    // Always keep the captured strategies as fallbacks so the self-healing
+    // chain stays wide — even when a strong anchor led the block. When the CSS
+    // path *is* the anchor we already hoisted (e.g. `#id`), it's still useful
+    // as a literal fallback, so we keep emitting it either way.
+    if let Some(css) = css {
+        sel.insert("css".into(), css.into());
+    }
+    if let Some(xp) = xpath {
+        sel.insert("xpath".into(), xp.into());
+    }
+    if let Some(label) = label {
+        sel.insert("aria_label".into(), label.into());
+        // `text_includes` is a softer fallback — only emit when label is
+        // short enough to be a button/link caption rather than free text.
+        if label.len() < 32 {
+            sel.insert("text_includes".into(), label.into());
+        }
+    }
     sel
+}
+
+/// Extract a bare id from a `#id` selector. Returns `None` for anything that
+/// isn't a single id token (paths, compound selectors) so we never hoist a
+/// multi-part path into the `id:` field.
+fn id_from_selector(selector: &str) -> Option<String> {
+    let s = selector.trim();
+    let rest = s.strip_prefix('#')?;
+    if rest.is_empty() || rest.contains([' ', '>', '.', '[', ':', '#']) {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+/// Extract the value from a `[data-testid="x"]` / `[data-test='x']` selector.
+fn parse_data_testid(selector: &str) -> Option<String> {
+    let inner = selector.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let (_attr, val) = inner.split_once('=')?;
+    let val = val.trim().trim_matches(['"', '\'']);
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
 }
 
 /// Convert a captured event log into a LumoFlow YAML fragment that the user
@@ -1092,4 +1301,60 @@ mod tests {
         let yaml = events_to_yaml_patch(&[grab]);
         assert!(!yaml.contains("browser.extract"));
     }
+
+    // ─── F-22: selector scoring in the YAML patch ─────────────────────────
+
+    #[test]
+    fn yaml_patch_hoists_id_path_into_id_field() {
+        // A DOM-walk that resolved to `#id` should lead with an `id:` anchor,
+        // not bury it in the `css` string.
+        let mut click = evt(
+            "click",
+            serde_json::json!({
+                "selector": "#login-btn",
+                "xpath": "//button[1]",
+            }),
+            1000,
+        );
+        click.source = "dom".into();
+        let yaml = events_to_yaml_patch(&[click]);
+        assert!(yaml.contains("id: login-btn"), "should hoist #id → id:\n{yaml}");
+        // CSS path still kept as a fallback.
+        assert!(yaml.contains("css:"));
+        assert!(yaml.contains("xpath:"));
+    }
+
+    #[test]
+    fn yaml_patch_hoists_data_testid_path() {
+        let mut click = evt(
+            "click",
+            serde_json::json!({ "selector": "[data-testid=\"submit\"]" }),
+            1000,
+        );
+        click.source = "dom".into();
+        let yaml = events_to_yaml_patch(&[click]);
+        assert!(
+            yaml.contains("data_testid: submit"),
+            "should hoist [data-testid] → data_testid:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn yaml_patch_leaves_plain_class_path_in_css() {
+        // No strong anchor → no id/data_testid selector field, css leads. (Note
+        // the step itself has an `id:` key — we check the selectors block, not
+        // the step header.)
+        let mut click = evt(
+            "click",
+            serde_json::json!({ "selector": "form > button.login-button" }),
+            1000,
+        );
+        click.source = "dom".into();
+        let yaml = events_to_yaml_patch(&[click]);
+        // The hoisted-anchor fields must be absent from the selectors block.
+        assert!(!yaml.contains("data_testid:"));
+        assert!(!yaml.contains("aria_label:"));
+        assert!(yaml.contains("button.login-button"));
+    }
 }
+
