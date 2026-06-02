@@ -81,6 +81,14 @@ const DERIVED_CLOSED: &[&str] = &[
     // takes no input (empty closed struct, like browser.close); upload's `files`
     // is a required string array, gated by fs-read.
     "browser.tabs", "browser.tab", "browser.upload",
+    // email (F-3) — SMTP send / IMAP fetch; secrets arrive pre-resolved as plain
+    // string inputs, gated by network (+ fs.read per attachment).
+    "email.send", "email.fetch",
+    // pdf (F-4) — local read/write via lopdf; fs.read / fs.write gated.
+    "pdf.extract_text", "pdf.info", "pdf.write",
+    // transfer (F-6) — FTP + S3-compatible upload/download; fs + network gated.
+    // (SFTP deferred — see transfer.rs module header.)
+    "ftp.upload", "ftp.download", "s3.put", "s3.get",
 ];
 
 fn registry() -> ActionRegistry {

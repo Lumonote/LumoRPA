@@ -8,6 +8,7 @@ pub mod csv_ops;
 pub mod data;
 pub mod date_ops;
 pub mod db_ops;
+pub mod email;
 pub mod excel;
 pub mod file;
 pub mod hash_ops;
@@ -17,6 +18,7 @@ pub mod list_ops;
 pub mod math_ops;
 pub mod mcp;
 pub mod notify;
+pub mod pdf;
 pub mod regex_ops;
 pub mod schema;
 pub mod selector_stats;
@@ -24,6 +26,7 @@ pub mod selectors;
 pub mod string_ops;
 pub mod system_ops;
 pub mod table_ops;
+pub mod transfer;
 pub mod vision;
 
 use lumo_core::ActionRegistry;
@@ -38,6 +41,7 @@ pub fn register_all(registry: &mut ActionRegistry) {
     excel::register(registry);
     browser::register(registry);
     mcp::register(registry);
+    pdf::register(registry);
 
     // 第二批：通用数据/系统/AI 周边指令
     string_ops::register(registry);
@@ -51,6 +55,8 @@ pub fn register_all(registry: &mut ActionRegistry) {
     system_ops::register(registry);
     db_ops::register(registry);
     notify::register(registry);
+    email::register(registry);
     clipboard::register(registry);
     table_ops::register(registry);
+    transfer::register(registry);
 }

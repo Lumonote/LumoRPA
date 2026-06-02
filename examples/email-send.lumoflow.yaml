@@ -1,0 +1,40 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: email-send
+  version: 0.1.0
+  name: 发送邮件示例 (SMTP + vault 口令)
+  description: |
+    通过 SMTP 发送一封带正文的邮件。SMTP 口令以 ${{ vault.smtp_password }}
+    占位,由 VM 在动作执行前从加密保险库 / 环境变量解析,flow 里绝不出现明文。
+    需要声明对 SMTP 主机的 network 能力,动作会在连接前对其门控。
+  tags: [example, email, smtp]
+
+spec:
+  inputs:
+    - { name: smtp_host, type: string, default: "smtp.example.com" }
+    - { name: smtp_port, type: number, default: 465 }
+    - { name: smtp_user, type: string, default: "robot@example.com" }
+    - { name: mail_to, type: string, default: "ops@example.com" }
+
+  vault: [smtp]
+
+  capabilities:
+    network: ["smtp.example.com"]
+
+  steps:
+    - id: send
+      action: email.send
+      with:
+        host: "{{ inputs.smtp_host }}"
+        port: "{{ inputs.smtp_port }}"
+        username: "{{ inputs.smtp_user }}"
+        password: "${{ vault.smtp_password }}"
+        from: "{{ inputs.smtp_user }}"
+        to: ["{{ inputs.mail_to }}"]
+        subject: "LumoRPA 自动化报告"
+        body: "这是一封由 LumoRPA email.send 动作发出的测试邮件。"
+
+    - id: report
+      action: control.log
+      with: { message: "sent: {{ steps.send.result.ok }} ({{ steps.send.result.code }})" }

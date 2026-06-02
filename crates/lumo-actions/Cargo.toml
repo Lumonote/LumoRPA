@@ -39,6 +39,33 @@ md-5 = "0.10"
 sha1 = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
+# F-3 email 动作:SMTP(lettre)+ IMAP(async-imap)。统一走 rustls + ring,避开
+# openssl/native-tls 的 C 依赖,满足信创/跨平台交叉编译。lettre 0.11.22 起 MSRV
+# 升到 1.85 > 本仓 1.83,锁定 0.11.19。
+lettre = { version = "=0.11.19", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "pool",
+    "hostname",
+    "tokio1-rustls",
+    "ring",
+    "rustls-native-certs",
+] }
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
+futures-util = "0.3"
+
+# F-4 PDF 动作:纯 Rust lopdf(MIT)读写一体,无 C 依赖。lopdf 0.40 需 rustc 1.85
+# > 本仓 1.83,锁 0.36。
+lopdf = { version = "0.36", default-features = false }
+
+# F-6 远程传输:FTP 走 suppaftp(tokio + tokio-rustls-ring,纯 Rust);S3 兼容存储
+# 不引第三方 SDK(rust-s3/aws-creds 经 attohttpc 强拉 aws-lc-sys 这个 C 依赖,破坏
+# aarch64 信创交叉编译),改用 workspace 既有 reqwest(rustls/ring)自签 AWS SigV4
+# (复用本 crate 的 hmac/sha2),零新增重依赖,见 transfer/sigv4.rs。
+suppaftp = { version = "8", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

@@ -1,0 +1,40 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: pdf-extract
+  version: 0.1.0
+  name: PDF 写出与抽取示例
+  description: |
+    本地生成一个简单文本 PDF（pdf.write），再读回其文本（pdf.extract_text）
+    并报告页数（pdf.info）。全程不触网，仅需 fs 读写能力。
+  tags: [example, pdf, local]
+
+spec:
+  inputs:
+    - { name: out, type: string, default: "/tmp/lumo-pdf-demo.pdf" }
+
+  capabilities:
+    fs.read: ["/tmp/**"]
+    fs.write: ["/tmp/**"]
+
+  steps:
+    - id: make
+      action: pdf.write
+      with:
+        path: "{{ inputs.out }}"
+        lines:
+          - "Hello LumoRPA"
+          - "本地 PDF 往返示例"
+
+    - id: info
+      action: pdf.info
+      with: { path: "{{ inputs.out }}" }
+
+    - id: read
+      action: pdf.extract_text
+      with: { path: "{{ inputs.out }}" }
+
+    - id: report
+      action: control.log
+      with:
+        message: "pages={{ steps.info.result.pages }} text={{ steps.read.result.text }}"
