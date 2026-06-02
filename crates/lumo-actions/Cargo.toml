@@ -66,6 +66,12 @@ lopdf = { version = "0.36", default-features = false }
 # (复用本 crate 的 hmac/sha2),零新增重依赖,见 transfer/sigv4.rs。
 suppaftp = { version = "8", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
 
+# F-2 图像/模板匹配:纯 Rust image + imageproc(均 MIT,无 C 依赖,信创/交叉友好)。
+# 仅做图像/模板匹配;OCR 文本识别暂缓(目标中文,当前无准确的纯 Rust 中文 OCR)。
+# image features 收窄到常用编码(png 覆盖 browser.screenshot 产物)。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+imageproc = { version = "0.25", default-features = false }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

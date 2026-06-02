@@ -13,6 +13,7 @@ pub mod excel;
 pub mod file;
 pub mod hash_ops;
 pub mod http;
+pub mod image_match;
 pub mod json_ops;
 pub mod list_ops;
 pub mod math_ops;
@@ -42,6 +43,7 @@ pub fn register_all(registry: &mut ActionRegistry) {
     browser::register(registry);
     mcp::register(registry);
     pdf::register(registry);
+    image_match::register(registry);
 
     // 第二批：通用数据/系统/AI 周边指令
     string_ops::register(registry);

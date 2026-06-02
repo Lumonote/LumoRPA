@@ -89,6 +89,9 @@ const DERIVED_CLOSED: &[&str] = &[
     // transfer (F-6) — FTP + S3-compatible upload/download; fs + network gated.
     // (SFTP deferred — see transfer.rs module header.)
     "ftp.upload", "ftp.download", "s3.put", "s3.get",
+    // image (F-2) — pure-Rust template matching (image + imageproc); reads gated
+    // by fs.read. OCR text recognition deferred (no accurate pure-Rust Chinese engine).
+    "image.locate", "image.compare",
 ];
 
 fn registry() -> ActionRegistry {

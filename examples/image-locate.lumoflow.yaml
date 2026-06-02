@@ -1,0 +1,32 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: image-locate
+  version: 0.1.0
+  name: 图像模板定位示例
+  description: |
+    在一张截图(haystack）中用归一化互相关定位一个模板小图，拿到中心坐标后即可
+    驱动点击（配合 F-1 桌面/浏览器坐标动作）。纯本地图像匹配，仅需 fs 读权限；
+    OCR 文本识别暂缓（目标中文，当前无准确的纯 Rust 中文引擎）。
+  tags: [example, image, vision, local]
+
+spec:
+  inputs:
+    - { name: screenshot, type: string, default: "/tmp/lumo-haystack.png" }
+    - { name: target, type: string, default: "/tmp/lumo-button.png" }
+
+  capabilities:
+    fs.read: ["/tmp/**"]
+
+  steps:
+    - id: find
+      action: image.locate
+      with:
+        image: "{{ inputs.screenshot }}"
+        template: "{{ inputs.target }}"
+        threshold: 0.9
+
+    - id: report
+      action: control.log
+      with:
+        message: "found={{ steps.find.result.found }} center=({{ steps.find.result.center_x }},{{ steps.find.result.center_y }}) score={{ steps.find.result.score }}"
