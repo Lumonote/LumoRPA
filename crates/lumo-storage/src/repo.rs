@@ -23,7 +23,10 @@ use std::{path::Path, sync::Arc};
 ///           Runs before the baseline DDL so the latter's index on `path` lands
 ///           on the rebuilt table (no-op for fresh DBs that have no step_runs).
 ///   1 -> 2: baseline schema (CREATE TABLE IF NOT EXISTS via `schema::DDL`).
-pub const LATEST_USER_VERSION: i64 = 2;
+///   2 -> 3: add `step_runs.vars_json` (F-19 variable watch). Guarded ALTER —
+///           fresh DBs already get the column from the v2 baseline DDL, so the
+///           ALTER only fires on older v2 DBs that predate it.
+pub const LATEST_USER_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct Repo {
@@ -153,8 +156,8 @@ impl Repo {
     pub fn insert_step(&self, row: &StepRunRow) -> Result<(), StorageError> {
         let c = self.inner.lock();
         c.execute(
-            "INSERT INTO step_runs(flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,output_json,error,started_at,finished_at,span_id) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO step_runs(flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,output_json,error,started_at,finished_at,span_id,vars_json) \
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 row.flow_run_id,
                 row.seq,
@@ -171,6 +174,7 @@ impl Repo {
                 row.started_at.map(|t| t.timestamp_millis()),
                 row.finished_at.map(|t| t.timestamp_millis()),
                 row.span_id,
+                row.vars_json.as_ref().map(serde_json::to_string).transpose()?,
             ],
         )?;
         Ok(())
@@ -179,7 +183,7 @@ impl Repo {
     pub fn list_steps(&self, run_id: &str) -> Result<Vec<StepRunRow>, StorageError> {
         let c = self.inner.lock();
         let mut stmt = c.prepare(
-            "SELECT flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,output_json,error,started_at,finished_at,span_id \
+            "SELECT flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,output_json,error,started_at,finished_at,span_id,vars_json \
              FROM step_runs WHERE flow_run_id=? ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map([run_id], row_to_step_run)?;
@@ -439,6 +443,7 @@ fn row_to_step_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunRow> {
         started_at: ts_opt(row, 12)?,
         finished_at: ts_opt(row, 13)?,
         span_id: row.get(14)?,
+        vars_json: json_opt(row, 15)?,
     })
 }
 
@@ -475,8 +480,11 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     // renumber or mutate an already-shipped step. The legacy step_runs rebuild
     // runs first so the baseline DDL's index on `path` lands on the rebuilt
     // table; on fresh DBs the rebuild is a no-op (no step_runs table yet).
-    let steps: &[(i64, MigrationStep)] =
-        &[(1, migrate_v1_step_runs_paths), (2, migrate_v2_baseline)];
+    let steps: &[(i64, MigrationStep)] = &[
+        (1, migrate_v1_step_runs_paths),
+        (2, migrate_v2_baseline),
+        (3, migrate_v3_step_vars),
+    ];
 
     for &(version, step) in steps {
         if version > current {
@@ -495,6 +503,22 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 /// after the step_runs rebuild so its index on `path` finds the column.
 fn migrate_v2_baseline(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(schema::DDL)?;
+    Ok(())
+}
+
+fn migrate_v3_step_vars(conn: &Connection) -> Result<(), StorageError> {
+    // F-19 variable watch: add `step_runs.vars_json`. Guarded so it is a no-op on
+    // fresh DBs (which already get the column from the v2 baseline DDL) and only
+    // alters older v2 DBs that predate it.
+    let mut stmt = conn.prepare("PRAGMA table_info(step_runs)")?;
+    let has_col = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "vars_json");
+    drop(stmt);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE step_runs ADD COLUMN vars_json TEXT;")?;
+    }
     Ok(())
 }
 

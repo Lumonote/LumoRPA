@@ -184,6 +184,28 @@ function renderTimeline() {
   showStepDetail(0);
 }
 
+// F-19 Variable Watch: render the `vars` (set_var) environment captured as of
+// this step, so scrubbing the time-travel timeline shows how variables evolve.
+// `varsJson` is `null` for steps recorded before the column existed (older
+// runs predate the v3 migration) — those render nothing so the panel is
+// unchanged for them.
+function renderVarsWatch(varsJson) {
+  if (!varsJson || typeof varsJson !== "object" || Array.isArray(varsJson)) return "";
+  const entries = Object.entries(varsJson);
+  const body = entries.length
+    ? entries
+        .map(([k, v]) => {
+          const scalar = v === null || typeof v !== "object";
+          const val = scalar
+            ? `<strong>${html(String(v))}</strong>`
+            : `<strong style="font-weight: 400; white-space: pre-wrap; font-family: 'SF Mono', Consolas, monospace">${html(pretty(v))}</strong>`;
+          return `<div class="kv"><span>${html(k)}</span>${val}</div>`;
+        })
+        .join("")
+    : `<div class="kv"><span style="color: var(--muted)">（暂无变量）</span></div>`;
+  return `<div class="section-title" style="margin-top: 10px">变量 Watch (F-19)</div>${body}`;
+}
+
 function showStepDetail(idx) {
   const step = state.activeRunSteps[idx];
   if (!step) return;
@@ -212,6 +234,7 @@ function showStepDetail(idx) {
     ${step.error ? `<div class="kv"><span>错误</span><strong style="color: var(--bad)">${html(step.error)}</strong></div>` : ""}
     ${art ? `<div class="timeline-screenshot" id="timelineShot"><div class="shot-loading">加载快照…</div></div>` : ""}
     ${step.outputJson ? `<pre>${html(pretty(step.outputJson))}</pre>` : ""}
+    ${renderVarsWatch(step.varsJson)}
   `;
   if (art) {
     blobDataUrl(art.id).then((url) => {

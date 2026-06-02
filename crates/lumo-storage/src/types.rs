@@ -31,6 +31,9 @@ pub struct StepRunRow {
     pub attempt: i64,
     pub input_hash: Vec<u8>,
     pub output_json: Option<serde_json::Value>,
+    /// F-19 variable watch: snapshot of the `vars` (set_var) environment as of
+    /// after this step. `None` for rows written before the column existed.
+    pub vars_json: Option<serde_json::Value>,
     pub error: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,

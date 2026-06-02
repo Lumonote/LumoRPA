@@ -1268,6 +1268,7 @@ async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
         started_at: Some(row.started_at),
         finished_at: Some(row.finished_at),
         span_id: None,
+        vars_json: Some(ctx.vars_snapshot()),
     };
     // The parking_lot Mutex<Connection> + SQLite write (which can block up to
     // `busy_timeout` under contention) runs on a blocking thread; the async

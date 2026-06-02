@@ -36,6 +36,7 @@ fn make_step(run_id: &str, seq: i64, path: &str) -> StepRunRow {
         started_at: Some(Utc::now()),
         finished_at: Some(Utc::now()),
         span_id: None,
+        vars_json: Some(serde_json::json!({ "v": seq })),
     }
 }
 
@@ -82,4 +83,21 @@ fn step_runs_allow_repeated_step_ids_with_distinct_paths() {
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].path, "loop[0]/same_step");
     assert_eq!(steps[1].path, "loop[1]/same_step");
+}
+
+#[test]
+fn step_vars_json_round_trips() {
+    // F-19: the per-step variable snapshot persists and reads back intact,
+    // including across a close/reopen (exercises the v2→v3 migration on a file DB).
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lumo.db");
+    let repo = Repo::open(&path).unwrap();
+    repo.create_run(&make_run("RV")).unwrap();
+    repo.insert_step(&make_step("RV", 0, "set_x")).unwrap();
+    drop(repo);
+
+    let again = Repo::open(&path).unwrap();
+    let steps = again.list_steps("RV").unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].vars_json, Some(serde_json::json!({ "v": 0 })));
 }

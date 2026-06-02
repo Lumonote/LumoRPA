@@ -6,7 +6,8 @@ use rusqlite::Connection;
 
 /// Must match `lumo_storage::repo::LATEST_USER_VERSION`. Hard-coded here on
 /// purpose so an accidental change to the migration list trips the test.
-const EXPECTED_USER_VERSION: i64 = 2;
+/// v3 (F-19): adds `step_runs.vars_json` for the variable-watch snapshot.
+const EXPECTED_USER_VERSION: i64 = 3;
 
 fn make_run(id: &str) -> FlowRunRow {
     FlowRunRow {

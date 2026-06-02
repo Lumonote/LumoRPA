@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS step_runs (
   attempt       INTEGER NOT NULL DEFAULT 1,
   input_hash    BLOB NOT NULL,
   output_json   TEXT,
+  vars_json     TEXT,
   error         TEXT,
   started_at    INTEGER,
   finished_at   INTEGER,
