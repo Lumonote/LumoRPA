@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
@@ -20,7 +21,8 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 pub struct ShellAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ShellIn {
     command: String,
     #[serde(default)]
@@ -41,18 +43,7 @@ impl Action for ShellAction {
         "Run `command` in the platform shell (requires LUMO_ALLOW_SHELL=1)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["command"],
-                "properties": {
-                    "command":    { "type": "string" },
-                    "cwd":        { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 100, "default": 30000 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ShellIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -91,7 +82,8 @@ impl Action for ShellAction {
 }
 
 pub struct EnvGetAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct EnvIn {
     name: String,
     #[serde(default)]
@@ -106,17 +98,7 @@ impl Action for EnvGetAction {
         "Read env var by name; optional `default` when missing"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name":    { "type": "string" },
-                    "default": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<EnvIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -128,7 +110,8 @@ impl Action for EnvGetAction {
 }
 
 pub struct SleepAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SleepIn {
     ms: u64,
 }
@@ -141,14 +124,7 @@ impl Action for SleepAction {
         "Pause for `ms` milliseconds"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["ms"],
-                "properties": { "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SleepIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -160,6 +136,9 @@ impl Action for SleepAction {
 }
 
 pub struct PlatformAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PlatformIn {}
 #[async_trait]
 impl Action for PlatformAction {
     fn id(&self) -> &'static str {
@@ -169,13 +148,7 @@ impl Action for PlatformAction {
         "Report `{ os, arch, family }`"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PlatformIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {

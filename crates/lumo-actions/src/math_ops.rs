@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -22,7 +23,8 @@ fn n(v: &Value) -> Option<f64> {
 }
 
 pub struct RoundAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RoundIn {
     value: f64,
     #[serde(default)]
@@ -37,17 +39,7 @@ impl Action for RoundAction {
         "Round a number to N digits (default 0)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": {
-                    "value":  { "type": "number" },
-                    "digits": { "type": "integer", "default": 0 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RoundIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -64,7 +56,8 @@ impl Action for RoundAction {
 }
 
 pub struct RandomAction;
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RandIn {
     #[serde(default)]
     min: Option<f64>,
@@ -82,17 +75,7 @@ impl Action for RandomAction {
         "Random number in [min, max) (default [0,1) float)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "min":     { "type": "number" },
-                    "max":     { "type": "number" },
-                    "integer": { "type": "boolean", "default": false }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RandIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -126,7 +109,8 @@ impl Action for RandomAction {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListIn {
     items: Vec<Value>,
 }
@@ -242,7 +226,8 @@ impl Action for AvgAction {
 }
 
 pub struct AbsAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AbsIn {
     value: f64,
 }
@@ -255,14 +240,7 @@ impl Action for AbsAction {
         "Absolute value"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": { "value": { "type": "number" } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AbsIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -277,13 +255,6 @@ impl Action for AbsAction {
 }
 
 fn items_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["items"],
-            "properties": { "items": { "type": "array" } },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ListIn>);
     &S
 }

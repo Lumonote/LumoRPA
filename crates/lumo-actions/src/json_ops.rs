@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -24,7 +25,8 @@ fn split_path(p: &str) -> Vec<String> {
 }
 
 pub struct GetPathAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct GetIn {
     value: Value,
     path: String,
@@ -40,18 +42,7 @@ impl Action for GetPathAction {
         "Read `value` at dotted path (`a.b.0.c`)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value", "path"],
-                "properties": {
-                    "value":   {},
-                    "path":    { "type": "string" },
-                    "default": {}
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -86,7 +77,8 @@ impl Action for GetPathAction {
 }
 
 pub struct SetPathAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetIn {
     value: Value,
     path: String,
@@ -101,18 +93,7 @@ impl Action for SetPathAction {
         "Set `new` at dotted path inside `value`; returns new value"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value", "path", "new"],
-                "properties": {
-                    "value": {},
-                    "path":  { "type": "string" },
-                    "new":   {}
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SetIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -195,19 +176,13 @@ impl Action for MergeAction {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ValueIn {
     value: Value,
 }
 fn value_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["value"],
-            "properties": { "value": {} },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ValueIn>);
     &S
 }
 
@@ -258,7 +233,8 @@ impl Action for ValuesAction {
 }
 
 pub struct DeleteAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DelIn {
     value: Value,
     path: String,
@@ -272,14 +248,7 @@ impl Action for DeleteAction {
         "Remove `path` from `value`, return result"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value", "path"],
-                "properties": { "value": {}, "path": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DelIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

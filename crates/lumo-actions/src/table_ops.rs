@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -403,7 +404,8 @@ fn num(f: f64) -> Value {
 
 pub struct JoinAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct JoinIn {
     left: Vec<Value>,
     right: Vec<Value>,
@@ -413,14 +415,20 @@ struct JoinIn {
     left_key: Option<String>,
     #[serde(default)]
     right_key: Option<String>,
-    #[serde(rename = "type", default = "default_join_type")]
-    join_type: String,
+    #[serde(rename = "type", default)]
+    join_type: JoinType,
     #[serde(default = "default_right_prefix")]
     right_prefix: String,
 }
 
-fn default_join_type() -> String {
-    "inner".to_string()
+/// Join kind. Modeling it as an enum (not a free `String`) keeps the
+/// `["inner","left"]` constraint in the derived schema.
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum JoinType {
+    #[default]
+    Inner,
+    Left,
 }
 
 fn default_right_prefix() -> String {
@@ -436,22 +444,7 @@ impl Action for JoinAction {
         "Join two arrays of objects on a key (inner or left)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["left", "right"],
-                "properties": {
-                    "left": { "type": "array" },
-                    "right": { "type": "array" },
-                    "key": { "type": "string" },
-                    "left_key": { "type": "string" },
-                    "right_key": { "type": "string" },
-                    "type": { "type": "string", "enum": ["inner", "left"], "default": "inner" },
-                    "right_prefix": { "type": "string", "default": "right_" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<JoinIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -475,11 +468,7 @@ impl Action for JoinAction {
                 ))
             }
         };
-        let left_join = match join_type.as_str() {
-            "inner" => false,
-            "left" => true,
-            other => return Err(StepError::msg(format!("data.join: unknown type `{other}`"))),
-        };
+        let left_join = matches!(join_type, JoinType::Left);
 
         // Index the right rows by the JSON form of their join key (the same
         // strategy `list.unique` uses for dedup). Right rows missing the key

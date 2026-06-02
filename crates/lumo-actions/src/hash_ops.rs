@@ -6,6 +6,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use md5::Digest as Md5Digest;
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use sha1::Sha1;
@@ -22,18 +23,12 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 fn text_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["text"],
-            "properties": { "text": { "type": "string" } },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<TextIn>);
     &S
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TextIn {
     text: String,
 }
@@ -171,6 +166,9 @@ impl Action for Base64DecodeAction {
 }
 
 pub struct UuidAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UuidIn {}
 #[async_trait]
 impl Action for UuidAction {
     fn id(&self) -> &'static str {
@@ -180,13 +178,7 @@ impl Action for UuidAction {
         "Generate a random UUID v4"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<UuidIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {

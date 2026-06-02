@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -36,6 +37,10 @@ fn clipboard_set_text(text: String) -> Result<(), String> {
 
 pub struct GetAction;
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetIn {}
+
 #[async_trait]
 impl Action for GetAction {
     fn id(&self) -> &'static str {
@@ -45,13 +50,7 @@ impl Action for GetAction {
         "Read text from the system clipboard"
     }
     fn schema(&self) -> &'static Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
@@ -65,7 +64,8 @@ impl Action for GetAction {
 
 pub struct SetAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetIn {
     text: String,
 }
@@ -79,14 +79,7 @@ impl Action for SetAction {
         "Write text to the system clipboard"
     }
     fn schema(&self) -> &'static Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text"],
-                "properties": { "text": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SetIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

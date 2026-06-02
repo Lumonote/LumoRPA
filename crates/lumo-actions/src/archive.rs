@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -33,7 +34,8 @@ const DEFAULT_MAX_ENTRIES: u64 = 1_000_000;
 
 pub struct ZipAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ZipIn {
     paths: Vec<String>,
     dest: String,
@@ -141,18 +143,7 @@ impl Action for ZipAction {
         "Compress files/directories into a ZIP archive"
     }
     fn schema(&self) -> &'static Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["paths", "dest"],
-                "properties": {
-                    "paths": { "type": "array", "items": { "type": "string" } },
-                    "dest": { "type": "string" },
-                    "base_dir": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ZipIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -192,7 +183,8 @@ impl Action for ZipAction {
 
 // ─── archive.unzip lands in Task 2 (same file) ─────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct UnzipIn {
     src: String,
     dest: String,
@@ -299,19 +291,7 @@ impl Action for UnzipAction {
         "Extract a ZIP archive into a directory"
     }
     fn schema(&self) -> &'static Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["src", "dest"],
-                "properties": {
-                    "src": { "type": "string" },
-                    "dest": { "type": "string" },
-                    "max_total_bytes": { "type": "integer" },
-                    "max_entries": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<UnzipIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

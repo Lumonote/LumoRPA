@@ -2886,6 +2886,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
  "rust_xlsxwriter",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha1",

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -15,7 +16,8 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 pub struct ReadAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadIn {
     path: PathBuf,
 }
@@ -29,14 +31,7 @@ impl Action for ReadAction {
         "Read a text file"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": { "path": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ReadIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -51,7 +46,8 @@ impl Action for ReadAction {
 }
 
 pub struct WriteAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WriteIn {
     path: PathBuf,
     content: String,
@@ -68,18 +64,7 @@ impl Action for WriteAction {
         "Write a text file (create or overwrite)"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["path", "content"],
-                "properties": {
-                    "path": { "type": "string" },
-                    "content": { "type": "string" },
-                    "append": { "type": "boolean" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WriteIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -114,7 +99,8 @@ impl Action for WriteAction {
 }
 
 pub struct ExistsAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExistsIn {
     path: PathBuf,
 }
@@ -128,14 +114,7 @@ impl Action for ExistsAction {
         "Test whether a path exists"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": { "path": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ExistsIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

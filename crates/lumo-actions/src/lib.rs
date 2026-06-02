@@ -18,6 +18,7 @@ pub mod math_ops;
 pub mod mcp;
 pub mod notify;
 pub mod regex_ops;
+pub mod schema;
 pub mod selector_stats;
 pub mod selectors;
 pub mod string_ops;

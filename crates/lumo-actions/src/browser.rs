@@ -10,6 +10,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, RunTeardown, StepCtx};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -158,7 +159,8 @@ impl RunTeardown for BrowserTeardown {
 // ─── browser.launch ─────────────────────────────────────────────────────────
 
 pub struct LaunchAction;
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct LaunchIn {
     #[serde(default = "default_true")]
     headless: bool,
@@ -176,13 +178,7 @@ impl Action for LaunchAction {
         "Launch (or attach to) a Chromium browser session"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "headless": { "type": "boolean" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<LaunchIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -197,6 +193,9 @@ impl Action for LaunchAction {
 // ─── browser.close ──────────────────────────────────────────────────────────
 
 pub struct CloseAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CloseIn {}
 
 #[async_trait]
 impl Action for CloseAction {
@@ -207,13 +206,7 @@ impl Action for CloseAction {
         "Close the current browser session"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<CloseIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
@@ -227,7 +220,8 @@ impl Action for CloseAction {
 // ─── browser.open ───────────────────────────────────────────────────────────
 
 pub struct OpenAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct OpenIn {
     url: String,
     #[serde(default = "default_true")]
@@ -239,24 +233,6 @@ struct OpenIn {
 }
 fn default_timeout_ms() -> u64 {
     30_000
-}
-
-/// Inline schema fragment for the `selectors:` object used by browser actions.
-/// Kept here so each action's static schema can reference it without
-/// duplicating the property list.
-fn multi_selector_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "id": { "type": "string" },
-            "data_testid": { "type": "string" },
-            "css": { "type": "string" },
-            "aria_label": { "type": "string" },
-            "text_includes": { "type": "string" },
-            "xpath": { "type": "string" }
-        }
-    })
 }
 
 /// Reconcile the back-compat `selector: String` field with the new
@@ -327,19 +303,7 @@ impl Action for OpenAction {
         "Navigate to a URL (launching browser if needed)"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": { "type": "string" },
-                    "headless": { "type": "boolean" },
-                    "timeout_ms": { "type": "integer" },
-                    "wait_for": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<OpenIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -380,7 +344,8 @@ impl Action for OpenAction {
 // ─── browser.click ──────────────────────────────────────────────────────────
 
 pub struct ClickAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ClickIn {
     /// Single CSS selector (back-compat). Either this or `selectors` must be set.
     #[serde(default)]
@@ -411,19 +376,7 @@ impl Action for ClickAction {
         "Click the first element matching a CSS selector or multi-strategy selectors"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "selector": { "type": "string" },
-                    "selectors": multi_selector_schema(),
-                    "prompt": { "type": "string" },
-                    "model": { "type": "string" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ClickIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -463,7 +416,8 @@ impl Action for ClickAction {
 // ─── browser.type ───────────────────────────────────────────────────────────
 
 pub struct TypeAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TypeIn {
     #[serde(default)]
     selector: Option<String>,
@@ -490,22 +444,7 @@ impl Action for TypeAction {
         "Type text into the first element matching a selector spec"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text"],
-                "properties": {
-                    "selector": { "type": "string" },
-                    "selectors": multi_selector_schema(),
-                    "text": { "type": "string" },
-                    "clear": { "type": "boolean" },
-                    "prompt": { "type": "string" },
-                    "model": { "type": "string" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<TypeIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -555,7 +494,8 @@ impl Action for TypeAction {
 // ─── browser.extract ────────────────────────────────────────────────────────
 
 pub struct ExtractAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExtractIn {
     /// CSS selector. If `map` is provided, each value is treated as a sub-selector
     /// rooted at the matched element; otherwise innerText is returned.
@@ -579,20 +519,7 @@ impl Action for ExtractAction {
         "Extract innerText (or a field map) from matching elements"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["selector"],
-                "properties": {
-                    "selector": { "type": "string" },
-                    "map": { "type": "object" },
-                    "attr": { "type": "string" },
-                    "all": { "type": "boolean" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ExtractIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -697,7 +624,28 @@ impl Action for ExtractAction {
 /// pathological evaluate() call, not the overall wait (that's `timeout_ms`).
 const WAIT_EVAL_TIMEOUT_MS: u64 = 2_000;
 
-const WAIT_CONDITIONS: &[&str] = &["present", "visible", "clickable", "hidden"];
+/// Browser-wait condition. An enum (not a free `String`) keeps the
+/// `["present","visible","clickable","hidden"]` constraint in the derived schema
+/// and folds the old `WAIT_CONDITIONS` runtime check into the type system.
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum WaitCondition {
+    Present,
+    #[default]
+    Visible,
+    Clickable,
+    Hidden,
+}
+impl WaitCondition {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WaitCondition::Present => "present",
+            WaitCondition::Visible => "visible",
+            WaitCondition::Clickable => "clickable",
+            WaitCondition::Hidden => "hidden",
+        }
+    }
+}
 
 /// Self-contained matcher: locates the element by the same strategy order as the
 /// resolver, then returns a single boolean for the requested condition. Kept
@@ -752,21 +700,19 @@ const WAIT_JS_TEMPLATE: &str = r#"
 
 pub struct WaitAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WaitIn {
     #[serde(default)]
     selector: Option<String>,
     #[serde(default)]
     selectors: Option<MultiSelector>,
-    #[serde(default = "default_condition")]
-    condition: String,
+    #[serde(default)]
+    condition: WaitCondition,
     #[serde(default)]
     text: Option<String>,
     #[serde(default = "default_wait_timeout_ms")]
     timeout_ms: u64,
-}
-fn default_condition() -> String {
-    "visible".into()
 }
 fn default_wait_timeout_ms() -> u64 {
     30_000
@@ -809,19 +755,7 @@ impl Action for WaitAction {
         "Wait until an element is present/visible/clickable/hidden, or text appears"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "selector": { "type": "string" },
-                    "selectors": multi_selector_schema(),
-                    "condition": { "type": "string", "enum": ["present", "visible", "clickable", "hidden"] },
-                    "text": { "type": "string" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WaitIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -833,14 +767,10 @@ impl Action for WaitAction {
             timeout_ms,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("browser.wait input invalid: {e}")))?;
-
-        // Validate before needing a browser session, so bad input fails fast
-        // (and unit-testably) without launching Chrome.
-        if !WAIT_CONDITIONS.contains(&condition.as_str()) {
-            return Err(StepError::msg(format!(
-                "browser.wait: unknown condition `{condition}` (present/visible/clickable/hidden)"
-            )));
-        }
+        // `condition` is a `WaitCondition` enum, so the schema/deserializer have
+        // already rejected anything outside present/visible/clickable/hidden —
+        // the old runtime `WAIT_CONDITIONS` check is now unrepresentable.
+        let cond = condition.as_str();
         let has_selector = selector.as_ref().is_some_and(|s| !s.is_empty())
             || selectors.as_ref().is_some_and(|s| !s.is_empty());
         if !has_selector && text.is_none() {
@@ -861,13 +791,13 @@ impl Action for WaitAction {
         let start = std::time::Instant::now();
         let poll = Duration::from_millis(100);
         loop {
-            if wait_matches(&page, spec.as_ref(), &condition, text.as_deref()).await? {
+            if wait_matches(&page, spec.as_ref(), cond, text.as_deref()).await? {
                 let matched = spec
                     .as_ref()
                     .map(|s| s.first_hint())
                     .unwrap_or_else(|| format!("text:{}", text.as_deref().unwrap_or("")));
                 return Ok(ActionResult::from(serde_json::json!({
-                    "condition": condition,
+                    "condition": cond,
                     "matched": matched,
                     "waited_ms": start.elapsed().as_millis() as u64,
                 })));
@@ -878,7 +808,7 @@ impl Action for WaitAction {
                     .map(|s| s.first_hint())
                     .unwrap_or_else(|| format!("text `{}`", text.as_deref().unwrap_or("")));
                 return Err(StepError::msg(format!(
-                    "browser.wait: condition `{condition}` not met within {timeout_ms}ms for {what}"
+                    "browser.wait: condition `{cond}` not met within {timeout_ms}ms for {what}"
                 )));
             }
             tokio::time::sleep(poll).await;

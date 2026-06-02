@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -49,7 +50,8 @@ pub(crate) fn build_gated_client(
 
 pub struct RequestAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReqIn {
     #[serde(default = "default_method")]
     method: String,
@@ -84,22 +86,7 @@ impl Action for RequestAction {
         "Make an HTTP request and return status/body/headers"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "method": { "type": "string" },
-                    "url": { "type": "string" },
-                    "headers": { "type": "object" },
-                    "query": { "type": "object" },
-                    "body": {},
-                    "timeout_ms": { "type": "integer" },
-                    "max_bytes": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ReqIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -188,7 +175,8 @@ impl Action for RequestAction {
 
 pub struct DownloadAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DownloadIn {
     url: String,
     dest: String,
@@ -209,20 +197,7 @@ impl Action for DownloadAction {
         "Stream an HTTP GET response to a file, capped at max_bytes"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["url", "dest"],
-                "properties": {
-                    "url": { "type": "string" },
-                    "dest": { "type": "string" },
-                    "max_bytes": { "type": "integer" },
-                    "headers": { "type": "object" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<DownloadIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -315,11 +290,12 @@ impl Action for DownloadAction {
 
 pub struct UploadAction;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct UploadIn {
     url: String,
     src: String,
-    mode: String,
+    mode: UploadMode,
     #[serde(default)]
     method: Option<String>,
     #[serde(default)]
@@ -334,6 +310,16 @@ struct UploadIn {
     timeout_ms: u64,
 }
 
+/// `http.upload` transport mode. Modeling it as an enum (not a free `String`)
+/// keeps the `["multipart","body"]` constraint in the derived schema and makes
+/// the dispatch `match` exhaustive.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum UploadMode {
+    Multipart,
+    Body,
+}
+
 #[async_trait]
 impl Action for UploadAction {
     fn id(&self) -> &'static str {
@@ -343,24 +329,7 @@ impl Action for UploadAction {
         "Upload a local file via multipart form or raw request body"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["url", "src", "mode"],
-                "properties": {
-                    "url": { "type": "string" },
-                    "src": { "type": "string" },
-                    "mode": { "type": "string", "enum": ["multipart", "body"] },
-                    "method": { "type": "string" },
-                    "field": { "type": "string" },
-                    "filename": { "type": "string" },
-                    "headers": { "type": "object" },
-                    "max_bytes": { "type": "integer" },
-                    "timeout_ms": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<UploadIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -400,8 +369,8 @@ impl Action for UploadAction {
         // ungranted host (data exfiltration).
         let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
 
-        let resp = match mode.as_str() {
-            "multipart" => {
+        let resp = match mode {
+            UploadMode::Multipart => {
                 let field = field.unwrap_or_else(|| "file".into());
                 let filename = filename.unwrap_or_else(|| {
                     src_path
@@ -432,7 +401,7 @@ impl Action for UploadAction {
                     }
                 })?
             }
-            "body" => {
+            UploadMode::Body => {
                 let m = method.unwrap_or_else(|| "PUT".into());
                 let mut req = client
                     .request(
@@ -453,11 +422,6 @@ impl Action for UploadAction {
                         StepError::msg(format!("http.upload send: {}", e.without_url()))
                     }
                 })?
-            }
-            other => {
-                return Err(StepError::msg(format!(
-                    "http.upload: mode must be `multipart` or `body`, got `{other}`"
-                )))
             }
         };
 

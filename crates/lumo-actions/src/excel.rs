@@ -8,6 +8,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
 use rust_xlsxwriter::Workbook;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -19,7 +20,8 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 pub struct ReadRowsAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadIn {
     file: PathBuf,
     #[serde(default)]
@@ -42,19 +44,7 @@ impl Action for ReadRowsAction {
         "Read rows from a workbook; row 1 used as headers if header=true"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["file"],
-                "properties": {
-                    "file": { "type": "string" },
-                    "sheet": { "type": "string" },
-                    "header": { "type": "boolean" },
-                    "limit": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ReadIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -137,7 +127,8 @@ fn cell_to_json(c: &Data) -> Value {
 }
 
 pub struct WriteRowAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WriteRowIn {
     file: PathBuf,
     #[serde(default)]
@@ -158,23 +149,7 @@ impl Action for WriteRowAction {
         "Append a row to an .xlsx workbook (create if missing)"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["file", "row"],
-                "properties": {
-                    "file": { "type": "string" },
-                    "sheet": { "type": "string" },
-                    "row": {},
-                    "headers": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "replace_sheet": { "type": "boolean" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WriteRowIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

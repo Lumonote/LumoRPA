@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -157,7 +158,8 @@ impl Action for McpCallAction {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DiscoverIn {
     server: String,
     command: String,
@@ -178,20 +180,7 @@ impl Action for McpDiscoverAction {
         "Connect to an MCP server and return its `tools/list` descriptor array"
     }
     fn schema(&self) -> &'static Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            json!({
-                "type": "object",
-                "required": ["server", "command"],
-                "properties": {
-                    "server": { "type": "string", "description": "Capability-gated server name." },
-                    "command": { "type": "string" },
-                    "args": { "type": "array", "items": { "type": "string" } },
-                    "env": { "type": "object", "additionalProperties": { "type": "string" } },
-                    "timeout_ms": { "type": "integer", "minimum": 1 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<DiscoverIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

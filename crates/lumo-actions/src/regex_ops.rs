@@ -5,6 +5,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -15,7 +16,8 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(CapturesAction);
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PatTextIn {
     pattern: String,
     text: String,
@@ -26,17 +28,7 @@ fn compile(pattern: &str) -> Result<Regex, StepError> {
 }
 
 fn pat_text_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["pattern", "text"],
-            "properties": {
-                "pattern": { "type": "string" },
-                "text":    { "type": "string" }
-            },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PatTextIn>);
     &S
 }
 
@@ -85,7 +77,8 @@ impl Action for FindAllAction {
 }
 
 pub struct ReplaceAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReplaceIn {
     pattern: String,
     text: String,
@@ -102,19 +95,7 @@ impl Action for ReplaceAction {
         "Replace pattern with `replacement` (supports $1, $2 capture refs)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["pattern", "text", "replacement"],
-                "properties": {
-                    "pattern":     { "type": "string" },
-                    "text":        { "type": "string" },
-                    "replacement": { "type": "string" },
-                    "once":        { "type": "boolean", "default": false }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ReplaceIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

@@ -6,6 +6,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, U
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -41,7 +42,8 @@ fn parse_any(value: &str) -> Result<DateTime<Utc>, StepError> {
 }
 
 pub struct NowAction;
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct NowIn {
     #[serde(default)]
     format: Option<String>,
@@ -55,13 +57,7 @@ impl Action for NowAction {
         "Current UTC timestamp (RFC3339 or custom strftime)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "format": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<NowIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -81,7 +77,8 @@ impl Action for NowAction {
 }
 
 pub struct ParseAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ParseIn {
     value: String,
 }
@@ -94,14 +91,7 @@ impl Action for ParseAction {
         "Normalize a date string into RFC3339 UTC"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": { "value": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ParseIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -113,7 +103,8 @@ impl Action for ParseAction {
 }
 
 pub struct FormatAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct FmtIn {
     value: String,
     format: String,
@@ -127,17 +118,7 @@ impl Action for FormatAction {
         "Format an RFC3339 timestamp via strftime"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value", "format"],
-                "properties": {
-                    "value":  { "type": "string" },
-                    "format": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<FmtIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -151,7 +132,8 @@ impl Action for FormatAction {
 }
 
 pub struct AddAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AddIn {
     value: String,
     #[serde(default)]
@@ -172,20 +154,7 @@ impl Action for AddAction {
         "Offset a timestamp by days/hours/minutes/seconds (may be negative)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": {
-                    "value":   { "type": "string" },
-                    "days":    { "type": "integer" },
-                    "hours":   { "type": "integer" },
-                    "minutes": { "type": "integer" },
-                    "seconds": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AddIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -208,15 +177,26 @@ impl Action for AddAction {
 }
 
 pub struct DiffAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DiffIn {
     a: String,
     b: String,
-    #[serde(default = "default_unit")]
-    unit: String,
+    #[serde(default)]
+    unit: DiffUnit,
 }
-fn default_unit() -> String {
-    "seconds".into()
+
+/// Unit for `date.diff`'s result. Modeling it as an enum (not a free `String`)
+/// keeps the `enum` constraint in the derived schema — the validator rejects an
+/// unknown unit, which a plain `String` field could not express.
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum DiffUnit {
+    Days,
+    Hours,
+    Minutes,
+    #[default]
+    Seconds,
 }
 
 #[async_trait]
@@ -228,18 +208,7 @@ impl Action for DiffAction {
         "Return a - b in the chosen unit (days/hours/minutes/seconds)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["a", "b"],
-                "properties": {
-                    "a":    { "type": "string" },
-                    "b":    { "type": "string" },
-                    "unit": { "type": "string", "enum": ["days","hours","minutes","seconds"], "default": "seconds" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DiffIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -248,11 +217,11 @@ impl Action for DiffAction {
         let da = parse_any(&a)?;
         let db = parse_any(&b)?;
         let secs = (da - db).num_seconds();
-        let out = match unit.as_str() {
-            "days" => secs as f64 / 86_400.0,
-            "hours" => secs as f64 / 3_600.0,
-            "minutes" => secs as f64 / 60.0,
-            _ => secs as f64,
+        let out = match unit {
+            DiffUnit::Days => secs as f64 / 86_400.0,
+            DiffUnit::Hours => secs as f64 / 3_600.0,
+            DiffUnit::Minutes => secs as f64 / 60.0,
+            DiffUnit::Seconds => secs as f64,
         };
         Ok(ActionResult::from(
             serde_json::Number::from_f64(out)
@@ -263,7 +232,8 @@ impl Action for DiffAction {
 }
 
 pub struct WeekdayAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WIn {
     value: String,
 }
@@ -276,14 +246,7 @@ impl Action for WeekdayAction {
         "Return weekday (1=Mon..7=Sun) for the given date"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": { "value": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<WIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

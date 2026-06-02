@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -73,7 +74,8 @@ impl Action for LogAction {
 // ─── control.set_var ────────────────────────────────────────────────────────
 
 pub struct SetVarAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetVarIn {
     name: String,
     value: Value,
@@ -88,17 +90,7 @@ impl Action for SetVarAction {
         "Set a flow variable"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["name", "value"],
-                "properties": {
-                    "name": { "type": "string" },
-                    "value": {}
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SetVarIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -112,7 +104,8 @@ impl Action for SetVarAction {
 // ─── control.sleep ──────────────────────────────────────────────────────────
 
 pub struct SleepAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SleepIn {
     ms: u64,
 }
@@ -126,14 +119,7 @@ impl Action for SleepAction {
         "Sleep for N milliseconds"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["ms"],
-                "properties": { "ms": { "type": "integer" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SleepIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -149,7 +135,8 @@ impl Action for SleepAction {
 //       Children are placed in `do:` / `else:` blocks on the *Step* level.
 
 pub struct IfAction;
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct IfIn {
     #[serde(default)]
     cond: Value,
@@ -164,13 +151,7 @@ impl Action for IfAction {
         "Conditional branch (use do: / else:)"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "cond": {} },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<IfIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -186,7 +167,8 @@ impl Action for IfAction {
 // will wire the loop semantics through StepCtx::run_block.
 
 pub struct ForAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct ForIn {
     #[serde(default)]
@@ -213,19 +195,7 @@ impl Action for ForAction {
         "Numeric loop (use do:)"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["to"],
-                "properties": {
-                    "from": { "type": "integer" },
-                    "to": { "type": "integer" },
-                    "step": { "type": "integer" },
-                    "bind": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ForIn>);
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -340,7 +310,8 @@ impl Action for ParallelAction {
 // ─── control.fail ───────────────────────────────────────────────────────────
 
 pub struct FailAction;
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct FailIn {
     #[serde(default)]
     message: String,
@@ -355,13 +326,7 @@ impl Action for FailAction {
         "Explicitly fail the current flow with a message"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "message": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<FailIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

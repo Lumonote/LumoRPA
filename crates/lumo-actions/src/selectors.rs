@@ -21,6 +21,7 @@
 
 use chromiumoxide::{Element, Page};
 use lumo_core::error::StepError;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -29,8 +30,8 @@ use crate::selector_stats::SelectorStats;
 
 /// All strategies the recorder may emit. Every field is optional; in the
 /// degenerate case the user supplies just one of them.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MultiSelector {
     #[serde(default)]
     pub id: Option<String>,

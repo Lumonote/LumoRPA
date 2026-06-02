@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -29,18 +30,12 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 fn text_only_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["text"],
-            "properties": { "text": { "type": "string" } },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<TextIn>);
     &S
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TextIn {
     text: String,
 }
@@ -122,7 +117,8 @@ impl Action for LengthAction {
 }
 
 pub struct SplitAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SplitIn {
     text: String,
     #[serde(default = "default_sep")]
@@ -143,18 +139,7 @@ impl Action for SplitAction {
         "Split text by separator into an array"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text"],
-                "properties": {
-                    "text":  { "type": "string" },
-                    "sep":   { "type": "string", "default": "," },
-                    "limit": { "type": "integer", "minimum": 1 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SplitIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -174,7 +159,8 @@ impl Action for SplitAction {
 }
 
 pub struct JoinAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct JoinIn {
     items: Vec<Value>,
     #[serde(default = "default_sep")]
@@ -189,17 +175,7 @@ impl Action for JoinAction {
         "Join array elements into a single string"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "sep":   { "type": "string", "default": "," }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<JoinIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -217,7 +193,8 @@ impl Action for JoinAction {
 }
 
 pub struct ReplaceAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReplaceIn {
     text: String,
     from: String,
@@ -234,19 +211,7 @@ impl Action for ReplaceAction {
         "Replace `from` with `to` (literal, not regex)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "from", "to"],
-                "properties": {
-                    "text": { "type": "string" },
-                    "from": { "type": "string" },
-                    "to":   { "type": "string" },
-                    "once": { "type": "boolean", "default": false }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ReplaceIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -267,7 +232,8 @@ impl Action for ReplaceAction {
 }
 
 pub struct ContainsAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ContainsIn {
     text: String,
     needle: String,
@@ -287,18 +253,7 @@ impl Action for ContainsAction {
         "Test whether `text` contains `needle`"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "needle"],
-                "properties": {
-                    "text":   { "type": "string" },
-                    "needle": { "type": "string" },
-                    "case_sensitive": { "type": "boolean", "default": true }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ContainsIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -318,7 +273,8 @@ impl Action for ContainsAction {
 }
 
 pub struct StartsWithAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct StartsIn {
     text: String,
     prefix: String,
@@ -332,17 +288,7 @@ impl Action for StartsWithAction {
         "Test whether `text` starts with prefix"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "prefix"],
-                "properties": {
-                    "text":   { "type": "string" },
-                    "prefix": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<StartsIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -353,7 +299,8 @@ impl Action for StartsWithAction {
 }
 
 pub struct EndsWithAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct EndsIn {
     text: String,
     suffix: String,
@@ -367,17 +314,7 @@ impl Action for EndsWithAction {
         "Test whether `text` ends with suffix"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "suffix"],
-                "properties": {
-                    "text":   { "type": "string" },
-                    "suffix": { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<EndsIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -388,7 +325,8 @@ impl Action for EndsWithAction {
 }
 
 pub struct SubstringAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SubIn {
     text: String,
     start: i64,
@@ -404,18 +342,7 @@ impl Action for SubstringAction {
         "Character slice; negatives count from end"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "start"],
-                "properties": {
-                    "text":  { "type": "string" },
-                    "start": { "type": "integer" },
-                    "end":   { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SubIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -440,7 +367,8 @@ impl Action for SubstringAction {
 }
 
 pub struct RepeatAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RepIn {
     text: String,
     times: u32,
@@ -454,17 +382,7 @@ impl Action for RepeatAction {
         "Repeat `text` n times"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text", "times"],
-                "properties": {
-                    "text":  { "type": "string" },
-                    "times": { "type": "integer", "minimum": 0 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RepIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -476,7 +394,8 @@ impl Action for RepeatAction {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PadIn {
     text: String,
     width: usize,
@@ -491,18 +410,7 @@ pub struct PadLeftAction;
 pub struct PadRightAction;
 
 fn pad_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["text", "width"],
-            "properties": {
-                "text":  { "type": "string" },
-                "width": { "type": "integer", "minimum": 0 },
-                "pad":   { "type": "string", "default": " " }
-            },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PadIn>);
     &S
 }
 
@@ -565,7 +473,8 @@ impl Action for PadRightAction {
 }
 
 pub struct FormatAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct FmtIn {
     template: String,
     #[serde(default)]
@@ -580,17 +489,7 @@ impl Action for FormatAction {
         "Replace {key} placeholders in template"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["template"],
-                "properties": {
-                    "template": { "type": "string" },
-                    "values":   { "type": "object" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<FmtIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

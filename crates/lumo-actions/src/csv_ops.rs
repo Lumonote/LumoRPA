@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -168,7 +169,8 @@ fn stringify_scalar(v: &Value) -> String {
 }
 
 pub struct ParseAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ParseIn {
     text: String,
     #[serde(default = "default_sep")]
@@ -189,18 +191,7 @@ impl Action for ParseAction {
         "Parse CSV text; with `headers: true` returns array of objects"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text"],
-                "properties": {
-                    "text":    { "type": "string" },
-                    "sep":     { "type": "string", "default": "," },
-                    "headers": { "type": "boolean", "default": false }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ParseIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -212,7 +203,8 @@ impl Action for ParseAction {
 }
 
 pub struct StringifyAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct StringifyIn {
     value: Value,
     #[serde(default = "default_sep")]
@@ -229,18 +221,7 @@ impl Action for StringifyAction {
         "Render array-of-array or array-of-object as CSV text"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": {
-                    "value":   {},
-                    "sep":     { "type": "string", "default": "," },
-                    "headers": { "type": "array", "items": { "type": "string" } }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<StringifyIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -256,7 +237,8 @@ impl Action for StringifyAction {
 }
 
 pub struct ReadAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReadIn {
     path: PathBuf,
     #[serde(default = "default_sep")]
@@ -273,18 +255,7 @@ impl Action for ReadAction {
         "Read a CSV file and parse to rows / objects"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path":    { "type": "string" },
-                    "sep":     { "type": "string", "default": "," },
-                    "headers": { "type": "boolean", "default": false }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ReadIn>);
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -302,7 +273,8 @@ impl Action for ReadAction {
 }
 
 pub struct WriteAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WriteIn {
     path: PathBuf,
     value: Value,
@@ -320,19 +292,7 @@ impl Action for WriteAction {
         "Write `value` (array of arrays/objects) to a CSV file"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["path", "value"],
-                "properties": {
-                    "path":    { "type": "string" },
-                    "value":   {},
-                    "sep":     { "type": "string", "default": "," },
-                    "headers": { "type": "array", "items": { "type": "string" } }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<WriteIn>);
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

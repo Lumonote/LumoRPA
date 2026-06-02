@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -13,7 +14,8 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 pub struct JsonParseAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ParseIn {
     text: String,
 }
@@ -27,14 +29,7 @@ impl Action for JsonParseAction {
         "Parse a JSON string into a value"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["text"],
-                "properties": { "text": { "type": "string" } },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ParseIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -47,7 +42,8 @@ impl Action for JsonParseAction {
 }
 
 pub struct JsonFormatAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct FmtIn {
     value: Value,
     #[serde(default)]
@@ -63,17 +59,7 @@ impl Action for JsonFormatAction {
         "Serialize a value to JSON string"
     }
     fn schema(&self) -> &'static serde_json::Value {
-        static SCHEMA: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["value"],
-                "properties": {
-                    "value": {},
-                    "pretty": { "type": "boolean" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<FmtIn>);
         &SCHEMA
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

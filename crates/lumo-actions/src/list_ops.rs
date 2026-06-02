@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -22,18 +23,12 @@ pub fn register(r: &mut ActionRegistry) {
 }
 
 fn list_schema() -> &'static Value {
-    static S: Lazy<Value> = Lazy::new(|| {
-        serde_json::json!({
-            "type": "object",
-            "required": ["items"],
-            "properties": { "items": { "type": "array" } },
-            "additionalProperties": false
-        })
-    });
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ItemsIn>);
     &S
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ItemsIn {
     items: Vec<Value>,
 }
@@ -58,7 +53,8 @@ impl Action for LengthAction {
 }
 
 pub struct AppendAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AppendIn {
     items: Vec<Value>,
     value: Value,
@@ -72,17 +68,7 @@ impl Action for AppendAction {
         "Return `items` with `value` appended"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items", "value"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "value": {}
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AppendIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -94,7 +80,8 @@ impl Action for AppendAction {
 }
 
 pub struct SortAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SortIn {
     items: Vec<Value>,
     #[serde(default)]
@@ -111,18 +98,7 @@ impl Action for SortAction {
         "Sort items; supports `by: <key>` for arrays of objects"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "desc":  { "type": "boolean", "default": false },
-                    "by":    { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SortIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -189,7 +165,8 @@ impl Action for UniqueAction {
 }
 
 pub struct RangeAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RangeIn {
     end: i64,
     #[serde(default)]
@@ -210,18 +187,7 @@ impl Action for RangeAction {
         "Generate [start, end) array with step"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["end"],
-                "properties": {
-                    "start": { "type": "integer", "default": 0 },
-                    "end":   { "type": "integer" },
-                    "step":  { "type": "integer", "default": 1 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RangeIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -246,7 +212,8 @@ impl Action for RangeAction {
 }
 
 pub struct ContainsAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ContainsIn {
     items: Vec<Value>,
     value: Value,
@@ -260,17 +227,7 @@ impl Action for ContainsAction {
         "Whether `items` contains `value` (deep eq via JSON)"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items", "value"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "value": {}
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ContainsIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -283,7 +240,8 @@ impl Action for ContainsAction {
 }
 
 pub struct GetAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct GetIn {
     items: Vec<Value>,
     index: i64,
@@ -297,17 +255,7 @@ impl Action for GetAction {
         "Element at index (negatives count from end); null if out of range"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items", "index"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "index": { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -325,7 +273,8 @@ impl Action for GetAction {
 }
 
 pub struct SliceAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SliceIn {
     items: Vec<Value>,
     start: i64,
@@ -341,18 +290,7 @@ impl Action for SliceAction {
         "Slice items[start:end]; negatives count from end"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items", "start"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "start": { "type": "integer" },
-                    "end":   { "type": "integer" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SliceIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -395,7 +333,8 @@ impl Action for ReverseAction {
 }
 
 pub struct PluckAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PluckIn {
     items: Vec<Value>,
     key: String,
@@ -409,17 +348,7 @@ impl Action for PluckAction {
         "Extract `key` field from every object element"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["items", "key"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "key":   { "type": "string" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PluckIn>);
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {

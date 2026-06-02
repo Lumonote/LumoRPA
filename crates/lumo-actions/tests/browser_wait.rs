@@ -14,13 +14,16 @@ async fn wait_requires_selector_or_text() {
 
 #[tokio::test]
 async fn wait_rejects_unknown_condition() {
+    // `condition` is a `WaitCondition` enum: an out-of-set value is rejected at
+    // deserialize (and the derived schema's `enum` does the same in the VM path).
+    // Either way the offending token surfaces in the error.
     let err = run(
         "browser.wait",
         json!({"selector": "#x", "condition": "bogus"}),
     )
     .await
     .unwrap_err();
-    assert!(err.contains("condition"), "got: {err}");
+    assert!(err.contains("bogus"), "got: {err}");
 }
 
 #[tokio::test]

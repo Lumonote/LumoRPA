@@ -9,6 +9,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
 use rusqlite::{params_from_iter, types::ValueRef, Connection, OpenFlags};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -58,7 +59,8 @@ fn row_to_value(row: &rusqlite::Row<'_>, columns: &[String]) -> rusqlite::Result
 }
 
 pub struct SqliteQueryAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct QueryIn {
     db: PathBuf,
     sql: String,
@@ -80,19 +82,7 @@ impl Action for SqliteQueryAction {
         "Run a SELECT against a SQLite file; rows returned as JSON"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["db", "sql"],
-                "properties": {
-                    "db":    { "type": "string" },
-                    "sql":   { "type": "string" },
-                    "args":  { "type": "array" },
-                    "limit": { "type": "integer", "minimum": 1, "default": 1000 }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<QueryIn>);
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
@@ -145,7 +135,8 @@ impl Action for SqliteQueryAction {
 }
 
 pub struct SqliteExecAction;
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ExecIn {
     db: PathBuf,
     sql: String,
@@ -161,18 +152,7 @@ impl Action for SqliteExecAction {
         "Run an INSERT/UPDATE/DELETE/DDL against a SQLite file"
     }
     fn schema(&self) -> &'static Value {
-        static S: Lazy<Value> = Lazy::new(|| {
-            serde_json::json!({
-                "type": "object",
-                "required": ["db", "sql"],
-                "properties": {
-                    "db":   { "type": "string" },
-                    "sql":  { "type": "string" },
-                    "args": { "type": "array" }
-                },
-                "additionalProperties": false
-            })
-        });
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ExecIn>);
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
