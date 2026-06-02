@@ -3306,6 +3306,7 @@ dependencies = [
  "bytes",
  "dirs 5.0.1",
  "lumo-core",
+ "lumo-dsl",
  "lumo-storage",
  "once_cell",
  "parking_lot",

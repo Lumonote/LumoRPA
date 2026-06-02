@@ -26,6 +26,7 @@ import {
 import { refreshSettings } from "./settings.js";
 import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
+import { openMagicPrompt } from "./magic-prompt.js";
 
 function bindEvents() {
   // Top tabs
@@ -87,6 +88,7 @@ function bindEvents() {
   $("flowPath").addEventListener("keydown", (e) => { if (e.key === "Enter") loadFlow().catch(reportError); });
   $("refreshFlowsBtn").addEventListener("click", () => refreshFlows().catch(reportError));
   $("newFlowBtn").addEventListener("click", () => createNewFlow().catch(reportError));
+  $("magicPromptBtn").addEventListener("click", () => openMagicPrompt());
   $("saveFlowAsBtn").addEventListener("click", () => saveCurrentFlowAs().catch(reportError));
 
   // Action library: search + collapse + drag

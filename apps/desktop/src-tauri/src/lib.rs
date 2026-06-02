@@ -981,6 +981,50 @@ async fn test_provider(
     }
 }
 
+/// F-18 Magic Prompt: generate a lumo/v1 flow YAML from a natural-language
+/// prompt via the configured LLM (shared `lumo_ai::copilot` core — same as
+/// `lumo copilot`). `model` is an optional `<provider>/<model>` override; when
+/// absent the active provider's default model is used. Returns validated YAML.
+#[tauri::command]
+async fn generate_flow(
+    app: AppHandle,
+    prompt: String,
+    model: Option<String>,
+) -> Result<String, String> {
+    if prompt.trim().is_empty() {
+        return Err("prompt is empty".into());
+    }
+    let home = app_home(&app)?;
+    let cfg = ProvidersConfig::load(providers_path(&home)).map_err(|e| e.to_string())?;
+    let router = AiRouter::from_config(&cfg);
+    if router.provider_names().is_empty() {
+        return Err("no LLM provider configured — add one in Settings → Providers first".into());
+    }
+    if !llm_network_enabled() {
+        return Err(
+            "LLM network is disabled. Set LUMO_ALLOW_LLM_NETWORK=1 before launching the app.".into(),
+        );
+    }
+    let model = match model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            let active = cfg
+                .active
+                .clone()
+                .ok_or_else(|| "no active provider — set one in Settings → Providers".to_string())?;
+            let profile = cfg
+                .get(&active)
+                .ok_or_else(|| format!("active provider `{active}` not found"))?;
+            let dm = profile
+                .default_model
+                .clone()
+                .ok_or_else(|| format!("provider `{active}` has no default model"))?;
+            format!("{active}/{dm}")
+        }
+    };
+    lumo_ai::copilot::generate_flow(&router, &model, &prompt, 2).await
+}
+
 #[tauri::command]
 fn list_skills(app: AppHandle) -> Result<Vec<SkillDto>, String> {
     let home = app_home(&app)?;
@@ -1157,6 +1201,7 @@ pub fn run() {
             use_provider,
             init_providers,
             test_provider,
+            generate_flow,
             list_skills,
             apply_window_appearance,
             set_window_alpha,
