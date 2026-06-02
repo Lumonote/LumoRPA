@@ -74,6 +74,9 @@ const DERIVED_CLOSED: &[&str] = &[
     // deny_unknown_fields so the nested `selectors:` object stays closed too.
     "browser.launch", "browser.close", "browser.open", "browser.click",
     "browser.type", "browser.extract", "browser.wait",
+    // browser F-10 completions (scroll's `to` is a derived enum; screenshot gates fs-write).
+    "browser.eval", "browser.screenshot", "browser.scroll", "browser.hover",
+    "browser.select", "browser.cookies", "browser.set_cookie",
 ];
 
 fn registry() -> ActionRegistry {

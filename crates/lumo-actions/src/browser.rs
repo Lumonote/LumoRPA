@@ -4,6 +4,7 @@
 //! (CSS / XPath / A11y / Vision) lands in M2.
 
 use async_trait::async_trait;
+use chromiumoxide::cdp::browser_protocol::network::CookieParam;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use lumo_core::error::StepError;
@@ -14,6 +15,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -29,6 +31,14 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(TypeAction);
     r.register(ExtractAction);
     r.register(WaitAction);
+    // F-10 browser action completions.
+    r.register(EvalAction);
+    r.register(ScreenshotAction);
+    r.register(ScrollAction);
+    r.register(HoverAction);
+    r.register(SelectAction);
+    r.register(CookiesAction);
+    r.register(SetCookieAction);
     // P1-2: reclaim any browser process left open by a run that failed (or
     // forgot `browser.close`) once the VM finishes that run.
     r.register_teardown(Arc::new(BrowserTeardown));
@@ -813,5 +823,481 @@ impl Action for WaitAction {
             }
             tokio::time::sleep(poll).await;
         }
+    }
+}
+
+// ─── browser.eval (F-10) ──────────────────────────────────────────────────────
+
+pub struct EvalAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EvalIn {
+    /// JavaScript evaluated in the page; its result is returned as JSON. Runs in
+    /// the same page context as `browser.extract` — arbitrary script, no new
+    /// capability (the flow already drives this browser).
+    expr: String,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for EvalAction {
+    fn id(&self) -> &'static str {
+        "browser.eval"
+    }
+    fn summary(&self) -> &'static str {
+        "Evaluate a JavaScript expression in the current page, returning its JSON result"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<EvalIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let EvalIn { expr, timeout_ms } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.eval input invalid: {e}")))?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let eval =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(expr)).await;
+        let result = match eval {
+            Err(_) => return Err(StepError::msg("browser.eval: timed out")),
+            Ok(Err(e)) => return Err(StepError::msg(format!("browser.eval: {e}"))),
+            Ok(Ok(v)) => v.into_value().unwrap_or(Value::Null),
+        };
+        Ok(ActionResult::from(result))
+    }
+}
+
+// ─── browser.screenshot (F-10) ─────────────────────────────────────────────────
+
+pub struct ScreenshotAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScreenshotIn {
+    /// Destination PNG path (gated by the fs-write capability).
+    path: String,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for ScreenshotAction {
+    fn id(&self) -> &'static str {
+        "browser.screenshot"
+    }
+    fn summary(&self) -> &'static str {
+        "Capture a full-page PNG screenshot of the current page to a file"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ScreenshotIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let ScreenshotIn { path, timeout_ms } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.screenshot input invalid: {e}")))?;
+        // Gate the write BEFORE touching the browser, so an ungranted dest fails
+        // fast (and without a live Chrome) — same order as `http.download`.
+        let dest = PathBuf::from(&path);
+        ctx.ensure_fs_write(&dest)?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let png = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            crate::vision::screenshot_png(&page),
+        )
+        .await
+        .map_err(|_| StepError::msg("browser.screenshot: timed out"))??;
+        if let Some(parent) = dest.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(&dest, &png).await.map_err(|e| {
+            StepError::msg(format!("browser.screenshot write {}: {e}", dest.display()))
+        })?;
+        Ok(ActionResult::from(serde_json::json!({
+            "path": path,
+            "bytes": png.len(),
+        })))
+    }
+}
+
+// ─── browser.scroll (F-10) ─────────────────────────────────────────────────────
+
+/// Named window-scroll target for `browser.scroll` when no selector is given.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScrollTo {
+    Top,
+    Bottom,
+}
+
+pub struct ScrollAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScrollIn {
+    /// Scroll this element into view. When absent, the window is scrolled.
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    /// Window target when no selector: "top" or "bottom" (overrides x/y).
+    #[serde(default)]
+    to: Option<ScrollTo>,
+    /// Window scroll delta in pixels when no selector and no `to`.
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for ScrollAction {
+    fn id(&self) -> &'static str {
+        "browser.scroll"
+    }
+    fn summary(&self) -> &'static str {
+        "Scroll an element into view, or scroll the window to top/bottom or by a delta"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ScrollIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let ScrollIn {
+            selector,
+            selectors,
+            to,
+            x,
+            y,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.scroll input invalid: {e}")))?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+
+        let has_selector = selector.as_ref().is_some_and(|s| !s.is_empty())
+            || selectors.as_ref().is_some_and(|s| !s.is_empty());
+        if has_selector {
+            let spec = build_selector(selector, selectors)?;
+            let (element, strategy) = resolve_element(&page, &spec, timeout_ms).await?;
+            let hint = spec.first_hint();
+            element
+                .scroll_into_view()
+                .await
+                .map_err(|e| StepError::msg(format!("browser.scroll `{hint}`: {e}")))?;
+            clear_marker(&page).await;
+            return Ok(ActionResult::from(serde_json::json!({
+                "scrolled_to": hint,
+                "resolved_by": strategy,
+            })));
+        }
+
+        let (js, label) = match to {
+            Some(ScrollTo::Top) => ("window.scrollTo(0, 0)".to_string(), "top"),
+            Some(ScrollTo::Bottom) => (
+                "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+                "bottom",
+            ),
+            None => (format!("window.scrollBy({x}, {y})"), "delta"),
+        };
+        page.evaluate(js)
+            .await
+            .map_err(|e| StepError::msg(format!("browser.scroll: {e}")))?;
+        Ok(ActionResult::from(
+            serde_json::json!({ "scrolled": label, "x": x, "y": y }),
+        ))
+    }
+}
+
+// ─── browser.hover (F-10) ──────────────────────────────────────────────────────
+
+pub struct HoverAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct HoverIn {
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    /// Natural-language target for the vision fallback (S-11/S-12), like `browser.click`.
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for HoverAction {
+    fn id(&self) -> &'static str {
+        "browser.hover"
+    }
+    fn summary(&self) -> &'static str {
+        "Hover the pointer over the first element matching a selector spec"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<HoverIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let HoverIn {
+            selector,
+            selectors,
+            prompt,
+            model,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.hover input invalid: {e}")))?;
+        let spec = build_selector(selector, selectors)?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let hint = spec.first_hint();
+        let (element, strategy) = resolve_with_vision_fallback(
+            ctx,
+            &page,
+            &spec,
+            prompt.as_deref(),
+            model.as_deref(),
+            timeout_ms,
+        )
+        .await?;
+        element
+            .hover()
+            .await
+            .map_err(|e| StepError::msg(format!("hover `{hint}`: {e}")))?;
+        clear_marker(&page).await;
+        Ok(ActionResult::from(serde_json::json!({
+            "resolved_by": strategy,
+            "matched": hint,
+        })))
+    }
+}
+
+// ─── browser.select (F-10) ─────────────────────────────────────────────────────
+
+pub struct SelectAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SelectIn {
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    selectors: Option<MultiSelector>,
+    /// Pick the option whose `value` equals this.
+    #[serde(default)]
+    value: Option<String>,
+    /// Pick the option whose visible text equals this (trimmed).
+    #[serde(default)]
+    label: Option<String>,
+    /// Pick the option at this zero-based index.
+    #[serde(default)]
+    index: Option<i64>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for SelectAction {
+    fn id(&self) -> &'static str {
+        "browser.select"
+    }
+    fn summary(&self) -> &'static str {
+        "Choose an option in a <select> by value, visible label, or index"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SelectIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let SelectIn {
+            selector,
+            selectors,
+            value,
+            label,
+            index,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.select input invalid: {e}")))?;
+        if value.is_none() && label.is_none() && index.is_none() {
+            return Err(StepError::msg(
+                "browser.select requires one of `value`, `label`, or `index`",
+            ));
+        }
+        let spec = build_selector(selector, selectors)?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let hint = spec.first_hint();
+        // resolve_element marks the winner with data-lumo-resolved="1"; the JS
+        // below drives that marked <select>, then we clear the marker.
+        let (_element, strategy) = resolve_element(&page, &spec, timeout_ms).await?;
+
+        let value_json = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+        let label_json = serde_json::to_string(&label).unwrap_or_else(|_| "null".into());
+        let index_json = serde_json::to_string(&index).unwrap_or_else(|_| "null".into());
+        let js = format!(
+            r#"
+(() => {{
+  const el = document.querySelector('[data-lumo-resolved="1"]');
+  if (!el || el.tagName !== 'SELECT') return {{ ok: false, error: 'not a <select>' }};
+  const wantValue = {value_json};
+  const wantLabel = {label_json};
+  const wantIndex = {index_json};
+  const opts = Array.from(el.options);
+  let chosen = -1;
+  if (wantIndex !== null) {{
+    if (wantIndex >= 0 && wantIndex < opts.length) chosen = wantIndex;
+  }} else if (wantValue !== null) {{
+    chosen = opts.findIndex((o) => o.value === wantValue);
+  }} else if (wantLabel !== null) {{
+    const want = String(wantLabel).trim();
+    chosen = opts.findIndex((o) => (o.textContent || '').trim() === want);
+  }}
+  if (chosen < 0) return {{ ok: false, error: 'no matching option' }};
+  el.selectedIndex = chosen;
+  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{ ok: true, value: el.value, label: (opts[chosen].textContent || '').trim(), index: chosen }};
+}})()
+"#
+        );
+        let eval = tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(js)).await;
+        let result: Value = match eval {
+            Err(_) => {
+                clear_marker(&page).await;
+                return Err(StepError::msg(format!("browser.select `{hint}`: timed out")));
+            }
+            Ok(Err(e)) => {
+                clear_marker(&page).await;
+                return Err(StepError::msg(format!("browser.select `{hint}`: {e}")));
+            }
+            Ok(Ok(v)) => v.into_value().unwrap_or(Value::Null),
+        };
+        clear_marker(&page).await;
+        if result.get("ok").and_then(Value::as_bool) != Some(true) {
+            let err = result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("selection failed");
+            return Err(StepError::msg(format!("browser.select `{hint}`: {err}")));
+        }
+        Ok(ActionResult::from(serde_json::json!({
+            "resolved_by": strategy,
+            "matched": hint,
+            "selected": result,
+        })))
+    }
+}
+
+// ─── browser.cookies (F-10) ────────────────────────────────────────────────────
+
+pub struct CookiesAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CookiesIn {
+    /// If set, return only the cookie(s) with this exact name.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[async_trait]
+impl Action for CookiesAction {
+    fn id(&self) -> &'static str {
+        "browser.cookies"
+    }
+    fn summary(&self) -> &'static str {
+        "Read the current page's cookies (optionally filtered by name)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<CookiesIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let CookiesIn { name } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.cookies input invalid: {e}")))?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+        let cookies = page
+            .get_cookies()
+            .await
+            .map_err(|e| StepError::msg(format!("browser.cookies: {e}")))?;
+        let out: Vec<Value> = cookies
+            .iter()
+            .filter(|c| name.as_deref().is_none_or(|n| c.name.as_str() == n))
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect();
+        Ok(ActionResult::from(Value::Array(out)))
+    }
+}
+
+// ─── browser.set_cookie (F-10) ─────────────────────────────────────────────────
+
+pub struct SetCookieAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetCookieIn {
+    name: String,
+    value: String,
+    /// Target URL (CDP derives domain/path from it). Defaults to the current page
+    /// URL when neither `url` nor `domain` is given.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    secure: Option<bool>,
+    #[serde(default)]
+    http_only: Option<bool>,
+}
+
+#[async_trait]
+impl Action for SetCookieAction {
+    fn id(&self) -> &'static str {
+        "browser.set_cookie"
+    }
+    fn summary(&self) -> &'static str {
+        "Set a cookie on the current browser session"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SetCookieIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let SetCookieIn {
+            name,
+            value,
+            url,
+            domain,
+            path,
+            secure,
+            http_only,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.set_cookie input invalid: {e}")))?;
+        let s = session_for_run(ctx.run_id())?;
+        let page = current_page(&s)?;
+
+        // CDP scopes a cookie by url or domain; fall back to the current page URL
+        // when the caller supplies neither.
+        let url = match (url, &domain) {
+            (Some(u), _) => Some(u),
+            (None, Some(_)) => None,
+            (None, None) => page.url().await.ok().flatten(),
+        };
+
+        let mut param = CookieParam::new(name.clone(), value);
+        param.url = url;
+        param.domain = domain;
+        param.path = path;
+        param.secure = secure;
+        param.http_only = http_only;
+        page.set_cookie(param)
+            .await
+            .map_err(|e| StepError::msg(format!("browser.set_cookie: {e}")))?;
+        Ok(ActionResult::from(
+            serde_json::json!({ "ok": true, "name": name }),
+        ))
     }
 }
