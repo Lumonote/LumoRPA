@@ -55,6 +55,10 @@ pub struct RunReport {
     pub steps_caught: usize,
     pub duration_ms: u128,
     pub outputs: Option<Value>,
+    /// F-20: when the run paused at a breakpoint / single-step, the path of the
+    /// step it paused *before* (which did not execute). `None` for a run that
+    /// completed, failed, or was cancelled without hitting a breakpoint.
+    pub paused_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -83,6 +87,11 @@ pub struct FlowVm {
     /// completed (matching path + input hash) are replayed from `step_runs`
     /// instead of re-executed. Requires a repo.
     resume_from: Option<String>,
+    /// F-20: step paths to pause *before* (breakpoints). Empty ⇒ no breakpoints.
+    breakpoints: std::collections::HashSet<String>,
+    /// F-20: single-step mode — pause before every executing step. Combined with
+    /// `resume_from`, "continue/step" a paused run to the next pause point.
+    step_mode: bool,
 }
 
 impl FlowVm {
@@ -97,6 +106,8 @@ impl FlowVm {
             step_timeout: None,
             vault_identity: None,
             resume_from: None,
+            breakpoints: std::collections::HashSet::new(),
+            step_mode: false,
         }
     }
 
@@ -149,6 +160,21 @@ impl FlowVm {
         self
     }
 
+    /// F-20: pause the run *before* each step whose path is in `paths`
+    /// (breakpoint debugging). Combine with [`Self::with_resume_from`] to
+    /// continue a paused run to the next breakpoint.
+    pub fn with_breakpoints(mut self, paths: std::collections::HashSet<String>) -> Self {
+        self.breakpoints = paths;
+        self
+    }
+
+    /// F-20: single-step mode — pause before every executing step. On a resumed
+    /// run the step being stepped off executes first, then the next one pauses.
+    pub fn with_step_mode(mut self, on: bool) -> Self {
+        self.step_mode = on;
+        self
+    }
+
     /// F-13: build the replay memo from a prior run's `step_runs`. `None` when
     /// not resuming, no repo is configured, or the prior run has no reusable
     /// (terminal-success) steps — any of which simply runs the flow fresh.
@@ -190,6 +216,21 @@ impl FlowVm {
 
     pub fn registry(&self) -> &ActionRegistry {
         &self.registry
+    }
+
+    /// F-20: build the debug controller for this run, or `None` when no
+    /// breakpoints are set and single-step is off (zero overhead). Armed for a
+    /// fresh run (a breakpoint may fire on the first step); disarmed for a
+    /// resume so the step we paused on last time executes before the next pause.
+    fn build_debug_controller(&self) -> Option<crate::ctx::DebugController> {
+        if !self.step_mode && self.breakpoints.is_empty() {
+            return None;
+        }
+        Some(crate::ctx::DebugController::new(
+            self.breakpoints.clone(),
+            self.step_mode,
+            self.resume_from.is_none(),
+        ))
     }
 
     pub async fn run(&self, flow: &Flow, opts: RunOptions) -> Result<RunReport, ExecError> {
@@ -242,7 +283,8 @@ impl FlowVm {
         .with_cancel(self.cancel.clone())
         .with_step_timeout(self.step_timeout)
         .with_vault(self.vault_identity.clone())
-        .with_resume_memo(self.load_resume_memo());
+        .with_resume_memo(self.load_resume_memo())
+        .with_debug(self.build_debug_controller());
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
@@ -258,6 +300,11 @@ impl FlowVm {
 
         let ok = result.is_ok();
         let cancelled = matches!(result, Err(ExecError::Cancelled));
+        // F-20: a breakpoint / single-step pause. The authoritative "where" is
+        // the ctx's debug controller (set when the breakpoint fired), not the
+        // error variant — `control.try`'s no-catch path re-wraps the pause error
+        // as `Other`, so we must not rely on matching `ExecError::Paused` here.
+        let paused_at = ctx.debug_paused_at();
         let outputs = if ok {
             Some(ctx.outputs_snapshot())
         } else {
@@ -269,7 +316,9 @@ impl FlowVm {
             // CLI / Studio can show "this run cost $0.012 / 1.2k tokens"
             // without re-scanning ai_calls every render.
             let _ = repo.rollup_run_cost(&run_id);
-            let state = if ok {
+            let state = if paused_at.is_some() {
+                "paused"
+            } else if ok {
                 "ok"
             } else if cancelled {
                 "cancelled"
@@ -278,7 +327,12 @@ impl FlowVm {
             };
             let _ = repo.finish_run(&run_id, state, outputs.as_ref());
         }
-        result?;
+        // A paused run is not an error to the caller — it's surfaced via the
+        // report's `paused_at`. Non-paused errors (cancel, uncaught failure)
+        // still propagate as before.
+        if paused_at.is_none() {
+            result?;
+        }
         let stats = ctx.stats();
 
         Ok(RunReport {
@@ -293,6 +347,7 @@ impl FlowVm {
             steps_caught: stats.caught,
             duration_ms: started.elapsed().as_millis(),
             outputs,
+            paused_at,
         })
     }
 }
@@ -378,6 +433,14 @@ async fn execute_step(
         return Err(ExecError::Cancelled);
     }
 
+    // F-20: once a breakpoint has fired this run, every subsequent step short-
+    // circuits (sticky) — no work, no persisted row — so the pause unwinds the
+    // whole step tree cleanly, including out through `control.try` / `parallel`
+    // wrappers that would otherwise catch or re-wrap the pause error.
+    if ctx.is_debug_paused() {
+        return Err(ExecError::Paused);
+    }
+
     if let Some(cond) = &step.when {
         // B1 (F-14): evaluate `when` as a boolean expression (operators +
         // identifier paths); `{{ }}` template mode is preserved for back-compat.
@@ -454,6 +517,16 @@ async fn execute_step(
         )
         .await;
         return Ok(());
+    }
+    // F-20: pause *before* executing this step when a breakpoint is set on its
+    // path or we're single-stepping. Placed past the resume replay above so a
+    // resumed run fast-forwards through already-completed steps without
+    // re-triggering breakpoints, and "steps off" the step it last paused on.
+    // The step is left un-persisted (it never ran), so a subsequent resume
+    // replays everything before it and re-executes from here.
+    if ctx.debug_should_pause(&path) {
+        ctx.debug_mark_paused(&path);
+        return Err(ExecError::Paused);
     }
     // B2 (F-17): validate the rendered `with:` against the action's schema
     // before dispatch — a missing / typo'd / mistyped param fails fast with a

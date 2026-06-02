@@ -84,6 +84,17 @@ function handleRunError(error) {
 }
 
 function onRunComplete(response) {
+  applyRunResponse(response);
+  setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
+  switchRightSection("outputs");
+}
+
+/// Populate the Time-Travel timeline + output box from a `RunResponse` (the
+/// shared shape returned by `run_flow` / `run_step` / `debug_flow`). Extracted
+/// so the F-20 debugger can reuse the exact same timeline + F-19 vars surface
+/// for a paused run. Returns the artifact-load promise (resolves after the
+/// timeline first renders).
+export function applyRunResponse(response) {
   state.activeRun = response.run;
   state.activeRunSteps = response.steps || [];
   // The run report's `outputs` is the full steps snapshot ({ "<id>": { result,
@@ -93,9 +104,7 @@ function onRunComplete(response) {
   $("outputBox").textContent = pretty({ runId: response.report.runId, outputs: response.report.outputs });
   $("timelineLabel").textContent = `${response.report.runId.slice(0, 14)}… · ${response.report.durationMs}ms`;
   $("timelineCounts").textContent = `${response.report.stepsOk}/${response.report.stepsTotal} 成功 · ${response.report.stepsFailed} 失败`;
-  loadArtifacts(response.report.runId).finally(renderTimeline);
-  setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
-  switchRightSection("outputs");
+  return loadArtifacts(response.report.runId).finally(renderTimeline);
 }
 
 // Walk a steps-snapshot value and collect `{ stepId: _ai }` for every step

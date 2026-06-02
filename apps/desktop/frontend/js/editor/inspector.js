@@ -8,6 +8,7 @@ import { renderActiveView } from "./render.js";
 import { renderGraph } from "./graph.js";
 import { renderTree } from "./tree.js";
 import { runStep } from "../runs.js";
+import { isBreakpoint, toggleBreakpoint } from "../debug.js";
 
 export function selectStep(path) {
   state.selectedStepPath = path;
@@ -30,6 +31,7 @@ export async function renderInspector() {
     body.innerHTML = `<div class="prop-empty">该节点已不存在</div>`;
     return;
   }
+  const bpOn = isBreakpoint(step.id);
   body.innerHTML = `<div class="prop-form" id="propForm">
     <div class="prop-field">
       <label>Step ID</label>
@@ -45,6 +47,8 @@ export async function renderInspector() {
     <button class="primary" id="applyStepBtn" style="margin-top: 8px">将变更写入 YAML</button>
     <div class="hint">编辑后点击 "写入 YAML"。Code 视图为权威源；此面板是 schema-aware 辅助。</div>
     <button id="runThisStepBtn" style="margin-top: 6px">▷ 单独运行此节点</button>
+    <button id="toggleBpBtn" class="${bpOn ? "bp-on" : ""}" style="margin-top: 6px">${bpOn ? "🔴 断点已设 · 点此取消" : "⚪ 设为断点 (F-20)"}</button>
+    <div class="hint">断点：调试运行会在此节点<strong>执行前</strong>暂停。当前对顶层节点生效（id 即路径）。</div>
   </div>`;
 
   if (step.action) {
@@ -61,6 +65,12 @@ export async function renderInspector() {
 
   $("applyStepBtn").addEventListener("click", () => applyInspectorEdits(step));
   $("runThisStepBtn").addEventListener("click", () => runStep(step.id));
+  $("toggleBpBtn").addEventListener("click", (e) => {
+    const on = toggleBreakpoint(step.id);
+    const btn = e.currentTarget;
+    btn.classList.toggle("bp-on", on);
+    btn.textContent = on ? "🔴 断点已设 · 点此取消" : "⚪ 设为断点 (F-20)";
+  });
 }
 
 function applyInspectorEdits(step) {

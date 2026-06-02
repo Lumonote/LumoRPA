@@ -130,6 +130,9 @@ struct RunReportDto {
     steps_caught: usize,
     duration_ms: u128,
     outputs: Option<Value>,
+    /// F-20: when the run paused at a breakpoint / single-step, the path of the
+    /// step it paused before. `None` for runs that completed/failed/cancelled.
+    paused_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -686,7 +689,7 @@ async fn run_flow(
     let flow_path = Path::new(&path);
     let flow = parse_and_validate(&home, flow_path)?;
     let inputs = parse_inputs(&inputs_json)?;
-    execute_flow(&home, Some(flow_path), flow, inputs, no_store).await
+    execute_flow(&home, Some(flow_path), flow, inputs, no_store, DebugOpts::default()).await
 }
 
 /// Run a single step from the flow by `step_id`. The step is extracted from
@@ -712,7 +715,44 @@ async fn run_step(
     // Rewrite the id so the persisted run is identifiable as a sub-run.
     flow.metadata.id = format!("{}::{step_id}", flow.metadata.id);
     let inputs = parse_inputs(&inputs_json)?;
-    execute_flow(&home, Some(flow_path), flow, inputs, no_store).await
+    execute_flow(&home, Some(flow_path), flow, inputs, no_store, DebugOpts::default()).await
+}
+
+/// F-20: run a flow under the breakpoint debugger. Pauses *before* the first
+/// step whose path is in `breakpoints` (or, when `step` is set, before the very
+/// next executing step) and returns a `RunResponse` whose `report.pausedAt`
+/// names that step — its per-step `varsJson` (F-19) shows the variable state
+/// entering the breakpoint. To advance, call again with `resumeFrom` set to the
+/// paused run's id: the completed steps are replayed, the paused step is
+/// "stepped off", and the run continues to the next pause point. Always
+/// persists (debugging needs `step_runs` for resume), so `noStore` is implied
+/// false.
+#[tauri::command]
+async fn debug_flow(
+    app: AppHandle,
+    path: String,
+    inputs_json: String,
+    breakpoints: Vec<String>,
+    step: bool,
+    resume_from: Option<String>,
+) -> Result<RunResponse, String> {
+    let home = app_home(&app)?;
+    let flow_path = Path::new(&path);
+    let flow = parse_and_validate(&home, flow_path)?;
+    let inputs = parse_inputs(&inputs_json)?;
+    execute_flow(
+        &home,
+        Some(flow_path),
+        flow,
+        inputs,
+        false,
+        DebugOpts {
+            breakpoints: breakpoints.into_iter().collect(),
+            step_mode: step,
+            resume_from,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1189,6 +1229,7 @@ pub fn run() {
             lint_flow,
             run_flow,
             run_step,
+            debug_flow,
             list_runs,
             show_run,
             run_cost,
@@ -1430,12 +1471,22 @@ fn parse_and_validate(home: &Path, flow_path: &Path) -> Result<Flow, String> {
     Ok(flow)
 }
 
+/// F-20: breakpoint-debug options threaded into a run. Default ⇒ a normal run
+/// (no breakpoints, no single-step) so existing callers are unaffected.
+#[derive(Default)]
+struct DebugOpts {
+    breakpoints: std::collections::HashSet<String>,
+    step_mode: bool,
+    resume_from: Option<String>,
+}
+
 async fn execute_flow(
     home: &Path,
     flow_path: Option<&Path>,
     flow: Flow,
     inputs: Value,
     no_store: bool,
+    debug: DebugOpts,
 ) -> Result<RunResponse, String> {
     let registry = build_action_registry(home, flow_path);
     let repo = if no_store {
@@ -1443,7 +1494,12 @@ async fn execute_flow(
     } else {
         Some(Repo::open(home.join("lumo.db")).map_err(|e| e.to_string())?)
     };
-    let vm = FlowVm::new(registry, repo.clone());
+    // F-20: breakpoint / single-step / resume are inert by default (empty set,
+    // false, None), so this is identical to a plain run unless debugging.
+    let vm = FlowVm::new(registry, repo.clone())
+        .with_breakpoints(debug.breakpoints)
+        .with_step_mode(debug.step_mode)
+        .with_resume_from(debug.resume_from);
     // P0-1: attach AI hooks (heal / extract_visual / decide / diagnose) when the
     // flow enables AI and providers are configured; otherwise the VM stays
     // deterministic. Mirrors the CLI's `attach_ai_hooks`.
@@ -1567,6 +1623,7 @@ fn report_dto(report: lumo_core::RunReport) -> RunReportDto {
         steps_caught: report.steps_caught,
         duration_ms: report.duration_ms,
         outputs: report.outputs,
+        paused_at: report.paused_at,
     }
 }
 

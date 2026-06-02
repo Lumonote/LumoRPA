@@ -16,6 +16,7 @@ import { setElTab, renderElementLibrary, elementById } from "./elements.js";
 import { appendStepToSource, appendStepWithSelector } from "./editor/mutations.js";
 import { syncGutter } from "./editor/code.js";
 import { runSelectedFlow, runStep, refreshRuns } from "./runs.js";
+import { startDebug } from "./debug.js";
 import {
   refreshProviders, openProviderEditor, saveProvider, testProvider, renderProviderList,
   refreshActiveProviderPill,
@@ -182,6 +183,7 @@ function bindEvents() {
     if (state.selectedStepId) runStep(state.selectedStepId);
     else toast("先在图/树视图选中一个节点", "", "warn");
   });
+  $("debugBtn").addEventListener("click", () => startDebug());
   $("saveFlowBtn").addEventListener("click", () => saveFlowSource().catch(reportError));
   $("resetInputBtn").addEventListener("click", () => {
     if (state.flow) $("inputsJson").value = pretty(defaultInputs(state.flow));

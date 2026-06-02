@@ -62,6 +62,78 @@ impl CancelToken {
     }
 }
 
+/// F-20 (breakpoint debugging): cooperative pause handle for a run. Like
+/// [`CancelToken`] it is `Clone` + `Arc`-backed, so every `fork()`ed
+/// `control.parallel` branch shares the same `armed`/`paused`/`paused_at`
+/// state — a breakpoint hit in one branch latches for the siblings too.
+///
+/// `breakpoints` are step *paths* to pause *before*; `step_mode` pauses before
+/// every executing step (single-step). The VM consults [`Self::should_pause`]
+/// for each step about to actually execute (past resume replay) and, when it
+/// fires, [`Self::mark_paused`] latches a sticky flag so the rest of the run
+/// short-circuits and unwinds.
+#[derive(Clone)]
+pub struct DebugController {
+    breakpoints: Arc<std::collections::HashSet<String>>,
+    step_mode: bool,
+    /// `false` on a resumed run so the first step actually executed (the one we
+    /// paused on last time) "steps off" without immediately re-pausing; `true`
+    /// on a fresh run so the first matching step can pause.
+    armed: Arc<AtomicBool>,
+    /// Sticky: a breakpoint has fired; every subsequent step short-circuits.
+    paused: Arc<AtomicBool>,
+    paused_at: Arc<Mutex<Option<String>>>,
+}
+
+impl DebugController {
+    /// `armed` should be `true` for a fresh run (a breakpoint may fire on the
+    /// very first step) and `false` for a resumed run (step off the step we
+    /// paused on last time before pausing again).
+    pub fn new(
+        breakpoints: std::collections::HashSet<String>,
+        step_mode: bool,
+        armed: bool,
+    ) -> Self {
+        Self {
+            breakpoints: Arc::new(breakpoints),
+            step_mode,
+            armed: Arc::new(AtomicBool::new(armed)),
+            paused: Arc::new(AtomicBool::new(false)),
+            paused_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Whether a breakpoint has already fired this run (sticky).
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// The step path the run paused before, once a breakpoint has fired.
+    pub fn paused_at(&self) -> Option<String> {
+        self.paused_at.lock().clone()
+    }
+
+    /// Decide whether to pause *before* a step (identified by `path`) that is
+    /// about to actually execute. The first call on a resumed run arms the
+    /// controller and returns `false` (steps off the prior breakpoint); after
+    /// that it pauses in single-step mode or when `path` is a breakpoint.
+    fn should_pause(&self, path: &str) -> bool {
+        if !self.armed.swap(true, Ordering::SeqCst) {
+            return false; // resume step-off: let the step we paused on last run proceed
+        }
+        self.step_mode || self.breakpoints.contains(path)
+    }
+
+    /// Latch the sticky pause at `path` (first writer wins).
+    fn mark_paused(&self, path: &str) {
+        self.paused.store(true, Ordering::SeqCst);
+        let mut at = self.paused_at.lock();
+        if at.is_none() {
+            *at = Some(path.to_string());
+        }
+    }
+}
+
 /// F-13 (durable resume): a prior run's reusable leaf-step outputs, keyed by
 /// step path. The VM builds this from `step_runs` when a run is resumed and
 /// consults it per leaf step, so an already-completed step whose rendered-input
@@ -139,6 +211,11 @@ pub struct StepCtx {
     /// parallel branch forks so resumed branches reuse outputs too. `None` for a
     /// normal (non-resumed) run.
     resume_memo: Option<Arc<ResumeMemo>>,
+    /// F-20: breakpoint / single-step debug controller, seeded by the VM from
+    /// `FlowVm::with_breakpoints` / `with_step_mode`. `Arc`-backed internally so
+    /// the pause state is shared across parallel branch forks. `None` ⇒ a normal
+    /// (non-debugged) run with zero per-step overhead.
+    debug: Option<DebugController>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -200,6 +277,7 @@ impl StepCtx {
             step_timeout: None,
             seq: Arc::new(AtomicI64::new(0)),
             resume_memo: None,
+            debug: None,
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: Arc::new(inputs),
                 steps: Arc::new(Map::new()),
@@ -286,6 +364,39 @@ impl StepCtx {
             .as_ref()
             .and_then(|m| m.hit(path, input_hash))
             .cloned()
+    }
+
+    /// F-20: seed the breakpoint / single-step debug controller (set by the VM
+    /// from `FlowVm`). `None` ⇒ a normal (non-debugged) run.
+    pub fn with_debug(mut self, debug: Option<DebugController>) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// F-20: whether a breakpoint has already fired (sticky). The VM checks this
+    /// before each step and short-circuits the rest of the run once it's set, so
+    /// the pause unwinds cleanly even through `control.try` / `control.parallel`.
+    pub fn is_debug_paused(&self) -> bool {
+        self.debug.as_ref().is_some_and(DebugController::is_paused)
+    }
+
+    /// F-20: should the VM pause *before* executing the step at `path`? Arms the
+    /// controller on the first executing step of a resumed run (the step-off).
+    pub fn debug_should_pause(&self, path: &str) -> bool {
+        self.debug.as_ref().is_some_and(|d| d.should_pause(path))
+    }
+
+    /// F-20: latch the sticky pause at `path` (called right before returning the
+    /// pause error from the step about to execute).
+    pub fn debug_mark_paused(&self, path: &str) {
+        if let Some(d) = &self.debug {
+            d.mark_paused(path);
+        }
+    }
+
+    /// F-20: the step path the run paused before, if a breakpoint fired.
+    pub fn debug_paused_at(&self) -> Option<String> {
+        self.debug.as_ref().and_then(DebugController::paused_at)
     }
 
     /// Whether the run has been cancelled. The VM checks this before each step.
@@ -402,6 +513,7 @@ impl StepCtx {
             step_timeout: self.step_timeout,
             seq: self.seq.clone(),
             resume_memo: self.resume_memo.clone(),
+            debug: self.debug.clone(),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: g.inputs.clone(),
                 steps: g.steps.clone(),

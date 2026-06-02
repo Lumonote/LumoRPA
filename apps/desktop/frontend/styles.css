@@ -2458,3 +2458,30 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   max-height: 100%;
 }
 
+
+/* F-20 breakpoint debugger: control bar above the Time-Travel timeline + the
+   inspector's "set breakpoint" toggle. */
+.debug-bar {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  font-size: 11.5px;
+}
+.debug-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.debug-bar-row .spacer { flex: 1; }
+.debug-bar .debug-paused { color: var(--warn); }
+.debug-bar .debug-done { color: var(--muted); }
+.debug-bar .debug-bps { color: var(--muted); }
+.debug-bar button[disabled] { opacity: 0.45; cursor: default; }
+button.bp-on {
+  border-color: var(--bad);
+  color: var(--bad);
+}

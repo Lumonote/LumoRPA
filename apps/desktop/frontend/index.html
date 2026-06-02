@@ -94,6 +94,7 @@
             <button id="validateBtn">✓ 校验</button>
             <button class="primary" id="runBtn">▶ 运行</button>
             <button id="runStepBtn" title="运行当前选中节点（影刀缺失，差异化能力）">▷ 单步</button>
+            <button id="debugBtn" title="断点调试：在设了断点的节点执行前暂停，可单步 / 继续 / 停止 (F-20)">🐞 调试</button>
             <span class="spacer"></span>
             <button id="saveFlowBtn">💾 保存</button>
             <button class="ghost" id="resetInputBtn">重置输入</button>
@@ -199,6 +200,7 @@
               <span id="timelineMeta" style="font-size: 11px; color: var(--muted)"></span>
             </div>
             <div class="panel-body flush">
+              <div class="debug-bar" id="debugBar" style="display: none"></div>
               <div class="timeline" id="timelineBlock">
                 <div class="timeline-head">
                   <span id="timelineLabel">尚未运行</span>

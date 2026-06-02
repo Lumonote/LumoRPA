@@ -19,6 +19,9 @@ export const state = {
   activeStepRun: null,
   activeArtifacts: [],        // X-07: blob artifacts for the active run
   artifactBlobCache: new Map(), // artifactId -> data URL (lazy-loaded)
+  breakpoints: new Set(),     // F-20: step ids marked as breakpoints
+  debugRunId: null,           // F-20: id of the current paused debug run (for step/continue)
+  debugPausedAt: null,        // F-20: step path the debug run is currently paused before
   providers: null,
   providerDraft: null,
   features: [],

@@ -23,6 +23,12 @@ pub enum ExecError {
     /// P1-1: the run was cancelled via its `CancelToken` before completing.
     #[error("run cancelled")]
     Cancelled,
+    /// F-20: the run paused at a breakpoint / single-step before executing a
+    /// step. Propagated as an `Err` to unwind the step loop (like `Cancelled`),
+    /// but `run()` reports it via `RunReport.paused_at` and returns `Ok` — the
+    /// authoritative "where" lives on the ctx's debug controller, not here.
+    #[error("run paused at breakpoint")]
+    Paused,
     /// P1-1: a step exceeded the configured per-step timeout.
     #[error("step `{step}` timed out after {ms}ms")]
     Timeout { step: String, ms: u64 },
