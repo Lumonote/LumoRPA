@@ -11,8 +11,9 @@
   /* Default to "glass" preset: window is mostly clear so mica/acrylic shows
    * through; panels are translucent enough to read.
    */
-  --window-alpha: 0.18;
-  --panel-alpha: 0.62;
+  --window-alpha: 0;
+  --panel-alpha: 0.18;
+  --glass-blur: 0px;
 
   --bg-tint-r: 255;
   --bg-tint-g: 255;
@@ -20,9 +21,9 @@
 
   /* Surfaces */
   --surface: rgba(255, 255, 255, var(--panel-alpha));
-  --surface-strong: rgba(255, 255, 255, calc(var(--panel-alpha) + 0.14));
-  --surface-soft: rgba(255, 255, 255, calc(var(--panel-alpha) - 0.18));
-  --surface-inset: rgba(255, 255, 255, calc(var(--panel-alpha) - 0.30));
+  --surface-strong: rgba(255, 255, 255, min(0.88, calc(var(--panel-alpha) + 0.10)));
+  --surface-soft: rgba(255, 255, 255, max(0.06, calc(var(--panel-alpha) - 0.12)));
+  --surface-inset: rgba(255, 255, 255, max(0.04, calc(var(--panel-alpha) - 0.18)));
 
   /* Lines & text */
   --line: rgba(36, 42, 52, 0.14);
@@ -63,9 +64,9 @@
   --bg-tint-b: 26;
 
   --surface: rgba(28, 33, 44, var(--panel-alpha));
-  --surface-strong: rgba(40, 46, 60, calc(var(--panel-alpha) + 0.12));
-  --surface-soft: rgba(20, 24, 33, calc(var(--panel-alpha) - 0.10));
-  --surface-inset: rgba(10, 14, 22, calc(var(--panel-alpha) - 0.20));
+  --surface-strong: rgba(40, 46, 60, min(0.88, calc(var(--panel-alpha) + 0.10)));
+  --surface-soft: rgba(20, 24, 33, max(0.06, calc(var(--panel-alpha) - 0.10)));
+  --surface-inset: rgba(10, 14, 22, max(0.04, calc(var(--panel-alpha) - 0.16)));
 
   --line: rgba(255, 255, 255, 0.10);
   --line-strong: rgba(255, 255, 255, 0.22);
@@ -113,17 +114,17 @@ body::before {
   pointer-events: none;
   z-index: -1;
   background:
-    radial-gradient(circle at 18% -10%, rgba(31, 122, 100, 0.16), transparent 42%),
-    radial-gradient(circle at 95% 6%, rgba(45, 91, 150, 0.12), transparent 38%),
-    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.10), transparent 46%),
+    radial-gradient(circle at 18% -10%, rgba(31, 122, 100, 0.018), transparent 42%),
+    radial-gradient(circle at 95% 6%, rgba(45, 91, 150, 0.016), transparent 38%),
+    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.014), transparent 46%),
     rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
 }
 
 :root.theme-dark body::before {
   background:
-    radial-gradient(circle at 18% -10%, rgba(76, 194, 163, 0.22), transparent 42%),
-    radial-gradient(circle at 95% 6%, rgba(111, 166, 255, 0.18), transparent 38%),
-    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.12), transparent 46%),
+    radial-gradient(circle at 18% -10%, rgba(76, 194, 163, 0.02), transparent 42%),
+    radial-gradient(circle at 95% 6%, rgba(111, 166, 255, 0.018), transparent 38%),
+    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.016), transparent 46%),
     rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
 }
 
@@ -244,8 +245,8 @@ select:focus {
   background: var(--surface);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-1);
-  backdrop-filter: blur(24px) saturate(1.35);
-  -webkit-backdrop-filter: blur(24px) saturate(1.35);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.12);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.12);
   user-select: none;
 }
 
@@ -343,8 +344,8 @@ select:focus {
   border: 1px solid var(--line);
   font-size: 11px;
   color: var(--muted);
-  backdrop-filter: blur(18px) saturate(1.2);
-  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.08);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.08);
 }
 
 .statusbar .pill {
@@ -357,6 +358,10 @@ select:focus {
   border: 1px solid var(--line);
   color: var(--text);
   font-weight: 600;
+}
+
+#netPill {
+  cursor: pointer;
 }
 
 .statusbar .pill .dot {
@@ -402,8 +407,8 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-1);
-  backdrop-filter: blur(24px) saturate(1.3);
-  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -498,6 +503,50 @@ select:focus {
   white-space: nowrap;
 }
 
+.flow-config-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+}
+
+.flow-config-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.flow-config-main span {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.flow-config-main strong,
+.flow-config-main em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-config-main strong {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.flow-config-main em {
+  color: var(--faint);
+  font-size: 11px;
+  font-style: normal;
+}
+
 /* ── Flow library sections (user / recording / example) ───────────────── */
 .flow-section { margin-bottom: 8px; }
 .flow-section-head {
@@ -562,9 +611,12 @@ select:focus {
 
 .action-family-head {
   display: flex;
+  width: 100%;
   align-items: center;
   justify-content: space-between;
   padding: 4px 6px;
+  border: 0;
+  background: transparent;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -572,6 +624,15 @@ select:focus {
   color: var(--muted);
   cursor: pointer;
   user-select: none;
+  text-align: left;
+  border-radius: 6px;
+}
+
+.action-family-head:hover,
+.action-family-head:focus-visible {
+  color: var(--text);
+  background: var(--surface-soft);
+  outline: none;
 }
 
 .action-family.is-collapsed .action-list {
@@ -1588,11 +1649,94 @@ select:focus {
 
 /* ─── Run history ──────────────────────────────────────────────────────── */
 
+#runsView .panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.runs-chart {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(260px, 0.85fr);
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-inset);
+}
+
+.runs-chart-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(76px, 1fr));
+  gap: 8px;
+}
+
+.runs-chart-stats div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.runs-chart-stats span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.runs-chart-stats strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 17px;
+  color: var(--text);
+}
+
+.runs-chart-bars {
+  min-height: 72px;
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  border-left: 1px solid var(--line);
+}
+
+button.run-bar {
+  width: 18px;
+  min-width: 18px;
+  min-height: 8px;
+  padding: 0;
+  align-self: end;
+  border-radius: 5px 5px 2px 2px;
+  border-color: var(--line-strong);
+  background: var(--muted);
+}
+
+button.run-bar.ok {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+button.run-bar.failed {
+  border-color: var(--bad);
+  background: var(--bad);
+}
+
+button.run-bar.other {
+  border-color: var(--warn);
+  background: var(--warn);
+}
+
 .runs-grid {
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 10px;
-  height: 100%;
 }
 
 .run-row {
@@ -1648,8 +1792,8 @@ select:focus {
   box-shadow: var(--shadow-2);
   font-size: 12.5px;
   color: var(--text);
-  backdrop-filter: blur(14px) saturate(1.3);
-  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.1);
 }
 
 .toast.ok {
@@ -1705,6 +1849,7 @@ select:focus {
 }
 
 .step-row {
+  position: relative;
   display: grid;
   grid-template-columns: 22px 28px minmax(80px, 160px) minmax(150px, 220px) 1fr auto auto auto auto;
   align-items: center;
@@ -1802,6 +1947,8 @@ select:focus {
 
 .step-icon-btn,
 .step-ai-btn {
+  position: relative;
+  z-index: 2;
   border: 1px solid transparent;
   background: transparent;
   border-radius: 6px;
@@ -1812,6 +1959,7 @@ select:focus {
   justify-content: center;
   font-size: 13px;
   cursor: pointer;
+  pointer-events: auto;
   color: var(--muted);
 }
 .step-icon-btn:hover {

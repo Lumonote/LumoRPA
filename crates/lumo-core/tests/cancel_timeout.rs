@@ -41,6 +41,26 @@ spec:
     - { id: after, action: test.sleep, with: { ms: 0 } }
 "#;
 
+/// A slow step guarded by `control.try` with a `catch:`. Used to prove that a
+/// hard interrupt (cancel / per-step timeout) inside the `do:` block is NOT
+/// swallowed by the catch — the run must still abort.
+const GUARDED_SLEEP_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  steps:
+    - id: guard
+      action: control.try
+      with: {}
+      do:
+        - { id: slow, action: test.sleep, with: { ms: 600 } }
+      catch:
+        - { id: rescue, action: test.sleep, with: { ms: 0 } }
+      finally:
+        - { id: fin, action: test.sleep, with: { ms: 0 } }
+"#;
+
 #[tokio::test]
 async fn cancel_mid_step_aborts_run() {
     let token = CancelToken::new();
@@ -96,4 +116,39 @@ spec:
     .unwrap();
     let report = vm.run(&flow, RunOptions::default()).await.unwrap();
     assert!(report.success);
+}
+
+#[tokio::test]
+async fn timeout_inside_try_is_not_caught() {
+    // P1-1: a per-step timeout is a *hard* ceiling, not a catchable failure. A
+    // `control.try` wrapping the timed-out step must NOT swallow the timeout via
+    // its `catch:` — the run must abort with `Timeout`, exactly as if there were
+    // no try. (Regression: `run_try` used to stringify *any* error and run the
+    // catch branch, silently recovering from a timeout and continuing the run.)
+    let vm = FlowVm::new(reg(), None).with_step_timeout(Duration::from_millis(40));
+    let err = vm
+        .run(&parse_str(GUARDED_SLEEP_FLOW).unwrap(), RunOptions::default())
+        .await
+        .expect_err("a timeout inside try must propagate, not be caught");
+    assert!(matches!(err, ExecError::Timeout { .. }), "got: {err}");
+    assert!(err.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn cancel_inside_try_is_not_caught() {
+    // Cancellation is likewise a hard interrupt: a `control.try` around a step
+    // that gets cancelled mid-flight must abort the run with `Cancelled`, never
+    // route through the `catch:` branch.
+    let token = CancelToken::new();
+    let vm = FlowVm::new(reg(), None).with_cancel(token.clone());
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        canceller.cancel();
+    });
+    let err = vm
+        .run(&parse_str(GUARDED_SLEEP_FLOW).unwrap(), RunOptions::default())
+        .await
+        .expect_err("cancellation inside try must abort the run, not be caught");
+    assert!(matches!(err, ExecError::Cancelled), "got: {err}");
 }

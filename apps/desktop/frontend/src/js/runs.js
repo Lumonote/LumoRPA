@@ -66,7 +66,13 @@ function handleRunError(error) {
       <button data-dismiss>忽略</button>
     </div>`;
   stack.appendChild(node);
+  let timer = window.setTimeout(() => node.remove(), 12000);
+  const dismiss = () => {
+    window.clearTimeout(timer);
+    node.remove();
+  };
   node.querySelector("[data-grant]").addEventListener("click", async () => {
+    window.clearTimeout(timer);
     try {
       if (kind === "network") state.source = ensureNetworkCapability(state.source, target);
       else if (kind === "llm") state.source = ensureLlmCapability(state.source);
@@ -74,13 +80,14 @@ function handleRunError(error) {
       state.ast = parseYaml(state.source);
       if (state.flowPath) await call("save_flow_source", { path: state.flowPath, source: state.source });
       toast("已加入白名单", `${kind} ${target}`, "ok");
-      node.remove();
+      dismiss();
       renderActiveView();
     } catch (e) {
       toast("写入失败", String(e), "bad");
+      timer = window.setTimeout(() => node.remove(), 12000);
     }
   });
-  node.querySelector("[data-dismiss]").addEventListener("click", () => node.remove());
+  node.querySelector("[data-dismiss]").addEventListener("click", dismiss);
 }
 
 function onRunComplete(response) {
@@ -165,6 +172,45 @@ async function blobDataUrl(artifactId) {
     state.artifactBlobCache.set(artifactId, null);
     return null;
   }
+}
+
+function renderRunsChart(runs) {
+  const chart = $("runsChart");
+  if (!chart) return;
+  if (!runs.length) {
+    chart.innerHTML = `<div class="prop-empty">暂无运行图表</div>`;
+    return;
+  }
+  const total = runs.length;
+  const ok = runs.filter((r) => r.state === "ok").length;
+  const failed = runs.filter((r) => r.state === "failed").length;
+  const other = Math.max(0, total - ok - failed);
+  const durations = runs.map((r) => Number(r.durationMs || 0)).filter((n) => n >= 0);
+  const avg = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  const recent = runs.slice(0, 14).reverse();
+  const maxDuration = Math.max(1, ...recent.map((r) => Number(r.durationMs || 0)));
+  chart.innerHTML = `
+    <div class="runs-chart-stats">
+      <div><span>最近运行</span><strong>${total}</strong></div>
+      <div><span>成功</span><strong>${ok}</strong></div>
+      <div><span>失败</span><strong>${failed}</strong></div>
+      <div><span>其他</span><strong>${other}</strong></div>
+      <div><span>平均耗时</span><strong>${avg}ms</strong></div>
+    </div>
+    <div class="runs-chart-bars" aria-label="最近运行耗时图">
+      ${recent
+        .map((r) => {
+          const duration = Number(r.durationMs || 0);
+          const height = Math.max(8, Math.round((duration / maxDuration) * 58));
+          const klass = r.state === "ok" ? "ok" : r.state === "failed" ? "failed" : "other";
+          return `<button class="run-bar ${klass}" data-run-id="${html(r.id)}" style="height: ${height}px" title="${html(r.flowId)} · ${html(r.state)} · ${duration}ms"></button>`;
+        })
+        .join("")}
+    </div>
+  `;
+  chart.querySelectorAll("[data-run-id]").forEach((bar) =>
+    bar.addEventListener("click", () => showHistoricalRun(bar.dataset.runId))
+  );
 }
 
 function renderTimeline() {
@@ -268,6 +314,7 @@ function showStepDetail(idx) {
 
 export async function refreshRuns() {
   state.runs = await call("list_runs", { limit: 60 });
+  renderRunsChart(state.runs);
   const list = $("runsList");
   if (!state.runs.length) {
     list.innerHTML = `<div class="prop-empty">尚无运行记录</div>`;
@@ -340,7 +387,7 @@ async function showHistoricalRun(runId) {
       <tbody>
         ${detail.steps
           .map(
-            (s) => `<tr style="border-top: 1px solid var(--line)">
+            (s) => `<tr class="hist-step-row" data-seq="${s.seq}" style="border-top: 1px solid var(--line); cursor: pointer">
           <td>${s.seq}</td>
           <td style="font-family: 'SF Mono', Consolas, monospace">${"&nbsp;".repeat(Math.max(0, s.depth) * 2)}${html(s.path)}</td>
           <td style="text-align: center"><span class="status-badge ${s.state === "ok" ? "ready" : s.state === "failed" ? "planned" : "partial"}">${html(s.state)}</span></td>
@@ -350,7 +397,46 @@ async function showHistoricalRun(runId) {
           .join("")}
       </tbody>
     </table>
+    <div class="section-title" style="margin-top: 10px">节点检视 · 点击上表任一节点查看变量与输出</div>
+    <div id="histStepDetail" class="kv-list" style="padding: 0"></div>
     ${costBlock}
     <pre style="margin-top: 10px; background: var(--surface-soft); padding: 10px; border-radius: 8px; font-size: 11px; max-height: 220px; overflow: auto">${html(pretty(detail.run.outputs))}</pre>
+  `;
+
+  // F-19: drive a per-step inspector for the historical run so its persisted
+  // `vars_json` snapshots are visible here too — not only for the live/just-ran
+  // timeline. Clicking a node row scrubs to that step; the first step is
+  // selected by default.
+  const histRows = $$("#runDetail .hist-step-row");
+  const selectHistStep = (seq) => {
+    const step = state.activeRunSteps.find((s) => Number(s.seq) === Number(seq));
+    histRows.forEach((r) => {
+      r.style.background = Number(r.dataset.seq) === Number(seq) ? "var(--surface-soft)" : "";
+    });
+    renderHistoricalStepDetail(step);
+  };
+  histRows.forEach((tr) => tr.addEventListener("click", () => selectHistStep(tr.dataset.seq)));
+  if (state.activeRunSteps.length) selectHistStep(state.activeRunSteps[0].seq);
+  else renderHistoricalStepDetail(null);
+}
+
+// F-19: render one historical step's variable snapshot + output into the runs
+// detail pane. Reuses `renderVarsWatch` (the same surface the live time-travel
+// timeline uses), so scrubbing a past run shows how variables evolved — closing
+// the gap where vars were only visible for the run you just executed.
+function renderHistoricalStepDetail(step) {
+  const box = $("histStepDetail");
+  if (!box) return;
+  if (!step) {
+    box.innerHTML = `<div class="kv"><span style="color: var(--muted)">点击上方节点查看变量与输出</span></div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="kv"><span>节点</span><strong>${html(step.path)}</strong></div>
+    <div class="kv"><span>状态</span><strong style="color: ${step.state === "failed" ? "var(--bad)" : "var(--ok)"}">${html(step.state)}</strong></div>
+    <div class="kv"><span>耗时</span><strong>${html(step.durationMs ?? 0)} ms</strong></div>
+    ${step.error ? `<div class="kv"><span>错误</span><strong style="color: var(--bad)">${html(step.error)}</strong></div>` : ""}
+    ${step.outputJson ? `<pre style="margin-top: 6px; background: var(--surface-soft); padding: 8px; border-radius: 6px; font-size: 11px; max-height: 160px; overflow: auto">${html(pretty(step.outputJson))}</pre>` : ""}
+    ${renderVarsWatch(step.varsJson)}
   `;
 }

@@ -2,11 +2,21 @@
 // `generate_flow` command (shared lumo_ai::copilot core, same as `lumo copilot`),
 // then saves the generated YAML as a new flow and opens it in the editor.
 
-import { $, toast } from "./dom.js";
+import { $, html, toast } from "./dom.js";
 import { call } from "./api.js";
 import { refreshFlows, loadFlow } from "./flows.js";
+import { state } from "./state.js";
+import { refreshActiveProviderPill } from "./providers.js";
 
-export function openMagicPrompt() {
+export async function openMagicPrompt() {
+  if (!state.providers) {
+    try {
+      state.providers = await call("provider_status");
+    } catch (_) {
+      state.providers = null;
+    }
+  }
+
   const overlay = $("magicPromptOverlay");
   overlay.hidden = false;
   overlay.innerHTML = `
@@ -21,12 +31,12 @@ export function openMagicPrompt() {
           <textarea id="mpPrompt" rows="5" placeholder="例如：每天早上 9 点抓取某网页的标题，写入 result.xlsx"></textarea>
         </div>
         <div class="prop-field">
-          <label>模型 override（空 = 活动 provider 默认）</label>
-          <input id="mpModel" placeholder="anthropic/claude-sonnet-4-6" />
+          <label>模型</label>
+          ${renderModelSelect()}
         </div>
         <span class="hint">
           由配置的 LLM 生成 lumo/v1 流程并自动校验（最多重试 2 次），成功后另存为新流程并打开。
-          需先在「设置 · Providers」配置 LLM，并以 <code>LUMO_ALLOW_LLM_NETWORK=1</code> 启动。
+          需先在「模型」配置 LLM；网络未开启时可在模型页或底部状态栏启用本次会话网络。
         </span>
         <div id="mpStatus" class="hint"></div>
       </div>
@@ -53,6 +63,12 @@ export function openMagicPrompt() {
     btn.disabled = true;
     status.textContent = "正在生成…（调用 LLM，可能需要几秒）";
     try {
+      if (!state.providers?.networkEnabled) {
+        status.textContent = "正在启用本次会话 LLM 网络…";
+        state.providers = await call("enable_llm_network_for_session");
+        refreshActiveProviderPill();
+      }
+      status.textContent = "正在生成…（调用 LLM，可能需要几秒）";
       const yaml = await call("generate_flow", { prompt, model: model || null });
       // Name the new flow after the generated flow's metadata.id (fallback constant).
       const name = yaml.match(/id:\s*([A-Za-z0-9_-]+)/)?.[1] || "magic-flow";
@@ -67,4 +83,63 @@ export function openMagicPrompt() {
       toast("生成失败", String(e), "bad");
     }
   });
+}
+
+function renderModelSelect() {
+  const profiles = state.providers?.profiles || [];
+  const active = profiles.find((p) => p.name === state.providers?.active);
+  const activeDefault = active?.defaultModel ? modelValue(active, active.defaultModel) : "";
+  const defaultLabel = activeDefault
+    ? `使用活动默认（${activeDefault}）`
+    : "使用活动 provider 默认";
+
+  const groups = profiles
+    .map((profile) => {
+      const models = modelOptionsForProfile(profile);
+      if (!models.length) return "";
+      return `<optgroup label="${html(profile.name)}">
+        ${models
+          .map(
+            (model) =>
+              `<option value="${html(model.value)}">${html(model.label)}</option>`
+          )
+          .join("")}
+      </optgroup>`;
+    })
+    .filter(Boolean)
+    .join("");
+
+  return `<select id="mpModel">
+    <option value="">${html(defaultLabel)}</option>
+    ${
+      groups ||
+      '<option value="" disabled>尚未配置可选模型</option>'
+    }
+  </select>`;
+}
+
+function modelOptionsForProfile(profile) {
+  const seen = new Set();
+  const options = [];
+  const add = (model, suffix = "") => {
+    const value = modelValue(profile, model);
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    const labelModel = value.startsWith(`${profile.name}/`)
+      ? value.slice(profile.name.length + 1)
+      : value;
+    options.push({
+      value,
+      label: `${labelModel}${suffix}`,
+    });
+  };
+  add(profile.defaultModel, " · 默认");
+  (profile.models || []).forEach((model) => add(model));
+  return options;
+}
+
+function modelValue(profile, model) {
+  const raw = String(model || "").trim();
+  if (!raw) return "";
+  return raw.startsWith(`${profile.name}/`) ? raw : `${profile.name}/${raw}`;
 }

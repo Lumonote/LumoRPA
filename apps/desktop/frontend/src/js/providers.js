@@ -20,7 +20,13 @@ export function refreshActiveProviderPill() {
   const net = $("netPill");
   net.querySelector(".dot")?.style?.setProperty("background", state.providers.networkEnabled ? "var(--ok)" : "var(--warn)");
   net.classList.toggle("warn", !state.providers.networkEnabled);
+  net.title = state.providers.networkEnabled ? "LLM 网络本次会话已开启" : "点击开启本次会话 LLM 网络";
   net.lastChild.textContent = state.providers.networkEnabled ? "LLM 网络: 已开启" : "LLM 网络: 未开启";
+  const enableBtn = $("enableLlmNetworkBtn");
+  if (enableBtn) {
+    enableBtn.disabled = !!state.providers.networkEnabled;
+    enableBtn.textContent = state.providers.networkEnabled ? "LLM 网络已开启" : "启用本次会话网络";
+  }
 }
 
 export function renderProviderList() {
@@ -79,7 +85,8 @@ export function renderProviderList() {
 }
 
 export function openProviderEditor(name) {
-  const existing = state.providers.profiles.find((p) => p.name === name);
+  const profiles = state.providers?.profiles || [];
+  const existing = profiles.find((p) => p.name === name);
   state.providerDraft = existing
     ? JSON.parse(JSON.stringify(existing))
     : {
@@ -230,8 +237,18 @@ export async function saveProvider() {
   }
 }
 
+export async function enableLlmNetworkForSession() {
+  state.providers = await call("enable_llm_network_for_session");
+  renderProviderList();
+  refreshActiveProviderPill();
+  toast("已启用本次会话 LLM 网络", "当前应用进程内有效，无需重启。", "ok");
+}
+
 export async function testProvider() {
   if (!state.providerDraft?.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
+  if (state.providers && !state.providers.networkEnabled) {
+    await enableLlmNetworkForSession();
+  }
   const r = await call("test_provider", { name: state.providerDraft.name });
   if (r.ok) {
     toast("✓ 测试通过", `${r.provider}/${r.model} · ${r.inputTokens}↑/${r.outputTokens}↓`, "ok");

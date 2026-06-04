@@ -14,7 +14,7 @@ export async function refreshSettings() {
     kv("Providers", info.providersPath),
     kv("Skills 根", info.skillsPath),
     kv("Examples", info.examplesDir || "-"),
-    kv("LLM 网络", info.networkEnabled ? "已开启 (LUMO_ALLOW_LLM_NETWORK=1)" : "未开启"),
+    kv("LLM 网络", info.networkEnabled ? "已开启 (本次会话或环境变量)" : "未开启"),
   ].join("");
   $("skillsBox").innerHTML = skills.length
     ? skills.map((s) => kv(s.name, s.description || s.source)).join("")

@@ -59,7 +59,7 @@ export function renderElementLibrary() {
         <div class="el-empty">
           <div style="font-size:30px;margin-bottom:8px">🖼</div>
           <div>暂无已捕获图像</div>
-          <div style="margin-top:6px">影刀的 <em>找图 (FindImage)</em> 在 LumoRPA 中由 phash + Vision-LLM 兜底替代，<br>
+          <div style="margin-top:6px"><em>找图 (FindImage)</em> 在 LumoRPA 中由 phash + Vision-LLM 兜底增强，<br>
             录制器抓取的小图缓存在此，<strong>image.find</strong> 指令运行时按相似度匹配。</div>
         </div>`;
       return;

@@ -30,9 +30,8 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-tauri = { version = "2.3.1", features = ["macos-private-api"] }
+tauri = { version = "2.3.1", features = ["macos-private-api", "tray-icon", "image-png"] }
 tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

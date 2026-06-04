@@ -213,9 +213,16 @@ export function cssEscape(s) {
 
 // ─── YAML mutation helpers (insert / delete / move / ai / capability) ─────
 
-export function findStepRange(lines, originalId) {
+function stepIdLineRegex(originalId) {
   const escaped = String(originalId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^(\\s*)-\\s*id:\\s*${escaped}\\b`);
+  const value = `(?:"${escaped}"|'${escaped}'|${escaped})`;
+  return new RegExp(
+    `^(\\s*)-\\s*(?:id:\\s*${value}(?=\\s*(?:#|$))|\\{[^}]*\\bid\\s*:\\s*${value}(?=\\s*(?:[,}]))[^}]*\\})`
+  );
+}
+
+export function findStepRange(lines, originalId) {
+  const re = stepIdLineRegex(originalId);
   let startIdx = -1;
   let baseIndent = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -298,8 +305,7 @@ export function ensureCapability(source, key, value) {
 
 export function mutateStepInSource(source, originalId, patch) {
   const lines = source.split(/\r?\n/);
-  const escapeId = originalId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^(\\s*)-\\s*id:\\s*${escapeId}\\b`);
+  const re = stepIdLineRegex(originalId);
   let startIdx = -1;
   let baseIndent = 0;
   for (let i = 0; i < lines.length; i++) {

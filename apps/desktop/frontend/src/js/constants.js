@@ -3,12 +3,21 @@
 export const FAMILY_LABEL = {
   favorite: "⭐ 我收藏的指令",
   browser:  "网页自动化",
+  desktop:  "桌面自动化",
+  image:    "图像识别",
+  pdf:      "PDF",
   condition:"条件判断",
   loop:     "循环",
   wait:     "等待",
   excel:    "Excel / 数据表格",
   file:     "文件 / 操作系统",
+  archive:  "压缩 / 解压",
+  clipboard:"剪贴板",
   http:     "网络 / API",
+  transfer: "文件传输",
+  email:    "邮件",
+  notify:   "通知 / Webhook",
+  mcp:      "MCP 工具",
   ai:       "AI / 大模型",
   skill:    "自定义指令 (Skills)",
   flow:     "子流程",
@@ -38,7 +47,24 @@ export const ACTION_ZH = {
   "browser.click":    { label: "点击元素",         hint: "点击 CSS 选择器匹配到的元素" },
   "browser.type":     { label: "填写输入框",       hint: "在 CSS 选择器匹配的输入框中输入文本" },
   "browser.extract":  { label: "批量抓取数据",     hint: "提取 innerText / 属性 / 字段映射" },
+  "browser.wait":     { label: "等待页面元素",     hint: "等待选择器或文本出现" },
+  "browser.eval":     { label: "执行页面脚本",     hint: "在页面上下文执行 JavaScript" },
+  "browser.screenshot": { label: "网页截图",       hint: "截取当前页面并保存为图片" },
+  "browser.scroll":   { label: "滚动页面",         hint: "滚动到位置、元素或方向" },
+  "browser.hover":    { label: "悬停元素",         hint: "移动鼠标到页面元素" },
+  "browser.select":   { label: "选择下拉项",       hint: "按值、标签或索引选择 select 选项" },
+  "browser.cookies":  { label: "读取 Cookie",      hint: "读取当前页面 Cookie" },
+  "browser.set_cookie": { label: "设置 Cookie",    hint: "写入浏览器 Cookie" },
+  "browser.tabs":     { label: "列出标签页",       hint: "列出当前浏览器标签页" },
+  "browser.tab":      { label: "切换标签页",       hint: "按目标 ID 或 URL 片段激活/关闭标签页" },
+  "browser.upload":   { label: "上传文件",         hint: "向文件输入框设置本地文件" },
   "browser.close":    { label: "关闭浏览器",       hint: "关闭当前浏览器会话" },
+
+  "desktop.move":     { label: "移动鼠标",         hint: "移动到屏幕坐标" },
+  "desktop.click":    { label: "桌面点击",         hint: "点击屏幕坐标或当前位置" },
+  "desktop.scroll":   { label: "桌面滚动",         hint: "发送鼠标滚轮滚动" },
+  "desktop.key":      { label: "发送快捷键",       hint: "发送按键或组合键" },
+  "desktop.type":     { label: "桌面输入文本",     hint: "向当前焦点输入文本" },
 
   "control.log":      { label: "打印日志",         hint: "向运行台输出一条日志" },
   "control.sleep":    { label: "等待",             hint: "睡眠指定毫秒数" },
@@ -50,10 +76,14 @@ export const ACTION_ZH = {
   "control.parallel": { label: "并行执行",         hint: "同时编排多个分支" },
   "control.try":      { label: "异常处理",         hint: "try / catch / finally" },
 
+  "flow.call":        { label: "调用子流程",       hint: "调用另一个 LumoFlow YAML" },
   "lumo.flow":        { label: "调用子流程",       hint: "调用另一个 LumoFlow YAML" },
 
   "data.json_format": { label: "JSON 转字符串",    hint: "将 JSON 值序列化为字符串" },
   "data.json_parse":  { label: "字符串转 JSON",    hint: "解析 JSON 文本到对象" },
+  "data.filter":      { label: "过滤数据表",       hint: "按字段条件过滤对象数组" },
+  "data.group_by":    { label: "分组聚合",         hint: "按字段分组并统计聚合" },
+  "data.join":        { label: "连接数据表",       hint: "按键连接两个对象数组" },
 
   "excel.read_rows":  { label: "读取 Excel",       hint: "读取 .xlsx 表格的行" },
   "excel.write_row":  { label: "写入 Excel",       hint: "追加一行到 .xlsx 表格" },
@@ -61,8 +91,35 @@ export const ACTION_ZH = {
   "file.read":        { label: "读取文件",         hint: "从本地路径读文件" },
   "file.write":       { label: "写入文件",         hint: "把数据写到本地路径" },
   "file.exists":      { label: "文件存在?",        hint: "判断路径是否存在" },
+  "archive.zip":      { label: "创建 ZIP",         hint: "把文件或目录打包成 ZIP" },
+  "archive.unzip":    { label: "解压 ZIP",         hint: "安全解压 ZIP 到目标目录" },
 
   "http.request":     { label: "HTTP 请求",        hint: "发起 GET / POST / PUT / DELETE 请求" },
+  "http.download":    { label: "HTTP 下载",        hint: "从 URL 下载文件到本地" },
+  "http.upload":      { label: "HTTP 上传",        hint: "上传本地文件到 HTTP 服务" },
+
+  "pdf.extract_text": { label: "提取 PDF 文本",    hint: "从 PDF 中提取文本" },
+  "pdf.info":         { label: "读取 PDF 信息",    hint: "读取页数和 PDF 版本" },
+  "pdf.write":        { label: "生成 PDF",         hint: "把文本写成 PDF 文件" },
+
+  "image.locate":     { label: "定位图片",         hint: "在截图中查找模板图片位置" },
+  "image.compare":    { label: "比较图片",         hint: "比较两张图片的差异" },
+
+  "mcp.call":         { label: "调用 MCP 工具",    hint: "通过 MCP stdio 调用工具" },
+  "mcp.discover":     { label: "发现 MCP 工具",    hint: "列出 MCP 服务暴露的工具" },
+
+  "ai.chat":          { label: "大模型对话",       hint: "通过当前模型源发送提示词" },
+  "skill.invoke":     { label: "执行 Skill",       hint: "调用本地注册的 Skill 子流程" },
+
+  "email.send":       { label: "发送邮件",         hint: "通过 SMTP 发送邮件" },
+  "email.fetch":      { label: "读取邮件",         hint: "通过 IMAP 获取邮件" },
+  "clipboard.get":    { label: "读取剪贴板",       hint: "读取系统剪贴板文本" },
+  "clipboard.set":    { label: "写入剪贴板",       hint: "把文本写入系统剪贴板" },
+  "notify.send":      { label: "发送通知",         hint: "发送企业微信/飞书/通用 Webhook" },
+  "ftp.upload":       { label: "FTP 上传",         hint: "上传本地文件到 FTP" },
+  "ftp.download":     { label: "FTP 下载",         hint: "从 FTP 下载文件" },
+  "s3.put":           { label: "上传 S3",          hint: "上传本地文件到 S3 兼容存储" },
+  "s3.get":           { label: "下载 S3",          hint: "从 S3 兼容存储下载对象" },
 
   // ── 字符串 ──
   "string.upper":       { label: "字符串大写",       hint: "把字符串转为大写" },
@@ -152,15 +209,24 @@ export const ACTION_ZH = {
 
 export function categoryOf(actionId) {
   if (actionId.startsWith("browser."))                     return "browser";
+  if (actionId.startsWith("desktop."))                     return "desktop";
+  if (actionId.startsWith("image."))                       return "image";
+  if (actionId.startsWith("pdf."))                         return "pdf";
   if (actionId === "control.if")                           return "condition";
   if (actionId === "control.for" || actionId === "control.for_each") return "loop";
   if (actionId === "control.sleep")                        return "wait";
   if (actionId.startsWith("excel."))                       return "excel";
   if (actionId.startsWith("file."))                        return "file";
+  if (actionId.startsWith("archive."))                     return "archive";
+  if (actionId.startsWith("clipboard."))                   return "clipboard";
   if (actionId.startsWith("http."))                        return "http";
+  if (actionId.startsWith("ftp.") || actionId.startsWith("s3.")) return "transfer";
+  if (actionId.startsWith("email."))                       return "email";
+  if (actionId.startsWith("notify."))                      return "notify";
+  if (actionId.startsWith("mcp."))                         return "mcp";
   if (actionId.startsWith("ai."))                          return "ai";
   if (actionId.startsWith("skill."))                       return "skill";
-  if (actionId === "lumo.flow")                            return "flow";
+  if (actionId === "flow.call" || actionId === "lumo.flow") return "flow";
   if (actionId.startsWith("string."))                      return "string";
   if (actionId.startsWith("regex."))                       return "regex";
   if (actionId.startsWith("date."))                        return "date";
@@ -182,10 +248,10 @@ export function zhAction(actionId) {
 }
 
 export const PRESETS = {
-  glass: { window: 8, panel: 50 },
-  frost: { window: 18, panel: 62 },
+  glass: { window: 0, panel: 18 },
+  frost: { window: 4, panel: 32 },
   solid: { window: 96, panel: 96 },
-  invisible: { window: 0, panel: 36 },
+  invisible: { window: 0, panel: 8 },
 };
 
 export const CAP_KINDS = [

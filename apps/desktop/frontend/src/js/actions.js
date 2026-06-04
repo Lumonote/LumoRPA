@@ -18,7 +18,12 @@ export async function refreshActions() {
 export function renderActions() {
   const query = ($("actionSearch").value || "").trim().toLowerCase();
   const box = $("actionLibrary");
-  const order = ["browser","condition","loop","wait","excel","file","http","ai","skill","flow","data","string","regex","date","math","list","json","csv","hash","util","system","db","control","misc"];
+  const order = [
+    "browser","desktop","image","pdf","condition","loop","wait","excel","file",
+    "archive","clipboard","http","transfer","email","notify","mcp","ai","skill",
+    "flow","data","string","regex","date","math","list","json","csv","hash",
+    "util","system","db","control","misc",
+  ];
   const byCategory = new Map();
   for (const a of state.actions) {
     const cat = categoryOf(a.id);
@@ -35,19 +40,27 @@ export function renderActions() {
   };
   const favs = FAVORITE_IDS.map((id) => state.actions.find((a) => a.id === id)).filter(Boolean).filter(matches);
   const sections = [];
-  if (favs.length) sections.push(renderActionFamily("favorite", favs, false));
+  if (favs.length) sections.push(renderActionFamily("favorite", favs, actionFamilyCollapsed("favorite", false, query)));
   for (const cat of order) {
     const items = (byCategory.get(cat) || []).filter(matches);
     if (!items.length) continue;
-    sections.push(renderActionFamily(cat, items, cat !== "browser"));
+    sections.push(renderActionFamily(cat, items, actionFamilyCollapsed(cat, cat !== "browser", query)));
   }
   box.innerHTML = sections.join("") || `<div class="prop-empty" style="padding:14px">未匹配到指令</div>`;
 }
 
+function actionFamilyCollapsed(family, defaultCollapsed, query) {
+  if (query) return false;
+  return state.actionFamilyCollapsed?.[family] ?? defaultCollapsed;
+}
+
 function renderActionFamily(family, items, collapsed) {
+  const listId = `action-family-${family}`;
   return `<div class="action-family ${collapsed ? "is-collapsed" : ""}" data-family="${html(family)}">
-    <div class="action-family-head"><span>${html(FAMILY_LABEL[family] || family)} · ${items.length}</span><span class="chev">▾</span></div>
-    <div class="action-list">
+    <button class="action-family-head" type="button" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="${html(listId)}">
+      <span>${html(FAMILY_LABEL[family] || family)} · ${items.length}</span><span class="chev">▾</span>
+    </button>
+    <div class="action-list" id="${html(listId)}">
       ${items
         .map((a) => {
           const zh = zhAction(a.id);

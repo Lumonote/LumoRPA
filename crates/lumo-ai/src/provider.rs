@@ -2,10 +2,13 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::ProviderProfile;
+
+static LLM_NETWORK_PROCESS_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -142,11 +145,20 @@ pub trait LlmProvider: Send + Sync {
 
 // ─── Network gating ─────────────────────────────────────────────────────────
 
+pub fn enable_llm_network_for_current_process() {
+    LLM_NETWORK_PROCESS_OVERRIDE.store(true, Ordering::Relaxed);
+}
+
+pub fn llm_network_allowed() -> bool {
+    LLM_NETWORK_PROCESS_OVERRIDE.load(Ordering::Relaxed)
+        || matches!(
+            std::env::var("LUMO_ALLOW_LLM_NETWORK").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+        )
+}
+
 fn network_allowed() -> bool {
-    matches!(
-        std::env::var("LUMO_ALLOW_LLM_NETWORK").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-    )
+    llm_network_allowed()
 }
 
 fn http_client(timeout_ms: u64) -> Result<reqwest::Client, ProviderError> {

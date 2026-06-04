@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.lumorpa.desktop",
   "build": {
-    "frontendDist": "../frontend"
+    "frontendDist": "../frontend/src"
   },
   "app": {
     "withGlobalTauri": true,
@@ -26,10 +26,10 @@
         "titleBarStyle": "Transparent",
         "backgroundColor": "#FFFFFF00",
         "windowEffects": {
-          "effects": ["windowBackground", "micaLight", "acrylic", "blur"],
+          "effects": ["windowBackground"],
           "state": "active",
           "radius": 8,
-          "color": "#FFFFFFFF"
+          "color": "#FFFFFF00"
         }
       }
     ],

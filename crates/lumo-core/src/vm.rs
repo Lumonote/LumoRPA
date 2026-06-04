@@ -901,6 +901,12 @@ async fn run_if(
     } else {
         Ok(())
     };
+    // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) inside
+    // the taken branch unwinds the run — rethrow without recording this `if` as
+    // a `failed` step.
+    if matches!(&result, Err(e) if is_control_signal(e)) {
+        return result;
+    }
     let finished_at = Utc::now();
     persist_step(
         ctx,
@@ -969,6 +975,13 @@ async fn run_for(
         }
         i += stp;
         iters += 1;
+    }
+    // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) inside
+    // the loop body unwinds the run — rethrow without recording the loop as a
+    // `failed` step (the offending leaf already persisted its own row, or a pause
+    // is intentionally left un-persisted).
+    if matches!(&result, Err(e) if is_control_signal(e)) {
+        return result;
     }
     let output = serde_json::json!({ "iterations": iters });
     ctx.record_step_output(&step.id, &output);
@@ -1047,6 +1060,13 @@ async fn run_for_each(
         }
         iters += 1;
     }
+    // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) inside
+    // the loop body unwinds the run — rethrow without recording the loop as a
+    // `failed` step (the offending leaf already persisted its own row, or a pause
+    // is intentionally left un-persisted).
+    if matches!(&result, Err(e) if is_control_signal(e)) {
+        return result;
+    }
     let output = serde_json::json!({ "iterations": iters });
     ctx.record_step_output(&step.id, &output);
     let finished_at = Utc::now();
@@ -1089,6 +1109,15 @@ async fn run_try(
     let result = run_block_boxed(ctx, body, Some(format!("{path}/try")), depth + 1).await;
     let caught = match result {
         Ok(()) => None,
+        // P1-1 / F-20: a cancel / per-step timeout / breakpoint pause inside the
+        // `do:` block is a hard interrupt, NOT a catchable failure. Rethrow it
+        // before the catch/finally machinery so the run unwinds — otherwise a
+        // `catch:` would silently "recover" from a timeout (defeating the hard
+        // per-step ceiling) or swallow a breakpoint pause. The offending leaf
+        // step already persisted its own cancelled/timeout row (a pause is
+        // intentionally left un-persisted), so we also skip recording this `try`
+        // as a step — matching how the pause unwinds through `execute_step`.
+        Err(e) if is_control_signal(&e) => return Err(e),
         Err(e) => Some(e.to_string()),
     };
     let mut final_result = Ok(());
@@ -1231,6 +1260,15 @@ async fn run_parallel(
 
     // First failure wins; everything else still completes.
     let first_err = results.into_iter().find_map(|r| r.err());
+    // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) in any
+    // branch unwinds the run — rethrow without recording the parallel block as a
+    // normal `failed` step (the offending leaf already persisted its own row, or
+    // a pause is intentionally left un-persisted). Branch state was already
+    // merged back above, so the parent context still reflects what each branch
+    // accomplished before the interrupt.
+    if matches!(&first_err, Some(e) if is_control_signal(e)) {
+        return Err(first_err.expect("matched Some"));
+    }
     let state = if first_err.is_some() { "failed" } else { "ok" };
 
     ctx.record_step_output(&step.id, &Value::Null);
@@ -1261,6 +1299,20 @@ fn run_block_boxed<'a>(
     depth: i64,
 ) -> futures::future::BoxFuture<'a, Result<(), ExecError>> {
     Box::pin(run_block_at(ctx, steps, parent_path, depth))
+}
+
+/// P1-1 / F-20: whether an error is a control-flow *signal* — a cooperative
+/// cancel, a per-step timeout, or a breakpoint pause — rather than an ordinary
+/// step failure. These are *hard interrupts*: they must unwind the whole run,
+/// so `control.try` must NOT catch them and `control.for`/`for_each`/`if`/
+/// `parallel` must NOT record themselves as a normal `failed` step on the way
+/// out. Ordinary failures (`ExecError::Step`, validation, etc.) are handled by
+/// the catch/loop machinery as before.
+fn is_control_signal(e: &ExecError) -> bool {
+    matches!(
+        e,
+        ExecError::Cancelled | ExecError::Timeout { .. } | ExecError::Paused
+    )
 }
 
 // ─── persistence ────────────────────────────────────────────────────────────

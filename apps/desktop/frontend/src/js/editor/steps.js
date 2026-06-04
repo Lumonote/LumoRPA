@@ -105,17 +105,55 @@ function renderStepRow({ step, depth, path }, idx) {
       <span class="step-action-code">${html(step.action || "?")}</span>
     </span>
     <span class="step-summary">${summary || '<em style="color: var(--faint)">无参数</em>'}</span>
-    <button class="step-ai-btn ai-state-${html(aiMode)}" data-ai-toggle="${html(myKey)}"
+    <button type="button" draggable="false" class="step-ai-btn ai-state-${html(aiMode)}" data-ai-toggle="${html(myKey)}"
             title="AI 模式：${html(AI_LABEL[aiMode] || aiMode)} · 点击打开 AI 抽屉">✨</button>
-    <button class="step-icon-btn step-expand-btn" data-expand="${html(myKey)}" title="展开配置">⤢</button>
-    <button class="step-icon-btn step-insert-btn" data-insert="${html(myKey)}" title="在此后插入">+</button>
-    <button class="step-icon-btn step-del-btn" data-del="${html(myKey)}" title="删除">×</button>
+    <button type="button" draggable="false" class="step-icon-btn step-expand-btn" data-expand="${html(myKey)}" title="展开配置">⤢</button>
+    <button type="button" draggable="false" class="step-icon-btn step-insert-btn" data-insert="${html(myKey)}" title="在此后插入">+</button>
+    <button type="button" draggable="false" class="step-icon-btn step-del-btn" data-del="${html(myKey)}" title="删除">×</button>
     <div class="step-expand-body" data-expand-body="${html(myKey)}" hidden></div>
   </div>`;
 }
 
 function bindStepListEvents() {
   const root = $("stepList");
+  root.onclick = (e) => {
+    const insertAfter = e.target.closest("[data-insert-after-btn]");
+    if (insertAfter) {
+      e.stopPropagation();
+      insertStepAfterPath(parsePathKey(insertAfter.dataset.insertAfterBtn));
+      return;
+    }
+    const ai = e.target.closest("[data-ai-toggle]");
+    if (ai) {
+      e.stopPropagation();
+      openAiDrawer(parsePathKey(ai.dataset.aiToggle));
+      return;
+    }
+    const expand = e.target.closest("[data-expand]");
+    if (expand) {
+      e.stopPropagation();
+      toggleStepExpand(parsePathKey(expand.dataset.expand));
+      return;
+    }
+    const insert = e.target.closest("[data-insert]");
+    if (insert) {
+      e.stopPropagation();
+      insertStepAfterPath(parsePathKey(insert.dataset.insert));
+      return;
+    }
+    const del = e.target.closest("[data-del]");
+    if (del) {
+      e.stopPropagation();
+      const path = parsePathKey(del.dataset.del);
+      const step = findStepByPath(extractSteps(state.ast), path);
+      if (step) deleteStepByPath(path);
+      return;
+    }
+    const row = e.target.closest(".step-row");
+    if (row && !e.target.closest("[data-expand-body]")) {
+      selectStep(parsePathKey(row.dataset.stepPath));
+    }
+  };
   // Container drop: action library → append new step at end
   root.addEventListener("dragover", (e) => {
     if (e.dataTransfer.types.includes("text/x-lumo-action")) e.preventDefault();
@@ -124,13 +162,6 @@ function bindStepListEvents() {
     if (e.target !== root) return; // children handle their own
     const actionId = e.dataTransfer.getData("text/x-lumo-action");
     if (actionId) { e.preventDefault(); appendStepToSource(actionId); }
-  });
-  // Flow-connector insert buttons (click + between steps)
-  root.querySelectorAll("[data-insert-after-btn]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      insertStepAfterPath(parsePathKey(b.dataset.insertAfterBtn));
-    });
   });
   // Drop on connector = insert action there
   root.querySelectorAll(".flow-connector[data-insert-after]").forEach((c) => {
@@ -149,47 +180,14 @@ function bindStepListEvents() {
       insertStepAfterPath(parsePathKey(c.dataset.insertAfter), actionId);
     });
   });
-  // Row click → select
-  root.querySelectorAll(".step-row").forEach((row) => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("button") || e.target.closest("[data-expand-body]")) return;
-      selectStep(parsePathKey(row.dataset.stepPath));
-    });
-  });
-  // AI ✨ → open drawer
-  root.querySelectorAll("[data-ai-toggle]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openAiDrawer(parsePathKey(b.dataset.aiToggle));
-    });
-  });
-  // Expand
-  root.querySelectorAll("[data-expand]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleStepExpand(parsePathKey(b.dataset.expand));
-    });
-  });
-  // Insert
-  root.querySelectorAll("[data-insert]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      insertStepAfterPath(parsePathKey(b.dataset.insert));
-    });
-  });
-  // Delete
-  root.querySelectorAll("[data-del]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const path = parsePathKey(b.dataset.del);
-      const step = findStepByPath(extractSteps(state.ast), path);
-      if (step && confirm(`删除步骤 "${step.id || step.action}"？`)) deleteStepByPath(path);
-    });
-  });
   // Drag / drop reorder (sibling-level only)
   let dragKey = null;
   root.querySelectorAll(".step-row").forEach((row) => {
     row.addEventListener("dragstart", (e) => {
+      if (e.target.closest("button") || e.target.closest("[data-expand-body]")) {
+        e.preventDefault();
+        return;
+      }
       dragKey = row.dataset.stepPath;
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/x-lumo-step", dragKey);

@@ -9,7 +9,7 @@ import { applyTheme, applyWindowAlpha, applyPanelAlpha, applyPreset } from "./th
 import { switchTopView, switchEditorMode, switchRightSection } from "./views.js";
 import {
   refreshFlows, createNewFlow, saveCurrentFlowAs, loadFlow, defaultInputs, saveFlowSource,
-  renderFlowList,
+  renderFlowList, importFlowFile, exportCurrentFlow, exportFlowAtPath, revealCurrentFlowFile,
 } from "./flows.js";
 import { refreshActions, renderActions } from "./actions.js";
 import { setElTab, renderElementLibrary, elementById } from "./elements.js";
@@ -18,8 +18,8 @@ import { syncGutter } from "./editor/code.js";
 import { runSelectedFlow, runStep, refreshRuns } from "./runs.js";
 import { startDebug } from "./debug.js";
 import {
-  refreshProviders, openProviderEditor, saveProvider, testProvider, renderProviderList,
-  refreshActiveProviderPill,
+  refreshProviders, openProviderEditor, saveProvider, testProvider, enableLlmNetworkForSession,
+  renderProviderList, refreshActiveProviderPill,
 } from "./providers.js";
 import {
   ensureRecorderListener, startRecording, stopRecording,
@@ -28,6 +28,23 @@ import { refreshSettings } from "./settings.js";
 import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
+
+let bootStarted = false;
+
+async function bindAppEvents() {
+  const listen = window.__TAURI__?.event?.listen;
+  if (!listen) return;
+  try {
+    await listen("lumo://open-view", (event) => {
+      const view = String(event?.payload || "");
+      if (["design", "recorder", "runs", "models", "features", "settings"].includes(view)) {
+        switchTopView(view);
+      }
+    });
+  } catch (err) {
+    console.warn("app event listen failed", err);
+  }
+}
 
 function bindEvents() {
   // Top tabs
@@ -69,7 +86,12 @@ function bindEvents() {
         if (act.dataset.act === "del") {
           if (!confirm(`确认删除流程文件：\n${path}`)) return;
           await call("delete_flow", { path });
-          if (state.flowPath === path) state.flowPath = null;
+          if (state.flowPath === path) {
+            state.flowPath = "";
+            state.flow = null;
+            $("flowTitle").textContent = "未选择流程";
+            $("flowSubtitle").textContent = "从左侧流程库选择，或导入本地流程";
+          }
           await refreshFlows();
           toast("已删除", path, "ok");
         } else if (act.dataset.act === "dup") {
@@ -77,6 +99,8 @@ function bindEvents() {
           await refreshFlows();
           await loadFlow(newPath);
           toast("已复制", newPath, "ok");
+        } else if (act.dataset.act === "export") {
+          await exportFlowAtPath(path);
         }
       } catch (err) {
         toast("操作失败", String(err), "bad");
@@ -86,9 +110,11 @@ function bindEvents() {
     const item = e.target.closest("[data-path]");
     if (item) loadFlow(item.dataset.path).catch(reportError);
   });
-  $("flowPath").addEventListener("keydown", (e) => { if (e.key === "Enter") loadFlow().catch(reportError); });
+  $("revealFlowBtn").addEventListener("click", () => revealCurrentFlowFile().catch(reportError));
   $("refreshFlowsBtn").addEventListener("click", () => refreshFlows().catch(reportError));
   $("newFlowBtn").addEventListener("click", () => createNewFlow().catch(reportError));
+  $("importFlowBtn").addEventListener("click", () => importFlowFile().catch(reportError));
+  $("exportFlowBtn").addEventListener("click", () => exportCurrentFlow().catch(reportError));
   $("magicPromptBtn").addEventListener("click", () => openMagicPrompt());
   $("saveFlowAsBtn").addEventListener("click", () => saveCurrentFlowAs().catch(reportError));
 
@@ -97,9 +123,19 @@ function bindEvents() {
   $("refreshActionsBtn").addEventListener("click", () => refreshActions().catch(reportError));
   $("actionLibrary").addEventListener("click", (e) => {
     const head = e.target.closest(".action-family-head");
-    if (head) head.parentElement.classList.toggle("is-collapsed");
+    if (head) {
+      const family = head.parentElement.dataset.family;
+      const collapsed = !head.parentElement.classList.contains("is-collapsed");
+      head.parentElement.classList.toggle("is-collapsed", collapsed);
+      head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      if (family) {
+        state.actionFamilyCollapsed[family] = collapsed;
+        localStorage.setItem("lumo.actionFamilies", JSON.stringify(state.actionFamilyCollapsed));
+      }
+      return;
+    }
     const item = e.target.closest("[data-action]");
-    if (item && !head) appendStepToSource(item.dataset.action);
+    if (item) appendStepToSource(item.dataset.action);
   });
   $("actionLibrary").addEventListener("dragstart", (e) => {
     const item = e.target.closest("[data-action]");
@@ -206,6 +242,10 @@ function bindEvents() {
   $("newProviderBtn").addEventListener("click", () => openProviderEditor(null));
   $("saveProviderBtn").addEventListener("click", saveProvider);
   $("testProviderBtn").addEventListener("click", testProvider);
+  $("enableLlmNetworkBtn").addEventListener("click", () => enableLlmNetworkForSession().catch(reportError));
+  $("netPill").addEventListener("click", () => {
+    if (!state.providers?.networkEnabled) enableLlmNetworkForSession().catch(reportError);
+  });
   $("modelsInitBtn").addEventListener("click", async () => {
     if (!confirm("将覆盖 providers.toml 为默认四件套 (openai / anthropic / deepseek / ollama)，确认？")) return;
     try {
@@ -229,6 +269,9 @@ function bindEvents() {
 }
 
 async function boot() {
+  if (bootStarted) return;
+  bootStarted = true;
+
   bindEvents();
   applyTheme(state.theme);
   applyWindowAlpha(state.windowAlpha);
@@ -237,6 +280,7 @@ async function boot() {
   switchRightSection("inspector");
   renderElementLibrary();
   ensureRecorderListener();
+  bindAppEvents();
 
   try {
     await Promise.all([

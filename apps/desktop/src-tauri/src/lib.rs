@@ -6,16 +6,21 @@ use lumo_ai::{
 use lumo_core::{ActionRegistry, FlowVm, RunOptions};
 use lumo_dsl::{Flow, IoDecl, Step};
 use lumo_recorder::{events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent, Recorder};
-use lumo_skills::{register_skill_actions, SkillRegistry};
+use lumo_skills::{register_flow_call_action, register_skill_actions, SkillRegistry};
 use lumo_storage::{FlowRunRow, Repo, StepRunRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
 };
-use tauri::{Emitter, Manager, State, Wry};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, State, WindowEvent, Wry,
+};
 
 type AppHandle = tauri::AppHandle<Wry>;
 
@@ -408,6 +413,27 @@ fn save_flow_as(app: AppHandle, name: String, source: String) -> Result<String, 
     Ok(path.display().to_string())
 }
 
+#[tauri::command]
+fn export_flow_as(app: AppHandle, name: String, source: String) -> Result<String, String> {
+    let dir = exports_dir(&app)?;
+    let safe = sanitize_flow_name(&name);
+    if safe.is_empty() {
+        return Err("export name must not be empty".into());
+    }
+    let file_name = if safe.ends_with(".lumoflow.yaml")
+        || safe.ends_with(".lumoflow.yml")
+        || safe.ends_with(".yaml")
+        || safe.ends_with(".yml")
+    {
+        safe
+    } else {
+        format!("{safe}.lumoflow.yaml")
+    };
+    let path = dir.join(file_name);
+    std::fs::write(&path, source).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
 /// Delete a file from the library. Guards against deleting bundled examples
 /// or anything outside `$LUMO_HOME` so a bug in the UI can't nuke user data
 /// it isn't allowed to.
@@ -536,6 +562,12 @@ fn read_flow_source(app: AppHandle, path: String) -> Result<String, String> {
     // P0-3: confine reads to the flow library + bundled examples.
     let safe = resolve_within(&path, &flow_read_roots(&app))?;
     std::fs::read_to_string(&safe).map_err(|e| format!("read {}: {e}", safe.display()))
+}
+
+#[tauri::command]
+fn reveal_flow_file(app: AppHandle, path: String) -> Result<(), String> {
+    let safe = resolve_within(&path, &flow_read_roots(&app))?;
+    reveal_path(&safe)
 }
 
 #[tauri::command]
@@ -696,7 +728,8 @@ async fn run_flow(
 /// the flow (including its nested children for control-flow steps) and wrapped
 /// in an ad-hoc flow that preserves the original metadata + capability set so
 /// validation still passes. Used by the Studio "▶ run this step" affordance —
-/// one of the differentiators against 影刀 (which forces top-to-bottom runs).
+/// one of the desktop Studio differentiators: run a selected node directly
+/// instead of always starting from the top.
 #[tauri::command]
 async fn run_step(
     app: AppHandle,
@@ -880,13 +913,22 @@ fn save_provider(app: AppHandle, profile: ProviderInput) -> Result<ProviderStatu
     let mut cfg = ProvidersConfig::load(&path).map_err(|e| e.to_string())?;
     let activate = profile.activate;
     let to_activate = profile.name.clone();
+    let mut api_key = profile.api_key.filter(|s| !s.is_empty());
+    let mut api_key_env = profile.api_key_env.filter(|s| !s.is_empty());
+    if api_key.is_none() {
+        if let Some(value) = api_key_env.as_deref() {
+            if !looks_like_env_var_name(value) {
+                api_key = api_key_env.take();
+            }
+        }
+    }
     let p = ProviderProfile {
         name: profile.name,
         kind: profile.kind,
         wire_api: profile.wire_api,
         base_url: profile.base_url,
-        api_key: profile.api_key.filter(|s| !s.is_empty()),
-        api_key_env: profile.api_key_env.filter(|s| !s.is_empty()),
+        api_key,
+        api_key_env,
         default_model: profile.default_model.filter(|s| !s.is_empty()),
         models: profile
             .models
@@ -941,6 +983,15 @@ fn init_providers(app: AppHandle, force: bool) -> Result<ProviderStatus, String>
 }
 
 #[tauri::command]
+fn enable_llm_network_for_session(app: AppHandle) -> Result<ProviderStatus, String> {
+    lumo_ai::enable_llm_network_for_current_process();
+    let home = app_home(&app)?;
+    let path = providers_path(&home);
+    let cfg = ProvidersConfig::load(&path).map_err(|e| e.to_string())?;
+    Ok(make_provider_status(&path, &cfg))
+}
+
+#[tauri::command]
 async fn test_provider(
     app: AppHandle,
     name: String,
@@ -980,7 +1031,7 @@ async fn test_provider(
             input_tokens: 0,
             output_tokens: 0,
             error: Some(
-                "LLM network is disabled. Set LUMO_ALLOW_LLM_NETWORK=1 before launching the app."
+                "LLM network is disabled. Enable it for this session from the Models page/status bar, or set LUMO_ALLOW_LLM_NETWORK=1 before launching the app."
                     .into(),
             ),
         });
@@ -1043,7 +1094,7 @@ async fn generate_flow(
     }
     if !llm_network_enabled() {
         return Err(
-            "LLM network is disabled. Set LUMO_ALLOW_LLM_NETWORK=1 before launching the app.".into(),
+            "LLM network is disabled. Enable it for this session from the Models page/status bar, or set LUMO_ALLOW_LLM_NETWORK=1 before launching the app.".into(),
         );
     }
     let model = match model {
@@ -1212,16 +1263,30 @@ fn feature_map() -> Vec<FeatureSection> {
 pub fn run() {
     tauri::Builder::default()
         .manage(DesktopState::default())
+        .setup(|app| {
+            setup_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_examples,
             list_flow_library,
             save_flow_as,
+            export_flow_as,
             delete_flow,
             duplicate_flow,
             save_recording_as_flow,
             inspect_flow,
             read_flow_source,
+            reveal_flow_file,
             save_flow_source,
             get_flow_capabilities,
             add_capability_grant,
@@ -1242,6 +1307,7 @@ pub fn run() {
             remove_provider,
             use_provider,
             init_providers,
+            enable_llm_network_for_session,
             test_provider,
             generate_flow,
             list_skills,
@@ -1256,7 +1322,101 @@ pub fn run() {
         .expect("error while running LumoRPA desktop");
 }
 
+fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
+    let handle = app.handle().clone();
+    let show = MenuItem::with_id(&handle, "tray_show", "显示 LumoRPA", true, None::<&str>)?;
+    let runs = MenuItem::with_id(&handle, "tray_runs", "运行图表", true, None::<&str>)?;
+    let models = MenuItem::with_id(&handle, "tray_models", "模型源", true, None::<&str>)?;
+    let settings = MenuItem::with_id(&handle, "tray_settings", "设置", true, None::<&str>)?;
+    let hide = MenuItem::with_id(&handle, "tray_hide", "隐藏窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(&handle, "tray_quit", "退出", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(&handle)?;
+    let menu = Menu::with_items(&handle, &[&show, &runs, &models, &settings, &sep, &hide, &quit])?;
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?.to_owned();
+
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
+        .tooltip("LumoRPA")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => show_main_window(app),
+            "tray_runs" => open_main_view(app, "runs"),
+            "tray_models" => open_main_view(app, "models"),
+            "tray_settings" => open_main_view(app, "settings"),
+            "tray_hide" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(&handle)?;
+
+    Ok(())
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn open_main_view(app: &AppHandle, view: &str) {
+    show_main_window(app);
+    let _ = app.emit("lumo://open-view", view);
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn reveal_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = {
+        let mut c = Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+
+    let status = command
+        .status()
+        .map_err(|e| format!("open file location for {}: {e}", path.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "open file location for {} failed with status {status}",
+            path.display()
+        ))
+    }
+}
 
 fn app_home(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -1374,6 +1534,12 @@ fn user_flows_dir(app: &AppHandle) -> Result<PathBuf, String> {
 /// `.lumoflow.yaml` here so the user can pick it up from the library.
 fn recordings_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app_home(app)?.join("recordings");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+fn exports_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_home(app)?.join("exports");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     Ok(dir)
 }
@@ -1697,6 +1863,13 @@ fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> ActionRegistr
 
     let skill_reg = load_skill_registry(home, flow_path);
     register_skill_actions(&mut registry, skill_reg);
+
+    let flow_base = flow_path
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.to_path_buf());
+    register_flow_call_action(&mut registry, flow_base);
+
     registry
 }
 
@@ -1921,10 +2094,16 @@ fn set_window_background(app: &AppHandle, alpha: u8, rgb: [u8; 3]) -> Result<(),
 }
 
 fn llm_network_enabled() -> bool {
-    matches!(
-        std::env::var("LUMO_ALLOW_LLM_NETWORK").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-    )
+    lumo_ai::llm_network_allowed()
+}
+
+fn looks_like_env_var_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Hard-coded snapshot of the implementation status of the design-doc feature
@@ -2028,7 +2207,7 @@ fn feature_map_data() -> Vec<FeatureSection> {
                     "任意节点级单步运行",
                     "M1",
                     "ready",
-                    "★ 影刀短板：run_step 命令落地。",
+                    "run_step 命令已落地，可直接运行当前选中节点。",
                 ),
                 item(
                     "D-13",
@@ -2206,7 +2385,7 @@ fn feature_map_data() -> Vec<FeatureSection> {
                     "Excel 行驱动循环",
                     "M1",
                     "ready",
-                    "★ 影刀招牌场景；examples/excel-loop.lumoflow.yaml.",
+                    "典型批处理场景；examples/excel-loop.lumoflow.yaml.",
                 ),
                 item(
                     "O-13",
@@ -2455,5 +2634,164 @@ mod path_sandbox_tests {
         let escape = flows.join("../../evil.lumoflow.yaml");
         let err = resolve_write_within(escape.to_str().unwrap(), &home_canon).unwrap_err();
         assert!(err.contains("outside"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod debug_flow_tests {
+    //! F-20: integration coverage for the breakpoint debugger at the *desktop*
+    //! layer — the `debug_flow` command's real work lives in `execute_flow`, so
+    //! we drive that directly against a temp `LUMO_HOME`. This exercises the
+    //! whole chain a webview hits: build the registry, run under `DebugOpts`,
+    //! surface `paused_at`, persist per-step `vars_json` (F-19), and resume the
+    //! paused run to advance — plus the serde `camelCase` DTO contract the
+    //! frontend depends on (`pausedAt`, `varsJson`).
+    use super::{execute_flow, DebugOpts, RunResponse};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    const FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: dbg-it }
+spec:
+  steps:
+    - { id: one,   action: control.set_var, with: { name: x, value: "1" } }
+    - { id: two,   action: control.set_var, with: { name: y, value: "2" } }
+    - { id: three, action: control.set_var, with: { name: z, value: "3" } }
+"#;
+
+    fn bps(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    async fn run_debug(home: &Path, debug: DebugOpts) -> RunResponse {
+        let flow = lumo_dsl::parse_str(FLOW).expect("parse flow");
+        execute_flow(home, None, flow, serde_json::json!({}), false, debug)
+            .await
+            .expect("execute_flow ok")
+    }
+
+    #[tokio::test]
+    async fn debug_flow_breakpoint_pause_persists_vars_then_resume_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // ── Run 1: breakpoint on `two` → `one` runs, pause before `two`. ──
+        let r1 = run_debug(
+            home,
+            DebugOpts {
+                breakpoints: bps(&["two"]),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert_eq!(r1.report.paused_at.as_deref(), Some("two"), "paused before `two`");
+        assert!(!r1.report.success, "a paused run is not a success");
+
+        // `one` is persisted ok with its F-19 vars snapshot; `two` (the
+        // breakpoint) never ran, so it is absent.
+        let one = r1
+            .steps
+            .iter()
+            .find(|s| s.path == "one")
+            .expect("step `one` persisted");
+        assert_eq!(one.state, "ok");
+        assert!(
+            !r1.steps.iter().any(|s| s.path == "two"),
+            "the un-run breakpoint step `two` must not be persisted"
+        );
+        let vars = one
+            .vars_json
+            .as_ref()
+            .expect("F-19: per-step vars snapshot present");
+        assert!(
+            vars.get("x").is_some(),
+            "vars snapshot carries `x` after set_var, got: {vars}"
+        );
+
+        // serde contract the webview reads: camelCase, no snake_case leak.
+        let report_json = serde_json::to_value(&r1.report).unwrap();
+        assert_eq!(report_json["pausedAt"], serde_json::json!("two"));
+        assert!(report_json.get("runId").is_some(), "report uses camelCase runId");
+        let one_json = serde_json::to_value(one).unwrap();
+        assert!(
+            one_json.get("varsJson").is_some(),
+            "StepRunDto serializes vars_json as camelCase varsJson"
+        );
+        assert!(
+            one_json.get("vars_json").is_none(),
+            "no snake_case key should leak to the webview"
+        );
+
+        // ── Run 2: continue (resume + same breakpoint) → steps off `two`,
+        //    runs `two` + `three`, completes. ──
+        let r2 = run_debug(
+            home,
+            DebugOpts {
+                breakpoints: bps(&["two"]),
+                resume_from: Some(r1.report.run_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(r2.report.success, "continuing past the breakpoint completes the run");
+        assert_eq!(r2.report.paused_at, None, "no further pause");
+    }
+
+    #[tokio::test]
+    async fn debug_flow_single_step_advances_one_step_per_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // Fresh single-step run pauses before the very first step.
+        let r1 = run_debug(
+            home,
+            DebugOpts {
+                step_mode: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(r1.report.paused_at.as_deref(), Some("one"));
+        assert!(!r1.report.success);
+
+        // Each resume steps off the current step and pauses before the next.
+        let r2 = run_debug(
+            home,
+            DebugOpts {
+                step_mode: true,
+                resume_from: Some(r1.report.run_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(r2.report.paused_at.as_deref(), Some("two"));
+
+        let r3 = run_debug(
+            home,
+            DebugOpts {
+                step_mode: true,
+                resume_from: Some(r2.report.run_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(r3.report.paused_at.as_deref(), Some("three"));
+
+        // Stepping off the last step finishes the run.
+        let r4 = run_debug(
+            home,
+            DebugOpts {
+                step_mode: true,
+                resume_from: Some(r3.report.run_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(r4.report.success, "stepping off the last step completes the run");
+        assert_eq!(r4.report.paused_at, None);
     }
 }

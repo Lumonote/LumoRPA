@@ -6,7 +6,7 @@ metadata:
   name: Excel 行驱动循环
   description: |
     读取输入工作簿的每一行，转换后将汇总行写回输出工作簿。
-    演示「一行 Excel = 一个任务」这一影刀经典模式。
+    演示「一行 Excel = 一个任务」这一典型批处理模式。
   tags: [example, excel]
 
 spec:

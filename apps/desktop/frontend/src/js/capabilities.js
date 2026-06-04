@@ -66,7 +66,7 @@ export async function renderCapabilitiesPanel() {
         }
         renderCapabilitiesPanel();
       } catch (e) {
-        toast("权限", String(e), "error");
+        toast("权限", String(e), "bad");
       }
     });
   });

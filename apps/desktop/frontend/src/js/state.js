@@ -2,11 +2,28 @@
 // matching the original monolith's single global. `graph` holds the Graph
 // view's pan/zoom transform.
 
+function loadJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "") ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function loadAlpha(key, fallback, legacyDefaults = []) {
+  const raw = localStorage.getItem(key);
+  const legacy = Array.isArray(legacyDefaults) ? legacyDefaults : [legacyDefaults];
+  if (raw === null || legacy.map(String).includes(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 export const state = {
   app: null,
   examples: [],
   actions: [],
   actionsByFamily: new Map(),
+  actionFamilyCollapsed: loadJson("lumo.actionFamilies", {}),
   flowPath: "",
   flow: null,            // FlowSummary
   source: "",            // raw YAML
@@ -28,8 +45,8 @@ export const state = {
   viewMode: "steps",
   currentView: "design",
   rightSection: "inspector",
-  windowAlpha: Number(localStorage.getItem("lumo.win") || 18),
-  panelAlpha: Number(localStorage.getItem("lumo.panel") || 62),
+  windowAlpha: loadAlpha("lumo.win", 0, 18),
+  panelAlpha: loadAlpha("lumo.panel", 18, [38, 62]),
   theme: localStorage.getItem("lumo.theme") || "auto",
   recorder: { recording: false, target: null, startedAt: null },
   schemaCache: new Map(),

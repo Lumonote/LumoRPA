@@ -30,11 +30,11 @@
         <div class="topbar-right">
           <div class="alpha-slider" title="整窗透明度（实时驱动 Tauri 窗口背景 alpha 0~255）">
             <span>窗口</span>
-            <input id="windowAlphaTop" type="range" min="0" max="100" value="18" />
+            <input id="windowAlphaTop" type="range" min="0" max="100" value="0" />
           </div>
           <div class="alpha-slider" title="面板透明度（CSS 层）">
             <span>面板</span>
-            <input id="panelAlphaTop" type="range" min="20" max="100" value="62" />
+            <input id="panelAlphaTop" type="range" min="8" max="100" value="18" />
           </div>
           <button class="icon" id="themeToggleBtn" title="切换深/浅主题">🌓</button>
         </div>
@@ -50,20 +50,29 @@
               <div style="display: flex; gap: 4px">
                 <button class="icon ghost" id="magicPromptBtn" title="Magic Prompt：用自然语言生成流程">✨</button>
                 <button class="icon ghost" id="newFlowBtn" title="新建空流程到「我的流程」">＋</button>
+                <button class="icon ghost" id="importFlowBtn" title="导入本地流程文件">⇧</button>
+                <button class="icon ghost" id="exportFlowBtn" title="导出当前流程">⇩</button>
                 <button class="icon ghost" id="saveFlowAsBtn" title="把当前流程另存为「我的流程」">⎘</button>
                 <button class="icon ghost" id="refreshFlowsBtn" title="刷新流程库">↻</button>
               </div>
             </div>
             <div class="panel-body">
-              <input class="path-input" id="flowPath" placeholder="输入 .lumoflow.yaml 路径" style="margin-bottom: 8px" />
+              <div class="flow-config-card" id="flowConfigCard">
+                <div class="flow-config-main">
+                  <span>文件配置</span>
+                  <strong id="flowConfigName">未选择流程</strong>
+                  <em id="flowConfigMeta">从下方流程库选择，或导入本地流程</em>
+                </div>
+                <button class="icon ghost" id="revealFlowBtn" title="在文件管理器中显示" disabled>↗</button>
+              </div>
               <div class="flow-list" id="flowList"></div>
             </div>
           </section>
 
           <section class="panel">
             <div class="panel-head">
-              <h2>指令</h2>
-              <button class="icon ghost" id="refreshActionsBtn" title="重载指令">↻</button>
+              <h2>指令集</h2>
+              <button class="icon ghost" id="refreshActionsBtn" title="重载指令集">↻</button>
             </div>
             <div class="panel-body">
               <div class="search-box">
@@ -93,7 +102,7 @@
             <button id="loadFlowBtn">📂 载入</button>
             <button id="validateBtn">✓ 校验</button>
             <button class="primary" id="runBtn">▶ 运行</button>
-            <button id="runStepBtn" title="运行当前选中节点（影刀缺失，差异化能力）">▷ 单步</button>
+            <button id="runStepBtn" title="运行当前选中节点">▷ 单步</button>
             <button id="debugBtn" title="断点调试：在设了断点的节点执行前暂停，可单步 / 继续 / 停止 (F-20)">🐞 调试</button>
             <span class="spacer"></span>
             <button id="saveFlowBtn">💾 保存</button>
@@ -260,7 +269,7 @@
                 <div class="muted" style="padding:8px 10px">录制结束后此处会生成 LumoFlow YAML 草稿，可一键追加到当前打开的流程末尾。</div>
               </div>
               <div class="note">
-                <strong>差异化能力：</strong> 录制后会同步产出 <em>CSS / XPath / A11y path / Visual anchor</em> 四套指纹，运行时由 Self-Healing Router 按 Dijkstra 路径切换，影刀的"选择器一旦坏就靠人改"在 LumoRPA 中由 Vision-LLM 兜底自愈替代。
+                <strong>差异化能力：</strong> 录制后会同步产出 <em>CSS / XPath / A11y path / Visual anchor</em> 四套指纹，运行时由 Self-Healing Router 按 Dijkstra 路径切换，选择器失效时可由 Vision-LLM 兜底自愈。
               </div>
             </div>
           </div>
@@ -272,6 +281,7 @@
             <button id="refreshRunsBtn">↻ 刷新</button>
           </div>
           <div class="panel-body">
+            <div class="runs-chart" id="runsChart"></div>
             <div class="runs-grid">
               <div class="scroll-y" id="runsList"></div>
               <div class="scroll-y" id="runDetail" style="padding-right: 4px"><span style="color: var(--muted); font-size: 12px">选择一次运行查看 step 明细</span></div>
@@ -294,6 +304,7 @@
                 <div class="panel-head">
                   <h2 id="providerEditorTitle">编辑模型源</h2>
                   <div style="display: flex; gap: 6px">
+                    <button id="enableLlmNetworkBtn">启用本次会话网络</button>
                     <button id="testProviderBtn">🛰 测试连接</button>
                     <button class="primary" id="saveProviderBtn">保存</button>
                   </div>
@@ -313,7 +324,7 @@
           </div>
           <div class="panel-body">
             <div class="note" style="margin-bottom: 12px">
-              这一页对照设计文档列出所有功能模块的当前实现状态。<strong>ready</strong> = 已可在本地跑通；<strong>partial</strong> = 部分能力可用；<strong>planned</strong> = 当前里程碑未排期，但 DSL / 架构已为其预留接口。我们目标是"<em>影刀有的我们要做对，影刀没有的我们要做强</em>"。
+              这一页对照设计文档列出所有功能模块的当前实现状态。<strong>ready</strong> = 已可在本地跑通；<strong>partial</strong> = 部分能力可用；<strong>planned</strong> = 当前里程碑未排期，但 DSL / 架构已为其预留接口。
             </div>
             <div class="feature-grid" id="featureGrid"></div>
           </div>
@@ -330,17 +341,17 @@
                 <div class="panel-body flush">
                   <div class="slider-field" title="窗口背景 alpha — 0 = 完全透过，看到桌面壁纸 / 100 = 不透明">
                     <span>整窗透明度</span>
-                    <input id="windowAlphaSlider" type="range" min="0" max="100" value="18" />
-                    <strong id="windowAlphaValue">18%</strong>
+                    <input id="windowAlphaSlider" type="range" min="0" max="100" value="0" />
+                    <strong id="windowAlphaValue">0%</strong>
                   </div>
                   <div class="slider-field" title="WebView 内面板叠加层 alpha">
                     <span>面板透明度</span>
-                    <input id="panelAlphaSlider" type="range" min="20" max="100" value="62" />
-                    <strong id="panelAlphaValue">62%</strong>
+                    <input id="panelAlphaSlider" type="range" min="8" max="100" value="18" />
+                    <strong id="panelAlphaValue">18%</strong>
                   </div>
                   <div class="preset-row">
-                    <button data-preset="glass">🪟 玻璃</button>
-                    <button data-preset="frost" class="is-active">❄️ 磨砂</button>
+                    <button data-preset="glass" class="is-active">🪟 玻璃</button>
+                    <button data-preset="frost">❄️ 磨砂</button>
                     <button data-preset="solid">⬜ 实心</button>
                     <button data-preset="invisible">👻 极简</button>
                   </div>

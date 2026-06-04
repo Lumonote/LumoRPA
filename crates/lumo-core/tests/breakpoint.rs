@@ -53,6 +53,27 @@ spec:
     - { id: c, action: probe.c, with: { tag: "c" } }
 "#;
 
+/// `a`, then a `control.try` whose `do:` block runs `b` then `c`, with a
+/// `catch:` that (if ever reached) would run `probe.a` again. Lets a test prove
+/// that a breakpoint *inside* the try unwinds cleanly: the catch must NOT fire,
+/// and the try container must not be persisted as a `failed` step.
+const NESTED_TRY_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: bp-nested }
+spec:
+  steps:
+    - { id: a, action: probe.a, with: { tag: "a" } }
+    - id: guard
+      action: control.try
+      with: {}
+      do:
+        - { id: b, action: probe.b, with: { tag: "b" } }
+        - { id: c, action: probe.c, with: { tag: "c" } }
+      catch:
+        - { id: rescue, action: probe.a, with: { tag: "rescue" } }
+"#;
+
 struct Probes {
     a: Arc<AtomicUsize>,
     b: Arc<AtomicUsize>,
@@ -207,4 +228,68 @@ async fn no_breakpoints_runs_to_completion() {
     assert!(report.success);
     assert_eq!(report.paused_at, None);
     assert_eq!(probes.counts(), (1, 1, 1));
+}
+
+#[tokio::test]
+async fn breakpoint_inside_try_unwinds_without_catching_or_failing_container() {
+    // A breakpoint set on a step *inside* a `control.try` must unwind the pause
+    // cleanly: (1) the `catch:` block must NOT run (a pause is not a failure to
+    // recover from), and (2) the `try` container must NOT be persisted as a
+    // `failed` step — a pause is a hard interrupt, not a caught error. Resuming
+    // then steps off the breakpoint and completes the nested block.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repo::open(tmp.path().join("lumo.db")).unwrap();
+    let probes = Probes::new();
+    let flow = parse_str(NESTED_TRY_FLOW).unwrap();
+
+    // Breakpoint on `c`, whose nested path is `guard/try/c`.
+    let r1 = FlowVm::new(probes.registry(), Some(repo.clone()))
+        .with_breakpoints(bp(&["guard/try/c"]))
+        .run(&flow, RunOptions::default())
+        .await
+        .expect("a paused run returns Ok with paused_at");
+
+    assert_eq!(r1.paused_at.as_deref(), Some("guard/try/c"), "paused before nested `c`");
+    assert!(!r1.success);
+    assert_eq!(
+        probes.counts(),
+        (1, 1, 0),
+        "a + b ran; c (the breakpoint) did not, and the catch's probe.a did NOT fire"
+    );
+
+    let steps = repo.list_steps(&r1.run_id).unwrap();
+    // No control container (the `try`) is recorded as `failed` when a pause
+    // unwinds through it.
+    assert!(
+        steps.iter().all(|s| s.state != "failed"),
+        "a breakpoint pause must not leave a `failed` control step: {:?}",
+        steps
+            .iter()
+            .map(|s| (s.path.as_str(), s.state.as_str()))
+            .collect::<Vec<_>>()
+    );
+    // Only the steps that actually completed before the pause are persisted:
+    // `a` and the nested `guard/try/b`.
+    let persisted: Vec<(&str, &str)> = steps
+        .iter()
+        .map(|s| (s.path.as_str(), s.state.as_str()))
+        .collect();
+    assert_eq!(persisted, vec![("a", "ok"), ("guard/try/b", "ok")]);
+    assert_eq!(repo.get_run(&r1.run_id).unwrap().unwrap().state, "paused");
+
+    // Continue: resume steps off `c`, runs it, the try completes (no catch), done.
+    let r2 = FlowVm::new(probes.registry(), Some(repo.clone()))
+        .with_resume_from(Some(r1.run_id.clone()))
+        .with_breakpoints(bp(&["guard/try/c"]))
+        .run(&flow, RunOptions::default())
+        .await
+        .expect("resume completes");
+
+    assert!(r2.success, "continuing past the breakpoint completes the run");
+    assert_eq!(r2.paused_at, None);
+    assert_eq!(
+        probes.counts(),
+        (1, 1, 1),
+        "a + b replayed (still 1 each), c stepped off and ran; catch never fired"
+    );
 }

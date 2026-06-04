@@ -17,7 +17,7 @@ export function applyTheme(value) {
 }
 
 export function applyPanelAlpha(percent) {
-  const clamped = Math.max(20, Math.min(100, Number(percent)));
+  const clamped = Math.max(8, Math.min(100, Number(percent)));
   state.panelAlpha = clamped;
   localStorage.setItem("lumo.panel", String(clamped));
   document.documentElement.style.setProperty("--panel-alpha", String(clamped / 100));

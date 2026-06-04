@@ -20,7 +20,7 @@ pub use helpers::{
 // a single set of `HealedSelector`/`Decision` symbols.
 pub use lumo_core::ai_hook::{AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
 pub use provider::{
-    AnthropicProvider, ChatMessage, ChatRequest, ChatResponse, LlmProvider, OpenAiProvider,
-    ProviderError, ProviderId, Role,
+    enable_llm_network_for_current_process, llm_network_allowed, AnthropicProvider, ChatMessage,
+    ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, ProviderError, ProviderId, Role,
 };
 pub use router::{AiRouter, AiRouterBuilder};
