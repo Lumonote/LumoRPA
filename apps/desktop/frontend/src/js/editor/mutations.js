@@ -97,10 +97,66 @@ export function appendStepWithSelector(actionId, element) {
     state.source = `apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: untitled\n  version: 0.1.0\nspec:\n  steps:\n`;
   }
   const id = `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 1000)}`;
-  const css = element?.fingerprints?.css || "";
   const label = element?.label ? `  # ${element.label}` : "";
-  state.source += `\n    - id: ${id}${label}\n      action: ${actionId}\n      with:\n        selector: ${JSON.stringify(css)}\n`;
+  state.source += `\n    - id: ${id}${label}\n      action: ${actionId}\n${withBlockForElement(actionId, element)}`;
   state.ast = parseYaml(state.source);
   renderActiveView();
   toast("已添加节点", `${id} → ${element?.label || actionId}`, "ok");
+}
+
+function withBlockForElement(actionId, element) {
+  if (actionId === "browser.extract") {
+    const css = element?.fingerprints?.css || "";
+    return `      with:\n        selector: ${JSON.stringify(css)}\n        all: false\n`;
+  }
+  if (actionId === "browser.type") {
+    return `${browserSelectorBlock(element)}        text: ""\n        clear: true\n`;
+  }
+  if (actionId === "browser.wait") {
+    return `${browserSelectorBlock(element)}        condition: "visible"\n        timeout_ms: 30000\n`;
+  }
+  if (actionId === "browser.click") {
+    return browserSelectorBlock(element);
+  }
+  if (actionId === "desktop.click") {
+    const bounds = element?.bounds;
+    if (bounds) {
+      const x = Math.round(bounds.x + bounds.w / 2);
+      const y = Math.round(bounds.y + bounds.h / 2);
+      return `      with:\n        x: ${x}\n        y: ${y}\n        button: "left"\n`;
+    }
+    return `      with:\n        button: "left"\n`;
+  }
+  if (actionId === "desktop.type") {
+    return `      with:\n        text: ""\n`;
+  }
+  return `      with: {}\n`;
+}
+
+function browserSelectorBlock(element) {
+  const selectors = selectorFields(element);
+  const prompt = elementPrompt(element);
+  if (!selectors.length) {
+    return `      with:\n        selector: ""\n${prompt ? `        prompt: ${JSON.stringify(prompt)}\n` : ""}`;
+  }
+  const lines = [
+    "      with:",
+    "        selectors:",
+    ...selectors.map(([key, value]) => `          ${key}: ${JSON.stringify(value)}`),
+  ];
+  if (prompt) lines.push(`        prompt: ${JSON.stringify(prompt)}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function selectorFields(element) {
+  const fp = element?.fingerprints || {};
+  return ["id", "data_testid", "css", "aria_label", "text_includes", "xpath"]
+    .filter((key) => fp[key])
+    .map((key) => [key, fp[key]]);
+}
+
+function elementPrompt(element) {
+  return [element?.label, element?.role, element?.tag, element?.fingerprints?.visual]
+    .filter(Boolean)
+    .join(" / ");
 }

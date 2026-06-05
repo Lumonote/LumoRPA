@@ -18,6 +18,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(EnvGetAction);
     r.register(SleepAction);
     r.register(PlatformAction);
+    r.register(ProcessListAction);
 }
 
 pub struct ShellAction;
@@ -158,4 +159,81 @@ impl Action for PlatformAction {
             "family": std::env::consts::FAMILY,
         })))
     }
+}
+
+// ─── system.process_list ──────────────────────────────────────────────────────
+// 纯 Rust `sysinfo`(仅启用 `system` 特性)枚举进程。与 platform/env/sleep 同属
+// 纯只读信息,不写文件/不触网,故无能力闸门 —— 不像 system.shell 那样可派生任意
+// 进程,只读已有进程的元数据,与读取本机平台信息同级。
+
+pub struct ProcessListAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProcessListIn {
+    /// 仅返回名字(不区分大小写)包含此子串的进程;缺省返回全部。
+    #[serde(default)]
+    name: Option<String>,
+    /// 返回条目上限(默认 1000),防超大进程表撑爆 step 快照。
+    #[serde(default = "default_proc_limit")]
+    limit: usize,
+}
+fn default_proc_limit() -> usize {
+    1_000
+}
+
+#[async_trait]
+impl Action for ProcessListAction {
+    fn id(&self) -> &'static str {
+        "system.process_list"
+    }
+    fn summary(&self) -> &'static str {
+        "List running processes (pid/name/cpu/mem), optionally filtered by name"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ProcessListIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let ProcessListIn { name, limit } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("system.process_list invalid: {e}")))?;
+        // sysinfo 的刷新是阻塞 syscall,挪到阻塞线程池。
+        let procs = tokio::task::spawn_blocking(move || collect_processes(name.as_deref(), limit))
+            .await
+            .map_err(|e| StepError::msg(format!("system.process_list join: {e}")))?;
+        let total = procs.len();
+        Ok(ActionResult::from(serde_json::json!({
+            "processes": procs,
+            "count": total,
+        })))
+    }
+}
+
+fn collect_processes(name_filter: Option<&str>, limit: usize) -> Vec<Value> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+    );
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let needle = name_filter.map(|n| n.to_lowercase());
+    let mut out = Vec::new();
+    for (pid, p) in sys.processes() {
+        let name = p.name().to_string_lossy().into_owned();
+        if let Some(n) = &needle {
+            if !name.to_lowercase().contains(n.as_str()) {
+                continue;
+            }
+        }
+        out.push(serde_json::json!({
+            "pid": pid.as_u32(),
+            "name": name,
+            // 即时 CPU 占用百分比(单次刷新为相对上一采样,首刷可能为 0)。
+            "cpu": p.cpu_usage(),
+            // 常驻内存,字节。
+            "memory": p.memory(),
+        }));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
 }

@@ -1,5 +1,7 @@
 // Small DOM + formatting helpers shared across every panel.
 
+import { errorMessage } from "./api.js";
+
 export const $ = (id) => document.getElementById(id);
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
@@ -45,5 +47,5 @@ export function kv(label, value) {
 
 export function reportError(error) {
   setStatus("操作失败", "bad");
-  toast("操作失败", String(error), "bad");
+  toast("操作失败", errorMessage(error), "bad");
 }

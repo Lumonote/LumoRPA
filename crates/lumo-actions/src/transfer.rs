@@ -22,18 +22,27 @@ mod sigv4;
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, ResourceFactory, RunTeardown, StepCtx};
+use lumo_dsl::ResourceDecl;
 use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::resource_store::ResourceStore;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(FtpUploadAction);
     r.register(FtpDownloadAction);
     r.register(S3PutAction);
     r.register(S3GetAction);
+    // T3: a `spec.resources.<name>` of kind `ftp` is one logged-in session reused
+    // by every ftp.* step that binds to it (skipping reconnect+relogin), QUIT at
+    // run end. Unbound ftp.* steps connect+login+quit per call (back-compat).
+    r.register_teardown(Arc::new(FtpTeardown));
+    r.register_resource_factory(Arc::new(FtpFactory));
 }
 
 fn default_ftp_port() -> u16 {
@@ -94,26 +103,45 @@ impl Action for FtpUploadAction {
         ctx.ensure_network_url(&format!("ftp://{host}"))?;
 
         // OOM 护栏:stat 后比对 max_bytes,再读入内存。
-        let meta = tokio::fs::metadata(&local_path)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.upload stat {}: {e}", local_path.display())))?;
+        let meta = tokio::fs::metadata(&local_path).await.map_err(|e| {
+            StepError::msg(format!("ftp.upload stat {}: {e}", local_path.display()))
+        })?;
         if meta.len() > max_bytes {
             return Err(StepError::msg(format!(
                 "ftp.upload: file size {} exceeds max_bytes {max_bytes}",
                 meta.len()
             )));
         }
-        let bytes = tokio::fs::read(&local_path)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.upload read {}: {e}", local_path.display())))?;
+        let bytes = tokio::fs::read(&local_path).await.map_err(|e| {
+            StepError::msg(format!("ftp.upload read {}: {e}", local_path.display()))
+        })?;
 
-        let mut ftp = ftp_connect_login(&host, port, &username, &password, "ftp.upload").await?;
-        let mut cursor = std::io::Cursor::new(bytes);
-        let written = ftp
-            .put_file(&remote_path, &mut cursor)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.upload store {remote_path}: {e}")))?;
-        let _ = ftp.quit().await;
+        // T3: a bound `ftp` resource reuses the run's logged-in session (no QUIT
+        // here — teardown quits it); an unbound step connects+transfers+quits per
+        // call, always QUITing on both Ok and Err so it leaves no half-open session.
+        let written = match ftp_slot(ctx) {
+            Some(name) => {
+                let session =
+                    ensure_ftp(ctx.run_id(), &name, &host, port, &username, &password).await?;
+                let mut guard = session.lock().await;
+                let mut cursor = std::io::Cursor::new(bytes);
+                guard
+                    .put_file(&remote_path, &mut cursor)
+                    .await
+                    .map_err(|e| StepError::msg(format!("ftp.upload store {remote_path}: {e}")))?
+            }
+            None => {
+                let mut ftp =
+                    ftp_connect_login(&host, port, &username, &password, "ftp.upload").await?;
+                let mut cursor = std::io::Cursor::new(bytes);
+                let work = ftp
+                    .put_file(&remote_path, &mut cursor)
+                    .await
+                    .map_err(|e| StepError::msg(format!("ftp.upload store {remote_path}: {e}")));
+                let _ = ftp.quit().await;
+                work?
+            }
+        };
 
         Ok(ActionResult::from(serde_json::json!({
             "host": host,
@@ -169,35 +197,24 @@ impl Action for FtpDownloadAction {
         ctx.ensure_fs_write(&local_path)?;
         ctx.ensure_network_url(&format!("ftp://{host}"))?;
 
-        let mut ftp = ftp_connect_login(&host, port, &username, &password, "ftp.download").await?;
-        let mut stream = ftp
-            .retr_as_stream(&remote_path)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.download retr {remote_path}: {e}")))?;
-
-        // 读入内存并 max_bytes 兜底(FTP 无 Content-Length,只能边读边卡)。
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 64 * 1024];
-        loop {
-            let n = stream
-                .read(&mut chunk)
-                .await
-                .map_err(|e| StepError::msg(format!("ftp.download read: {e}")))?;
-            if n == 0 {
-                break;
+        // T3: a bound `ftp` resource reuses the run's logged-in session (teardown
+        // quits it); an unbound step connects+transfers+quits per call — QUITing on
+        // both Ok and Err so a failed download leaves no half-open control session.
+        let buf = match ftp_slot(ctx) {
+            Some(name) => {
+                let session =
+                    ensure_ftp(ctx.run_id(), &name, &host, port, &username, &password).await?;
+                let mut guard = session.lock().await;
+                download_via(&mut guard, &remote_path, max_bytes).await?
             }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() as u64 > max_bytes {
-                return Err(StepError::msg(format!(
-                    "ftp.download: response exceeds max_bytes {max_bytes}"
-                )));
+            None => {
+                let mut ftp =
+                    ftp_connect_login(&host, port, &username, &password, "ftp.download").await?;
+                let work = download_via(&mut ftp, &remote_path, max_bytes).await;
+                let _ = ftp.quit().await;
+                work?
             }
-        }
-        ftp.finalize_retr_stream(stream)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.download finalize: {e}")))?;
-        let _ = ftp.quit().await;
+        };
 
         if let Some(parent) = local_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
@@ -231,6 +248,155 @@ async fn ftp_connect_login(
         // 故意只回 "login failed",不回原始错误,避免回显用户名/口令片段。
         .map_err(|_| StepError::msg(format!("{who} login failed for {host}:{port}")))?;
     Ok(ftp)
+}
+
+// ─── T3: `ftp` resource — one logged-in session per run, reused across steps ───
+//
+// A `spec.resources.<name>: {kind: ftp}` is one logged-in `AsyncFtpStream` opened
+// on the first ftp.* step that binds to it (`Step.resource`), kept in
+// `FTP_SESSIONS` keyed by `(run_id, name)`, reused by every later bound step
+// (skipping the reconnect + relogin), and QUIT at run end by [`FtpTeardown`]. An
+// unbound step connects+logins+quits per call, exactly as before.
+//
+// Like smtp, the connection identity (host/port/**credentials**) comes from the
+// FIRST bound step's inputs (vault-resolved), not the decl; later bound steps
+// reuse that session and their own params are ignored. The per-step fs + network
+// gates still run on every step. The live session sits behind a
+// `tokio::sync::Mutex` so a bound transfer can hold it across `.await` (the FTP
+// ops are async); that also serializes use if parallel branches share one session.
+
+const FTP_KIND: &str = "ftp";
+
+/// Logged-in sessions opened for `ftp` resources, keyed `(run_id, resource name)`.
+type FtpSession = tokio::sync::Mutex<suppaftp::tokio::AsyncFtpStream>;
+static FTP_SESSIONS: ResourceStore<FtpSession> = ResourceStore::new();
+
+/// The `ftp` resource the step binds to, or `None` when it binds nothing (or a
+/// non-`ftp` / undeclared resource) — in which case it connects per call, as before.
+fn ftp_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == FTP_KIND => Some(name),
+        _ => None,
+    }
+}
+
+/// Open (once) and return the shared logged-in session for an `ftp` resource at
+/// `(run_id, slot)`, reusing it on later steps. The first bound step's connection
+/// params establish it. Idempotent: on a concurrent open the first session wins
+/// and the loser is gracefully QUIT (not just dropped).
+async fn ensure_ftp(
+    run_id: &str,
+    slot: &str,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<Arc<FtpSession>, StepError> {
+    if let Some(s) = FTP_SESSIONS.get(run_id, slot) {
+        return Ok(s);
+    }
+    let stream = ftp_connect_login(host, port, username, password, "ftp").await?;
+    // On a concurrent open of the same slot the first session wins; reclaim ours if
+    // we lost and QUIT it gracefully — a bare drop closes the socket but skips the
+    // FTP goodbye, leaving the server's authenticated control connection to idle
+    // out. The window is narrow (two parallel branches opening the same `ftp`
+    // resource at once), but a logged-in session is worth closing cleanly.
+    let (session, loser) = FTP_SESSIONS.get_or_put_reclaiming_loser(
+        run_id,
+        slot,
+        Arc::new(tokio::sync::Mutex::new(stream)),
+    );
+    if let Some(loser) = loser {
+        // Sole owner of the loser (the store kept the winner, not this `Arc`), so
+        // the lock is immediate; mirror the teardown's best-effort QUIT-then-drop.
+        let mut guard = loser.lock().await;
+        let _ = guard.quit().await;
+    }
+    Ok(session)
+}
+
+/// Retrieve `remote_path` into memory, capped at `max_bytes`. Shared by the bound
+/// (reused session) and unbound (per-call) download paths; takes `&mut` so it runs
+/// against either an owned stream or a locked shared one.
+async fn download_via(
+    ftp: &mut suppaftp::tokio::AsyncFtpStream,
+    remote_path: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, StepError> {
+    let mut stream = ftp
+        .retr_as_stream(remote_path)
+        .await
+        .map_err(|e| StepError::msg(format!("ftp.download retr {remote_path}: {e}")))?;
+    // 读入内存并 max_bytes 兜底(FTP 无 Content-Length,只能边读边卡)。
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| StepError::msg(format!("ftp.download read: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() as u64 > max_bytes {
+            return Err(StepError::msg(format!(
+                "ftp.download: response exceeds max_bytes {max_bytes}"
+            )));
+        }
+    }
+    ftp.finalize_retr_stream(stream)
+        .await
+        .map_err(|e| StepError::msg(format!("ftp.download finalize: {e}")))?;
+    Ok(buf)
+}
+
+/// QUIT and drop every `ftp` session opened for `run_id`. Idempotent — a no-op
+/// when the run opened none. The end-of-run teardown body; also exposed for tests.
+#[doc(hidden)]
+pub async fn close_run_ftp(run_id: &str) {
+    for s in FTP_SESSIONS.take_run(run_id) {
+        let mut guard = s.lock().await;
+        // Best-effort graceful close; ignore errors (a dead control connection
+        // just means the session is already gone). Dropping then closes the socket.
+        let _ = guard.quit().await;
+    }
+}
+
+/// Whether any `ftp` resource session is currently open for `run_id`. For tests.
+#[doc(hidden)]
+pub fn ftp_session_open(run_id: &str) -> bool {
+    FTP_SESSIONS.has_run(run_id)
+}
+
+/// End-of-run hook: QUITs every `ftp` session for the run so a failing or
+/// forgetful flow can't leave a logged-in control connection dangling.
+struct FtpTeardown;
+
+#[async_trait]
+impl RunTeardown for FtpTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_ftp(run_id).await;
+    }
+}
+
+/// T3 resource factory for `ftp`. Like smtp, the session is opened **lazily** by
+/// the first bound step, not here — its credentials are vault-resolved step
+/// inputs, not part of the decl that `open` receives. `open` only validates the
+/// declaration; the action opens-and-reuses via [`ensure_ftp`].
+struct FtpFactory;
+
+#[async_trait]
+impl ResourceFactory for FtpFactory {
+    fn kind(&self) -> &str {
+        FTP_KIND
+    }
+
+    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        Ok(())
+    }
 }
 
 // ─── s3.put ─────────────────────────────────────────────────────────────────
@@ -435,7 +601,11 @@ async fn s3_request(
         .map(|(_, rest)| rest)
         .unwrap_or(endpoint)
         .trim_end_matches('/');
-    let canonical_path = format!("/{}/{}", bucket.trim_matches('/'), key.trim_start_matches('/'));
+    let canonical_path = format!(
+        "/{}/{}",
+        bucket.trim_matches('/'),
+        key.trim_start_matches('/')
+    );
     let url = format!("{endpoint}{canonical_path}");
 
     let now = chrono::Utc::now();
@@ -485,4 +655,64 @@ async fn s3_request(
         .map_err(|e| StepError::msg(format!("s3 body: {}", e.without_url())))?
         .to_vec();
     Ok(S3Resp { status, body })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn decl(yaml: &str) -> ResourceDecl {
+        serde_yaml::from_str(yaml).expect("valid ResourceDecl yaml")
+    }
+
+    fn ctx_with(resources: &[(&str, &str)], current: Option<&str>) -> StepCtx {
+        let map: BTreeMap<String, ResourceDecl> = resources
+            .iter()
+            .map(|(name, yaml)| (name.to_string(), decl(yaml)))
+            .collect();
+        let ctx = StepCtx::new(
+            "run-ftp".into(),
+            "flow-ftp".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            lumo_dsl::Capabilities::default(),
+            Vec::new(),
+        )
+        .with_resources(map);
+        ctx.set_current_resource(current);
+        ctx
+    }
+
+    #[test]
+    fn ftp_slot_selects_only_ftp_kind_bindings() {
+        let resources = &[("files", "kind: ftp\n"), ("db", "kind: sqlite\npath: /tmp/x\n")];
+        assert_eq!(
+            ftp_slot(&ctx_with(resources, Some("files"))).as_deref(),
+            Some("files")
+        );
+        // Unbound / non-ftp / undeclared ⇒ None ⇒ per-call connect (back-compat).
+        assert_eq!(ftp_slot(&ctx_with(resources, None)), None);
+        assert_eq!(ftp_slot(&ctx_with(resources, Some("db"))), None);
+        assert_eq!(ftp_slot(&ctx_with(resources, Some("ghost"))), None);
+    }
+
+    #[test]
+    fn ftp_factory_kind_matches() {
+        assert_eq!(FtpFactory.kind(), FTP_KIND);
+        assert_eq!(FTP_KIND, "ftp");
+    }
+
+    #[tokio::test]
+    async fn close_run_ftp_is_idempotent_for_a_run_that_opened_nothing() {
+        // End-of-run teardown is idempotent: with no sessions opened (or on a
+        // second call once the first drained the run), `take_run` yields nothing so
+        // the QUIT loop runs zero times and cannot panic. This is exactly the path a
+        // double-teardown — or a run cancelled before any `ftp` open — takes.
+        assert!(!ftp_session_open("ghost-run"));
+        close_run_ftp("ghost-run").await; // no sessions ⇒ clean no-op, no panic
+        close_run_ftp("ghost-run").await; // second call is equally clean (idempotent)
+        assert!(!ftp_session_open("ghost-run"));
+    }
 }

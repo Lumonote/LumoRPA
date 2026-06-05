@@ -66,6 +66,52 @@ pub async fn ok_with(id: &str, input: Value, caps: Capabilities) -> Value {
     }
 }
 
+/// Like [`run_with`] but binds the step to a declared resource — the T3
+/// "open once, reuse" path. `resources` are the `spec.resources` (name → YAML
+/// decl), `current` is the step's `resource:` binding, and `run_id` is explicit
+/// so calls that share it reuse the same per-run resource handle. Used by the
+/// per-family reuse tests.
+pub async fn run_bound(
+    run_id: &str,
+    resources: &[(&str, &str)],
+    current: Option<&str>,
+    id: &str,
+    input: Value,
+    caps: Capabilities,
+) -> Result<Value, String> {
+    use std::collections::BTreeMap;
+    let mut reg = ActionRegistry::new();
+    lumo_actions::register_all(&mut reg);
+    let action = reg
+        .get(id)
+        .unwrap_or_else(|| panic!("action `{id}` is not registered"));
+    let map: BTreeMap<String, lumo_dsl::ResourceDecl> = resources
+        .iter()
+        .map(|(name, yaml)| {
+            (
+                name.to_string(),
+                serde_yaml::from_str(yaml).expect("valid ResourceDecl yaml"),
+            )
+        })
+        .collect();
+    let mut ctx = StepCtx::new(
+        run_id.into(),
+        "flow-test".into(),
+        reg,
+        None,
+        Value::Null,
+        caps,
+        Vec::new(),
+    )
+    .with_resources(map);
+    ctx.set_current_resource(current);
+    action
+        .execute(&mut ctx, input)
+        .await
+        .map(|r| r.output)
+        .map_err(|e| e.to_string())
+}
+
 /// Grant read+write over everything under `dir` — the standard sandbox for the
 /// tempdir-based `file.*`/`csv.*`/`db.*`/`excel.*` tests.
 pub fn fs_caps(dir: &std::path::Path) -> Capabilities {

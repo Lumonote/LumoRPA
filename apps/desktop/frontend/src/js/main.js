@@ -12,7 +12,11 @@ import {
   renderFlowList, importFlowFile, exportCurrentFlow, exportFlowAtPath, revealCurrentFlowFile,
 } from "./flows.js";
 import { refreshActions, renderActions } from "./actions.js";
-import { setElTab, renderElementLibrary, elementById } from "./elements.js";
+import {
+  setElTab, renderElementLibrary, elementById, elementCopyText,
+  deleteElementById, duplicateElementById, syncElementGroups,
+  refreshElementLibrary, persistElementLibrary,
+} from "./elements.js";
 import { appendStepToSource, appendStepWithSelector } from "./editor/mutations.js";
 import { syncGutter } from "./editor/code.js";
 import { runSelectedFlow, runStep, refreshRuns } from "./runs.js";
@@ -159,33 +163,63 @@ function bindEvents() {
     if (btn) setElTab(btn.dataset.elTab);
   });
   $("elSearch")?.addEventListener("input", renderElementLibrary);
+  $("elKindFilter")?.addEventListener("change", renderElementLibrary);
+  $("elUsageFilter")?.addEventListener("change", renderElementLibrary);
+  $("elSyncBtn")?.addEventListener("click", async () => {
+    try {
+      const count = await syncElementGroups();
+      toast(count ? "同步完成" : "无需同步", count ? `${count} 个云元素已更新` : "当前没有待同步元素", count ? "ok" : "warn");
+    } catch (e) {
+      toast("同步失败", String(e), "bad");
+    }
+  });
   $("elCaptureBtn")?.addEventListener("click", () => {
     switchTopView("recorder");
     toast("跳到录制器", "点击 ● 开始录制 后再在页面中圈选元素", "ok");
   });
-  $("elClearBtn")?.addEventListener("click", () => {
+  $("elClearBtn")?.addEventListener("click", async () => {
     const tab = state.elTab;
     if (!confirm(`清空当前分类（${tab}）？`)) return;
     if (tab === "elements") state.elements = [];
     else if (tab === "images") state.images = [];
     else if (tab === "datatables") state.datatables = [];
     renderElementLibrary();
+    try {
+      await persistElementLibrary();
+    } catch (e) {
+      toast("保存元素库失败", String(e), "bad");
+    }
   });
   $("elBody")?.addEventListener("click", async (e) => {
-    const click = e.target.closest("[data-el-use-click]");
-    const extract = e.target.closest("[data-el-use-extract]");
+    const use = e.target.closest("[data-el-use]");
     const copy = e.target.closest("[data-el-copy]");
-    if (click) {
-      const el = elementById(click.dataset.elUseClick);
-      if (el) appendStepWithSelector("browser.click", el);
-    } else if (extract) {
-      const el = elementById(extract.dataset.elUseExtract);
-      if (el) appendStepWithSelector("browser.extract", el);
+    const duplicate = e.target.closest("[data-el-duplicate]");
+    const del = e.target.closest("[data-el-delete]");
+    if (use) {
+      const el = elementById(use.dataset.elId);
+      if (el) appendStepWithSelector(use.dataset.elUse, el);
     } else if (copy) {
       const el = elementById(copy.dataset.elCopy);
-      if (el?.fingerprints?.css) {
-        try { await navigator.clipboard.writeText(el.fingerprints.css); toast("已复制", el.fingerprints.css, "ok"); }
+      const text = elementCopyText(copy.dataset.elCopy);
+      if (el && text) {
+        try { await navigator.clipboard.writeText(text); toast("已复制", el.label || el.id, "ok"); }
         catch { toast("复制失败", "请手动选中文本复制", "warn"); }
+      }
+    } else if (duplicate) {
+      try {
+        const clone = await duplicateElementById(duplicate.dataset.elDuplicate);
+        if (clone) toast("已创建副本", clone.label || clone.id, "ok");
+      } catch (err) {
+        toast("保存元素库失败", String(err), "bad");
+      }
+    } else if (del) {
+      const el = elementById(del.dataset.elDelete);
+      if (!el || !confirm(`删除元素：${el.label || el.id}？`)) return;
+      try {
+        const count = await deleteElementById(del.dataset.elDelete);
+        if (count) toast("已删除元素", el.label || el.id, "warn");
+      } catch (err) {
+        toast("保存元素库失败", String(err), "bad");
       }
     }
   });
@@ -213,6 +247,27 @@ function bindEvents() {
       toast("校验通过", `${r.id} · ${r.stepCount} 步`, "ok");
       setStatus("校验通过");
     } catch (e) { toast("校验失败", String(e), "bad"); setStatus("校验失败", "bad"); }
+  });
+  $("lintBtn").addEventListener("click", async () => {
+    if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
+    try {
+      const issues = await call("lint_flow", { path: state.flowPath });
+      if (!issues.length) {
+        toast("Lint 通过", "未发现结构 / 权限 / 变量引用问题", "ok");
+        setStatus("Lint 通过", "ok");
+        return;
+      }
+      const errors = issues.filter((i) => i.severity === "error").length;
+      const warns = issues.filter((i) => i.severity === "warn").length;
+      const infos = issues.length - errors - warns;
+      const detail = issues
+        .slice(0, 8)
+        .map((i) => `[${i.severity}] ${i.step ? i.step + ": " : ""}${i.message}`)
+        .join("\n");
+      const tone = errors ? "bad" : warns ? "warn" : "ok";
+      toast(`Lint: ${errors} 错误 · ${warns} 警告 · ${infos} 提示`, detail, tone);
+      setStatus(`Lint: ${errors} 错误 / ${warns} 警告`, tone);
+    } catch (e) { toast("Lint 失败", String(e), "bad"); setStatus("Lint 失败", "bad"); }
   });
   $("runBtn").addEventListener("click", runSelectedFlow);
   $("runStepBtn").addEventListener("click", () => {
@@ -247,7 +302,7 @@ function bindEvents() {
     if (!state.providers?.networkEnabled) enableLlmNetworkForSession().catch(reportError);
   });
   $("modelsInitBtn").addEventListener("click", async () => {
-    if (!confirm("将覆盖 providers.toml 为默认四件套 (openai / anthropic / deepseek / ollama)，确认？")) return;
+    if (!confirm("将覆盖 providers.toml 为默认模型源 (openai / anthropic / deepseek / local-ocr / ollama)，确认？")) return;
     try {
       state.providers = await call("init_providers", { force: true });
       renderProviderList();
@@ -289,6 +344,7 @@ async function boot() {
       refreshProviders().catch(() => {}),
       refreshSettings().catch(() => {}),
       loadFeatureMap().catch(() => {}),
+      refreshElementLibrary().catch(() => {}),
     ]);
     if (state.examples[0]) {
       // Prefer user-saved → recordings → bundled examples so a returning

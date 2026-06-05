@@ -38,6 +38,9 @@ regex = "1"
 md-5 = "0.10"
 sha1 = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# string.encode_convert:UTF-8 ⇄ GBK/GB18030/Big5 等中文编码互转。encoding_rs 为
+# 纯 Rust(Mozilla,MPL-2.0/Apache-2.0),无 C 依赖,信创/aarch64/loongarch 交叉友好。
+encoding_rs = "0.8"
 
 # F-3 email 动作:SMTP(lettre)+ IMAP(async-imap)。统一走 rustls + ring,避开
 # openssl/native-tls 的 C 依赖,满足信创/跨平台交叉编译。lettre 0.11.22 起 MSRV
@@ -66,6 +69,15 @@ lopdf = { version = "0.36", default-features = false }
 # (复用本 crate 的 hmac/sha2),零新增重依赖,见 transfer/sigv4.rs。
 suppaftp = { version = "8", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
 
+# 批次B docx.* 动作:.docx 即 zip(OOXML),复用本 crate 既有的纯 Rust `zip`
+# 解出 word/document.xml,按 <w:t> 文本抽取 / {{占位符}}套打回写 —— 不引
+# docx-rs(其拉入 image 重子树),零新增 C 依赖,信创/交叉友好。见 docx.rs 头注。
+# 批次B system.process_list:纯 Rust sysinfo(无 -sys C 依赖,libc/
+# core-foundation-sys 仅为 OS 符号声明绑定,build.rs 只做 cfg 探测、不编译 C,
+# 信创/aarch64/loongarch 交叉友好)。仅启用 `system` 特性(进程/内存),裁掉
+# disk/network/component(windows-bindings)/user/multithread,缩小依赖面。
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
 # F-2 图像/模板匹配:纯 Rust image + imageproc(均 MIT,无 C 依赖,信创/交叉友好)。
 # 仅做图像/模板匹配;OCR 文本识别暂缓(目标中文,当前无准确的纯 Rust 中文 OCR)。
 # image features 收窄到常用编码(png 覆盖 browser.screenshot 产物)。
@@ -84,6 +96,7 @@ desktop = ["dep:rdev"]
 
 [dev-dependencies]
 tempfile.workspace = true
+serde_yaml.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

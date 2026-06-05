@@ -15,6 +15,9 @@
 //! `document.elementFromPoint`, completing the OmniParser v2 / UI-TARS style
 //! last-resort fallback.
 //!
+//! `image.ocr` also uses this trait directly so OCR can share provider routing,
+//! LLM capability gating, budgets, and usage ledger plumbing with the hooks.
+//!
 //! Defining the trait in `lumo-core` (which `lumo-ai` already depends on)
 //! avoids a circular dependency between the two crates.
 
@@ -72,7 +75,7 @@ pub struct LocatedTarget {
 #[derive(Debug, Clone)]
 pub struct AiCallUsage {
     /// Which insertion point made the call (`heal_selector`, `extract_visual`,
-    /// `decide`, `vision_locate`, `diagnose`) — mirrors the `ai_calls.helper`
+    /// `decide`, `vision_locate`, `ocr_image`, `diagnose`) — mirrors the `ai_calls.helper`
     /// column and the `ai.chat` action's `"chat"` tag.
     pub helper: String,
     pub provider: String,
@@ -132,6 +135,16 @@ pub trait AiHookProvider: Send + Sync {
         marks: &[SoMMark],
         model: Option<&str>,
     ) -> Result<LocatedTarget, StepError>;
+
+    /// OCR/image-text extraction entry point. Implementations should return
+    /// plain text unless the caller's prompt asks for a structured format.
+    async fn ocr_image(
+        &self,
+        image: Bytes,
+        media_type: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, StepError>;
 
     /// P1-4: drain and return the [`AiCallUsage`] records accumulated since the
     /// last drain. The VM calls this right after each hook dispatch to write

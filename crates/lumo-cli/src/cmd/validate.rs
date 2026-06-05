@@ -58,12 +58,21 @@ fn validate_capability_declaration(
     capabilities: &lumo_dsl::Capabilities,
 ) -> anyhow::Result<()> {
     let missing = match step.action.as_str() {
-        "file.read" | "file.exists" | "excel.read_rows" if capabilities.fs_read.is_empty() => {
+        "file.read" | "file.exists" | "file.list" | "file.metadata" | "file.copy" | "file.move"
+        | "file.rename" | "excel.read_rows" | "excel.read_cell" | "excel.sheet_names"
+        | "image.locate" | "image.compare" | "image.ocr"
+            if capabilities.fs_read.is_empty() =>
+        {
             Some("fs.read")
         }
-        "file.write" | "excel.write_row" if capabilities.fs_write.is_empty() => Some("fs.write"),
+        "file.write" | "file.mkdir" | "file.copy" | "file.move" | "file.rename" | "file.delete"
+        | "excel.write_row" | "excel.write_cell"
+            if capabilities.fs_write.is_empty() =>
+        {
+            Some("fs.write")
+        }
         "http.request" | "browser.open" if capabilities.network.is_empty() => Some("network"),
-        "ai.chat" if capabilities.llm.is_empty() => Some("llm"),
+        "ai.chat" | "image.ocr" if capabilities.llm.is_empty() => Some("llm"),
         _ => None,
     };
     if let Some(kind) = missing {

@@ -5,7 +5,12 @@ import { call } from "./api.js";
 import { state } from "./state.js";
 
 export async function refreshProviders() {
-  state.providers = await call("provider_status");
+  const [providers, ocrModels] = await Promise.all([
+    call("provider_status"),
+    call("list_ocr_models").catch(() => []),
+  ]);
+  state.providers = providers;
+  state.ocrModels = ocrModels;
   renderProviderList();
   refreshActiveProviderPill();
 }
@@ -39,7 +44,9 @@ export function renderProviderList() {
   list.innerHTML = profiles
     .map((p) => {
       const isActive = state.providers.active === p.name;
-      const keyState = p.hasKey ? '<span class="status-badge ready">key ✓</span>' : '<span class="status-badge partial">key ✗</span>';
+      const keyState = p.kind === "local"
+        ? '<span class="status-badge ready">local</span>'
+        : p.hasKey ? '<span class="status-badge ready">key ✓</span>' : '<span class="status-badge partial">key ✗</span>';
       return `<div class="provider-card ${isActive ? "is-active" : ""}">
         <div class="provider-card-head">
           <span class="name">${html(p.name)}</span>
@@ -48,6 +55,8 @@ export function renderProviderList() {
           <span class="meta">${html(p.kind)}${p.wireApi ? ` / ${p.wireApi}` : ""}</span>
         </div>
         <div class="provider-card-row"><span>default</span><span>${html(p.defaultModel || "—")}</span></div>
+        <div class="provider-card-row"><span>vision</span><span>${html(p.visionModel || "—")}</span></div>
+        <div class="provider-card-row"><span>ocr</span><span>${html(p.ocrModel || "—")}</span></div>
         <div class="provider-card-row"><span>base_url</span><span>${html(p.baseUrl || "—")}</span></div>
         <div class="provider-card-row"><span>api_key_env</span><span>${html(p.apiKeyEnv || (p.hasInlineKey ? "(inline)" : "—"))}</span></div>
         <div class="provider-card-actions">
@@ -97,6 +106,8 @@ export function openProviderEditor(name) {
         apiKey: "",
         apiKeyEnv: "",
         defaultModel: "",
+        visionModel: "",
+        ocrModel: "",
         reasoningEffort: "",
         models: [],
         headers: {},
@@ -119,6 +130,7 @@ function renderProviderEditor() {
         <select id="pKind">
           <option value="openai" ${d.kind === "openai" ? "selected" : ""}>OpenAI 兼容</option>
           <option value="anthropic" ${d.kind === "anthropic" ? "selected" : ""}>Anthropic</option>
+          <option value="local" ${d.kind === "local" ? "selected" : ""}>Local OCR</option>
         </select>
       </div>
     </div>
@@ -138,6 +150,11 @@ function renderProviderEditor() {
         </select>
       </div>
     </div>
+    <div class="row">
+      <div class="field"><label>vision_model</label><input id="pVisionModel" value="${html(d.visionModel || "")}" placeholder="gpt-4o / claude-sonnet-4-6" /></div>
+      <div class="field"><label>ocr_model</label><input id="pOcrModel" value="${html(d.ocrModel || "")}" placeholder="gpt-4o / modelscope/ZhipuAI/GLM-OCR" /></div>
+    </div>
+    ${renderOcrModelPicker(d.ocrModel || "")}
     <div class="field"><label>base_url</label><input id="pBase" value="${html(d.baseUrl || "")}" placeholder="https://api.example.com/v1" /></div>
     <div class="row">
       <div class="field"><label>api_key_env</label><input id="pEnv" value="${html(d.apiKeyEnv || "")}" placeholder="如 OPENAI_API_KEY" /></div>
@@ -153,12 +170,87 @@ function renderProviderEditor() {
     <label class="toggle"><input type="checkbox" id="pActivate" ${d.name === state.providers?.active ? "checked" : ""}/> 保存后设为默认</label>
   `;
   renderHeadersEditor();
+  wireOcrModelPicker();
   $("addHeaderBtn").addEventListener("click", () => {
     const k = prompt("Header 名");
     if (!k) return;
     state.providerDraft.headers[k] = "";
     renderHeadersEditor();
   });
+}
+
+function renderOcrModelPicker(selected) {
+  const models = state.ocrModels || [];
+  if (!models.length) {
+    return `<div class="ocr-model-panel"><div class="prop-empty">OCR 模型列表不可用</div></div>`;
+  }
+  return `<div class="ocr-model-panel">
+    <div class="ocr-model-panel-head">
+      <span>ModelScope OCR 模型</span>
+      <button type="button" data-refresh-ocr-models>刷新</button>
+    </div>
+    <div class="ocr-model-grid">
+      ${models.map((m) => {
+        const p = m.preset;
+        const isSelected = selected === p.id || selected === p.repo;
+        return `<div class="ocr-model-card ${isSelected ? "is-selected" : ""}">
+          <div class="ocr-model-title">
+            <span>${html(p.label)}</span>
+            ${m.downloaded ? '<span class="status-badge ready">已下载</span>' : '<span class="status-badge partial">未下载</span>'}
+            ${p.recommended ? '<span class="status-badge ready">推荐</span>' : ""}
+          </div>
+          <div class="ocr-model-meta">${html(p.repo)} · ${html(p.engine)} · ${html(p.sizeHint || "VLM")}</div>
+          <div class="ocr-model-desc">${html(p.description)}</div>
+          <div class="ocr-model-path">${html(m.cacheDir)}</div>
+          <div class="ocr-model-actions">
+            <button type="button" data-set-ocr-model="${html(p.id)}">选择</button>
+            <button type="button" ${m.downloaded ? "disabled" : ""} data-download-ocr-model="${html(p.id)}">${m.downloaded ? "已下载" : "下载"}</button>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+  </div>`;
+}
+
+function wireOcrModelPicker() {
+  $("providerEditBody").querySelectorAll("[data-set-ocr-model]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const model = btn.dataset.setOcrModel;
+      $("pOcrModel").value = model;
+      state.providerDraft.ocrModel = model;
+      if ($("pKind").value === "openai" && !$("pBase").value && !$("pModel").value) {
+        $("pKind").value = "local";
+        state.providerDraft.kind = "local";
+      }
+      toast("已选择 OCR 模型", model, "ok");
+    })
+  );
+  $("providerEditBody").querySelectorAll("[data-download-ocr-model]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const model = btn.dataset.downloadOcrModel;
+      collectProviderDraft();
+      btn.disabled = true;
+      btn.textContent = "下载中";
+      try {
+        const result = await call("download_ocr_model", { model });
+        state.ocrModels = await call("list_ocr_models").catch(() => state.ocrModels || []);
+        renderProviderEditor();
+        toast("OCR 模型已下载", result.model?.cacheDir || model, "ok");
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = "下载";
+        toast("下载失败", String(e), "bad");
+      }
+    })
+  );
+  $("providerEditBody").querySelectorAll("[data-refresh-ocr-models]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      collectProviderDraft();
+      state.ocrModels = await call("list_ocr_models").catch(() => state.ocrModels || []);
+      renderProviderEditor();
+      toast("OCR 模型状态已刷新", "", "ok");
+    })
+  );
 }
 
 function renderHeadersEditor() {
@@ -213,6 +305,8 @@ function collectProviderDraft() {
   d.kind = $("pKind").value;
   d.wireApi = $("pWire").value || null;
   d.defaultModel = $("pModel").value.trim();
+  d.visionModel = $("pVisionModel").value.trim();
+  d.ocrModel = $("pOcrModel").value.trim();
   d.reasoningEffort = $("pEffort").value || null;
   d.baseUrl = $("pBase").value.trim();
   d.apiKeyEnv = $("pEnv").value.trim();
@@ -245,11 +339,17 @@ export async function enableLlmNetworkForSession() {
 }
 
 export async function testProvider() {
-  if (!state.providerDraft?.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
+  if (!state.providerDraft) { toast("先保存 / 选择模型源", "", "warn"); return; }
+  const draft = collectProviderDraft();
+  if (!draft.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
+  if (draft.kind === "local") {
+    toast("本地 OCR 无需连接测试", "选择并下载 OCR 模型后，运行 image.ocr 流程即可验证。", "ok");
+    return;
+  }
   if (state.providers && !state.providers.networkEnabled) {
     await enableLlmNetworkForSession();
   }
-  const r = await call("test_provider", { name: state.providerDraft.name });
+  const r = await call("test_provider", { name: draft.name });
   if (r.ok) {
     toast("✓ 测试通过", `${r.provider}/${r.model} · ${r.inputTokens}↑/${r.outputTokens}↓`, "ok");
   } else {

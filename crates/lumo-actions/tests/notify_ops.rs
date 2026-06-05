@@ -238,3 +238,120 @@ async fn feishu_secret_with_non_object_payload_is_rejected() {
         "error should explain the object-payload signing requirement: {err}"
     );
 }
+
+// ─── per-platform robot actions (F-8): notify.dingtalk / feishu / wecom ──────────
+
+#[tokio::test]
+async fn dingtalk_robot_text_body_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/robot"))
+        .and(body_json(
+            json!({"msgtype": "text", "text": {"content": "hi"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"errcode": 0})))
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "notify.dingtalk",
+        json!({"url": format!("{}/robot", server.uri()), "text": "hi"}),
+        net("127.0.0.1"),
+    )
+    .await;
+    assert_eq!(out["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn feishu_robot_text_body_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/hook"))
+        .and(body_json(
+            json!({"msg_type": "text", "content": {"text": "hi"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 0})))
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "notify.feishu",
+        json!({"url": format!("{}/hook", server.uri()), "text": "hi"}),
+        net("127.0.0.1"),
+    )
+    .await;
+    assert_eq!(out["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn wecom_robot_markdown_body_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/key"))
+        .and(body_json(
+            json!({"msgtype": "markdown", "markdown": {"content": "# hi"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"errcode": 0})))
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "notify.wecom",
+        json!({"url": format!("{}/key", server.uri()), "text": "# hi", "msgtype": "markdown"}),
+        net("127.0.0.1"),
+    )
+    .await;
+    assert_eq!(out["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn dingtalk_robot_denied_without_network_grant() {
+    let err = run(
+        "notify.dingtalk",
+        json!({"url": "https://oapi.dingtalk.com/robot/send?access_token=x", "text": "hi"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(err.contains("network"), "should name the network cap: {err}");
+}
+
+#[tokio::test]
+async fn feishu_robot_requires_text_or_payload() {
+    let err = run(
+        "notify.feishu",
+        json!({"url": "https://open.feishu.cn/hook/x"}),
+    )
+    .await
+    .unwrap_err();
+    // No network grant on `run`, so the gate fires first — but with a grant this
+    // would surface the text/payload requirement. We accept either: the offline
+    // path proves the gate runs before any socket.
+    assert!(err.contains("capability denied"), "got: {err}");
+}
+
+#[tokio::test]
+async fn wecom_robot_rejects_unknown_field() {
+    // deny_unknown_fields on the derived RobotIn schema is enforced at deserialize.
+    let err = common::run_with(
+        "notify.wecom",
+        json!({"url": "https://qyapi.weixin.qq.com/hook", "text": "hi", "provider": "wecom"}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("input invalid"), "unknown `provider` field rejected: {err}");
+}
+
+#[ignore = "requires a live group-robot webhook + token; set the URL and a network grant"]
+#[tokio::test]
+async fn e2e_dingtalk_live_send() {
+    // Sketch: point at a real DingTalk robot webhook (with access_token), grant
+    // oapi.dingtalk.com, and assert `ok == true`. Run with `--ignored`.
+    //
+    //   let out = ok_with("notify.dingtalk", json!({
+    //       "url": "https://oapi.dingtalk.com/robot/send?access_token=...",
+    //       "text": "F-8 live test", "secret": "SEC..."
+    //   }), net("oapi.dingtalk.com")).await;
+    //   assert_eq!(out["ok"], json!(true));
+}

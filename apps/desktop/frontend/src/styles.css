@@ -12,7 +12,7 @@
    * through; panels are translucent enough to read.
    */
   --window-alpha: 0;
-  --panel-alpha: 0.18;
+  --panel-alpha: 0.14;
   --glass-blur: 0px;
 
   --bg-tint-r: 255;
@@ -103,29 +103,19 @@ body {
   color: var(--text);
 }
 
-/* A *very* faint vibrancy-aware tint layer. It uses --window-alpha (also
- * slider-controlled in Studio → Appearance) so the user can make the WebView
- * itself fully clear (--window-alpha=0) or solid (--window-alpha=1) on top of
- * the Tauri window background. */
+/* A tint layer controlled by --window-alpha. At 0 it is fully clear so the
+ * real OS desktop is visible behind this automation workbench. */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: -1;
-  background:
-    radial-gradient(circle at 18% -10%, rgba(31, 122, 100, 0.018), transparent 42%),
-    radial-gradient(circle at 95% 6%, rgba(45, 91, 150, 0.016), transparent 38%),
-    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.014), transparent 46%),
-    rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
+  background: rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
 }
 
 :root.theme-dark body::before {
-  background:
-    radial-gradient(circle at 18% -10%, rgba(76, 194, 163, 0.02), transparent 42%),
-    radial-gradient(circle at 95% 6%, rgba(111, 166, 255, 0.018), transparent 38%),
-    radial-gradient(circle at 70% 110%, rgba(208, 90, 60, 0.016), transparent 46%),
-    rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
+  background: rgba(var(--bg-tint-r), var(--bg-tint-g), var(--bg-tint-b), var(--window-alpha));
 }
 
 button,
@@ -1496,6 +1486,78 @@ select:focus {
   gap: 6px;
 }
 
+.ocr-model-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 8px;
+}
+
+.ocr-model-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ocr-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+}
+
+.ocr-model-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ocr-model-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ocr-model-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ocr-model-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocr-model-meta,
+.ocr-model-desc,
+.ocr-model-path {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ocr-model-path {
+  color: var(--faint);
+}
+
+.ocr-model-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 /* ─── Feature map ──────────────────────────────────────────────────────── */
 
 .feature-grid {
@@ -1816,6 +1878,7 @@ button.run-bar.other {
 .toast .toast-body {
   color: var(--muted);
   font-size: 11.5px;
+  white-space: pre-wrap;
 }
 
 /* ─── Hidden helper ────────────────────────────────────────────────────── */
@@ -2074,6 +2137,20 @@ button.run-bar.other {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.error-detail {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid rgba(180, 61, 50, 0.38);
+  border-radius: var(--radius-sm);
+  background: rgba(180, 61, 50, 0.10);
+  color: var(--bad);
+  padding: 10px 12px;
+  font: 11.5px/1.45 "SF Mono", "Consolas", "Liberation Mono", monospace;
 }
 
 .ai-drawer > footer {
@@ -2387,6 +2464,7 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
+  flex-wrap: wrap;
 }
 
 .element-library .el-tabs {
@@ -2435,11 +2513,23 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   gap: 6px;
   flex: 1;
   justify-content: flex-end;
+  min-width: 420px;
 }
 
 .element-library .el-actions input[type="search"] {
   width: 220px;
   max-width: 28vw;
+}
+
+.element-library .el-actions select {
+  min-height: 28px;
+  max-width: 118px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-inset);
+  color: var(--text);
+  font-size: 11px;
+  padding: 0 24px 0 8px;
 }
 
 .element-library .el-body {
@@ -2451,9 +2541,46 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   gap: 10px;
 }
 
+.el-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 6px;
+}
+
+.el-stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 7px 9px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.el-stat span {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.el-stat strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.el-stat.warn strong {
+  color: var(--warn);
+}
+
+.el-group-list {
+  display: grid;
+  gap: 10px;
+}
+
 .el-group {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--surface);
 }
 
@@ -2467,6 +2594,21 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   color: var(--muted);
   border-bottom: 1px solid var(--line);
   background: var(--surface-soft);
+  gap: 12px;
+}
+
+.el-group-head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.el-group-head strong {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .el-group-head .src {
@@ -2479,16 +2621,44 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   max-width: 60%;
 }
 
+.el-folder {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--accent);
+  background: var(--surface);
+  font-size: 10px;
+}
+
+.el-group-meta {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.el-group-meta span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.el-group-meta .warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 36%, var(--line));
+}
+
 .el-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 8px;
   padding: 10px;
 }
 
 .el-card {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--surface);
   padding: 10px 12px;
   display: flex;
@@ -2496,12 +2666,21 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   gap: 6px;
   cursor: grab;
   transition: border-color 120ms, transform 80ms;
+  min-width: 0;
 }
 
 .el-card:hover {
   border-color: var(--accent);
   transform: translateY(-1px);
   box-shadow: var(--shadow-1);
+}
+
+.el-card.is-unused {
+  border-style: dashed;
+}
+
+.el-card.is-dirty {
+  border-color: color-mix(in srgb, var(--warn) 44%, var(--line));
 }
 
 .el-card .el-title {
@@ -2511,6 +2690,13 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   font-weight: 700;
   font-size: 12.5px;
   color: var(--text);
+}
+
+.el-card .el-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .el-card .el-title .badge {
@@ -2523,9 +2709,65 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   letter-spacing: 0.04em;
 }
 
+.sync-badge {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.sync-badge.synced {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--line));
+}
+
+.sync-badge.dirty {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+
 .el-card .el-source {
   font-size: 10.5px;
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.el-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.el-tags span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.el-tags .warn {
+  color: var(--warn);
+}
+
+.el-mini-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.el-mini-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2540,7 +2782,7 @@ body.is-dragging-action .action-item { cursor: grabbing; }
 
 .el-card .fp {
   display: grid;
-  grid-template-columns: 56px 1fr;
+  grid-template-columns: 64px 1fr;
   gap: 6px;
   align-items: baseline;
 }
@@ -2559,8 +2801,34 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   white-space: nowrap;
 }
 
+.el-detail {
+  border-top: 1px dashed var(--line);
+  padding-top: 5px;
+}
+
+.el-detail summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.el-detail pre {
+  margin: 6px 0 0;
+  max-height: 128px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-inset);
+  padding: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .el-card .el-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
   gap: 6px;
   margin-top: 4px;
   border-top: 1px dashed var(--line);
@@ -2571,7 +2839,7 @@ body.is-dragging-action .action-item { cursor: grabbing; }
   min-height: 24px;
   font-size: 11px;
   padding: 0 8px;
-  flex: 1;
+  min-width: 0;
 }
 
 .el-empty {
@@ -2585,6 +2853,21 @@ body.is-dragging-action .action-item { cursor: grabbing; }
 }
 
 .el-empty strong { color: var(--accent); }
+
+.el-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 12px;
+}
 
 .el-thumbnail {
   width: 100%;

@@ -3,7 +3,7 @@
 // then saves the generated YAML as a new flow and opens it in the editor.
 
 import { $, html, toast } from "./dom.js";
-import { call } from "./api.js";
+import { call, errorMessage } from "./api.js";
 import { refreshFlows, loadFlow } from "./flows.js";
 import { state } from "./state.js";
 import { refreshActiveProviderPill } from "./providers.js";
@@ -39,6 +39,7 @@ export async function openMagicPrompt() {
           需先在「模型」配置 LLM；网络未开启时可在模型页或底部状态栏启用本次会话网络。
         </span>
         <div id="mpStatus" class="hint"></div>
+        <pre id="mpError" class="error-detail" hidden></pre>
       </div>
       <footer>
         <button id="mpCancel">取消</button>
@@ -78,9 +79,13 @@ export async function openMagicPrompt() {
       close();
       toast("已生成流程", `${name} · 已保存并打开`, "ok");
     } catch (e) {
-      status.textContent = "";
+      const detail = errorMessage(e);
+      status.textContent = "生成失败，详情如下。";
+      const errBox = $("mpError");
+      errBox.hidden = false;
+      errBox.textContent = detail;
       btn.disabled = false;
-      toast("生成失败", String(e), "bad");
+      toast("生成失败", detail, "bad");
     }
   });
 }

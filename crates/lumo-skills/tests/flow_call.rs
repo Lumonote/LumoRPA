@@ -80,7 +80,11 @@ async fn flow_call_runs_subflow_and_propagates_inputs() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let reg = registry(dir.path().to_path_buf(), seen.clone());
-    let parent = parse_str(&parent_calling("sub.yaml", r#"{ msg: "hello-from-parent" }"#)).unwrap();
+    let parent = parse_str(&parent_calling(
+        "sub.yaml",
+        r#"{ msg: "hello-from-parent" }"#,
+    ))
+    .unwrap();
 
     let report = FlowVm::new(reg, None)
         .run(&parent, RunOptions::default())
@@ -99,7 +103,10 @@ async fn flow_call_runs_subflow_and_propagates_inputs() {
     let call = &out["call_sub"]["result"];
     assert_eq!(call["success"], json!(true));
     assert_eq!(call["flow"], json!("sub.yaml"));
-    assert_eq!(call["outputs"]["echo"]["result"]["echoed"], json!("hello-from-parent"));
+    assert_eq!(
+        call["outputs"]["echo"]["result"]["echoed"],
+        json!("hello-from-parent")
+    );
 }
 
 #[tokio::test]
@@ -109,7 +116,9 @@ async fn flow_call_rejects_dotdot_escape() {
     let reg = registry(dir.path().to_path_buf(), seen.clone());
     let parent = parse_str(&parent_calling("../sub.yaml", "{}")).unwrap();
 
-    let res = FlowVm::new(reg, None).run(&parent, RunOptions::default()).await;
+    let res = FlowVm::new(reg, None)
+        .run(&parent, RunOptions::default())
+        .await;
     assert!(res.is_err(), "`..` path escape must fail the run");
     assert!(seen.lock().is_empty(), "no sub-flow should have executed");
 }
@@ -121,7 +130,9 @@ async fn flow_call_rejects_absolute_path() {
     let reg = registry(dir.path().to_path_buf(), seen.clone());
     let parent = parse_str(&parent_calling("/etc/hosts", "{}")).unwrap();
 
-    let res = FlowVm::new(reg, None).run(&parent, RunOptions::default()).await;
+    let res = FlowVm::new(reg, None)
+        .run(&parent, RunOptions::default())
+        .await;
     assert!(res.is_err(), "absolute path must fail the run");
     assert!(seen.lock().is_empty(), "no sub-flow should have executed");
 }
@@ -140,8 +151,13 @@ async fn flow_call_bounds_recursion_depth() {
     let reg = registry(dir.path().to_path_buf(), seen.clone());
     let parent = parse_str(&parent_calling("self.yaml", "{}")).unwrap();
 
-    let res = FlowVm::new(reg, None).run(&parent, RunOptions::default()).await;
-    assert!(res.is_err(), "self-recursive flow.call must terminate with an error");
+    let res = FlowVm::new(reg, None)
+        .run(&parent, RunOptions::default())
+        .await;
+    assert!(
+        res.is_err(),
+        "self-recursive flow.call must terminate with an error"
+    );
     let msg = format!("{}", res.unwrap_err());
     assert!(
         msg.contains("recursion") || msg.contains("depth") || msg.contains("limit"),

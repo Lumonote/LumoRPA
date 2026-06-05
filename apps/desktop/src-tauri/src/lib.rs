@@ -5,13 +5,18 @@ use lumo_ai::{
 };
 use lumo_core::{ActionRegistry, FlowVm, RunOptions};
 use lumo_dsl::{Flow, IoDecl, Step};
-use lumo_recorder::{events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent, Recorder};
+use lumo_recorder::{
+    desktop::DesktopRecorder, events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent,
+    Recorder,
+};
 use lumo_skills::{register_flow_call_action, register_skill_actions, SkillRegistry};
 use lumo_storage::{FlowRunRow, Repo, StepRunRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::{
-    collections::BTreeMap,
+    collections::{hash_map::DefaultHasher, BTreeMap},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -209,6 +214,8 @@ struct ProviderProfileDto {
     kind: String,
     wire_api: Option<String>,
     default_model: Option<String>,
+    vision_model: Option<String>,
+    ocr_model: Option<String>,
     base_url: Option<String>,
     api_key_env: Option<String>,
     has_inline_key: bool,
@@ -243,6 +250,8 @@ struct ProviderInput {
     api_key_env: Option<String>,
     #[serde(default)]
     default_model: Option<String>,
+    vision_model: Option<String>,
+    ocr_model: Option<String>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -353,6 +362,10 @@ fn app_info(app: AppHandle) -> Result<AppInfo, String> {
     })
 }
 
+/// Bundled example flows for the (future) "Examples" gallery tab. Registered
+/// API with no JS caller yet — kept intentionally: it's read-only, exposes a
+/// real bundled-content capability, and is the natural backing command for an
+/// examples picker. Remove only when that UI is ruled out.
 #[tauri::command]
 fn list_examples(app: AppHandle) -> Result<Vec<FlowSummary>, String> {
     let Some(dir) = examples_dir(&app) else {
@@ -495,31 +508,298 @@ fn sanitize_flow_name(name: &str) -> String {
 
 /// Wrap the recorder's `events_to_yaml_patch` fragment into a complete
 /// LumoFlow doc so the user can hit ▶ on the result without hand-editing.
-/// The fragment lives under `spec.steps`; everything else is reasonable
-/// defaults that the user can tighten later.
-fn wrap_recording_fragment(name: &str, fragment: &str) -> String {
+/// The fragment is parsed and sanitized instead of text-spliced so empty list
+/// entries and schema-unknown recorder notes cannot leak into saved flows.
+fn wrap_recording_fragment(name: &str, fragment: &str) -> Result<String, String> {
     let id = sanitize_flow_name(name);
     let id = if id.is_empty() {
         "recording".into()
     } else {
         id
     };
-    // Re-indent the fragment so it sits two spaces in under `spec.steps:`.
-    let body: String = fragment
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#') || l.contains("Recorder"))
-        .map(|l| {
-            if l.trim().is_empty() {
-                String::new()
+    let steps = sanitize_recording_fragment_steps(fragment)?;
+    let doc = recording_flow_doc(&id, steps);
+    let _: Flow = serde_yaml::from_value(doc.clone())
+        .map_err(|e| format!("recording flow invalid after sanitize: {e}"))?;
+    serde_yaml::to_string(&doc).map_err(|e| format!("yaml serialize: {e}"))
+}
+
+fn sanitize_recording_fragment_steps(fragment: &str) -> Result<Vec<YamlValue>, String> {
+    let parsed: YamlValue =
+        serde_yaml::from_str(fragment).map_err(|e| format!("yaml parse: {e}"))?;
+    let seq = match parsed {
+        YamlValue::Sequence(seq) => seq,
+        YamlValue::Null => Vec::new(),
+        _ => return Ok(Vec::new()),
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(seq
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, step)| sanitize_recording_step(step, idx, &mut seen))
+        .collect())
+}
+
+fn sanitize_recording_step(
+    value: YamlValue,
+    idx: usize,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> Option<YamlValue> {
+    let raw = value.as_mapping()?;
+    let action = yaml_string(raw, "action")?;
+    let with = sanitize_recording_with(&action, raw.get(yaml_key("with")))?;
+    let fallback_id = format!(
+        "{}_{}",
+        action.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
+        idx + 1
+    );
+    let id = unique_recording_step_id(yaml_string(raw, "id").unwrap_or(fallback_id), seen);
+
+    let mut clean = YamlMapping::new();
+    clean.insert(yaml_key("id"), YamlValue::String(id));
+    clean.insert(yaml_key("action"), YamlValue::String(action));
+    if let Some(when) = yaml_string(raw, "when") {
+        clean.insert(yaml_key("when"), YamlValue::String(when));
+    }
+    if let Some(bind) = yaml_string(raw, "bind") {
+        clean.insert(yaml_key("bind"), YamlValue::String(bind));
+    }
+    if let Some(retry) = raw.get(yaml_key("retry")).and_then(prune_yaml_value) {
+        clean.insert(yaml_key("retry"), retry);
+    }
+    if let Some(ai) = raw.get(yaml_key("ai")).and_then(prune_yaml_value) {
+        clean.insert(yaml_key("ai"), ai);
+    }
+    if !with.is_empty() {
+        clean.insert(yaml_key("with"), YamlValue::Mapping(with));
+    }
+
+    let clean_value = YamlValue::Mapping(clean);
+    serde_yaml::from_value::<Step>(clean_value.clone()).ok()?;
+    Some(clean_value)
+}
+
+fn sanitize_recording_with(action: &str, raw: Option<&YamlValue>) -> Option<YamlMapping> {
+    let empty = YamlMapping::new();
+    let with = raw.and_then(YamlValue::as_mapping).unwrap_or(&empty);
+    match action {
+        "browser.open" => {
+            let url = yaml_string(with, "url")?;
+            let mut out = YamlMapping::new();
+            out.insert(yaml_key("url"), YamlValue::String(url));
+            copy_yaml_bool(&mut out, with, "headless");
+            copy_yaml_string(&mut out, with, "wait_for");
+            copy_yaml_number(&mut out, with, "timeout_ms");
+            Some(out)
+        }
+        "browser.click" => {
+            let mut out = selector_with(with)?;
+            copy_yaml_string(&mut out, with, "prompt");
+            copy_yaml_string(&mut out, with, "model");
+            copy_yaml_number(&mut out, with, "timeout_ms");
+            Some(out)
+        }
+        "browser.type" => {
+            let mut out = selector_with(with)?;
+            let text = yaml_string_preserve(with, "text")?;
+            if text.is_empty() {
+                return None;
+            }
+            out.insert(yaml_key("text"), YamlValue::String(text));
+            copy_yaml_bool(&mut out, with, "clear");
+            copy_yaml_string(&mut out, with, "prompt");
+            copy_yaml_string(&mut out, with, "model");
+            copy_yaml_number(&mut out, with, "timeout_ms");
+            Some(out)
+        }
+        "browser.extract" => {
+            let selector = yaml_string(with, "selector")?;
+            let mut out = YamlMapping::new();
+            out.insert(yaml_key("selector"), YamlValue::String(selector));
+            copy_yaml_bool(&mut out, with, "all");
+            copy_yaml_string(&mut out, with, "attr");
+            copy_yaml_number(&mut out, with, "timeout_ms");
+            if let Some(map) = with.get(yaml_key("map")).and_then(prune_yaml_value) {
+                out.insert(yaml_key("map"), map);
+            }
+            if let Some(frame) = with.get(yaml_key("frame")).and_then(prune_yaml_value) {
+                out.insert(yaml_key("frame"), frame);
+            }
+            Some(out)
+        }
+        _ => raw
+            .and_then(prune_yaml_value)
+            .and_then(|v| match v {
+                YamlValue::Mapping(map) => Some(map),
+                _ => None,
+            })
+            .or_else(|| Some(YamlMapping::new())),
+    }
+}
+
+fn selector_with(with: &YamlMapping) -> Option<YamlMapping> {
+    let mut out = YamlMapping::new();
+    copy_yaml_string(&mut out, with, "selector");
+    if let Some(selectors) = with
+        .get(yaml_key("selectors"))
+        .and_then(YamlValue::as_mapping)
+        .map(sanitize_selectors)
+        .filter(|m| !m.is_empty())
+    {
+        out.insert(yaml_key("selectors"), YamlValue::Mapping(selectors));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn sanitize_selectors(selectors: &YamlMapping) -> YamlMapping {
+    let mut out = YamlMapping::new();
+    for key in [
+        "id",
+        "data_testid",
+        "css",
+        "aria_label",
+        "text_includes",
+        "xpath",
+    ] {
+        copy_yaml_string(&mut out, selectors, key);
+    }
+    out
+}
+
+fn prune_yaml_value(value: &YamlValue) -> Option<YamlValue> {
+    match value {
+        YamlValue::Null => None,
+        YamlValue::String(s) => {
+            if s.trim().is_empty() {
+                None
             } else {
-                format!("    {l}")
+                Some(YamlValue::String(s.clone()))
+            }
+        }
+        YamlValue::Sequence(seq) => {
+            let pruned: Vec<_> = seq.iter().filter_map(prune_yaml_value).collect();
+            if pruned.is_empty() {
+                None
+            } else {
+                Some(YamlValue::Sequence(pruned))
+            }
+        }
+        YamlValue::Mapping(map) => {
+            let mut pruned = YamlMapping::new();
+            for (key, value) in map {
+                if let Some(value) = prune_yaml_value(value) {
+                    pruned.insert(key.clone(), value);
+                }
+            }
+            if pruned.is_empty() {
+                None
+            } else {
+                Some(YamlValue::Mapping(pruned))
+            }
+        }
+        _ => Some(value.clone()),
+    }
+}
+
+fn recording_flow_doc(id: &str, steps: Vec<YamlValue>) -> YamlValue {
+    let mut metadata = YamlMapping::new();
+    metadata.insert(yaml_key("id"), YamlValue::String(id.to_string()));
+    metadata.insert(yaml_key("version"), YamlValue::String("0.1.0".into()));
+    metadata.insert(yaml_key("name"), YamlValue::String(format!("录制 · {id}")));
+    metadata.insert(
+        yaml_key("tags"),
+        YamlValue::Sequence(vec![YamlValue::String("recording".into())]),
+    );
+
+    let mut capabilities = YamlMapping::new();
+    capabilities.insert(
+        yaml_key("network"),
+        YamlValue::Sequence(vec![YamlValue::String("*".into())]),
+    );
+
+    let mut spec = YamlMapping::new();
+    spec.insert(yaml_key("capabilities"), YamlValue::Mapping(capabilities));
+    spec.insert(yaml_key("steps"), YamlValue::Sequence(steps));
+
+    let mut doc = YamlMapping::new();
+    doc.insert(
+        yaml_key("apiVersion"),
+        YamlValue::String("lumorpa.io/v1".into()),
+    );
+    doc.insert(yaml_key("kind"), YamlValue::String("Flow".into()));
+    doc.insert(yaml_key("metadata"), YamlValue::Mapping(metadata));
+    doc.insert(yaml_key("spec"), YamlValue::Mapping(spec));
+    YamlValue::Mapping(doc)
+}
+
+fn yaml_key(key: &str) -> YamlValue {
+    YamlValue::String(key.to_string())
+}
+
+fn yaml_string(map: &YamlMapping, key: &str) -> Option<String> {
+    yaml_string_preserve(map, key).and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn yaml_string_preserve(map: &YamlMapping, key: &str) -> Option<String> {
+    map.get(yaml_key(key))
+        .and_then(YamlValue::as_str)
+        .map(str::to_string)
+}
+
+fn copy_yaml_string(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
+    if let Some(value) = yaml_string(src, key) {
+        out.insert(yaml_key(key), YamlValue::String(value));
+    }
+}
+
+fn copy_yaml_bool(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
+    if let Some(value) = src.get(yaml_key(key)).and_then(YamlValue::as_bool) {
+        out.insert(yaml_key(key), YamlValue::Bool(value));
+    }
+}
+
+fn copy_yaml_number(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
+    if let Some(value) = src.get(yaml_key(key)) {
+        if matches!(value, YamlValue::Number(_)) {
+            out.insert(yaml_key(key), value.clone());
+        }
+    }
+}
+
+fn unique_recording_step_id(raw: String, seen: &mut std::collections::BTreeSet<String>) -> String {
+    let mut clean: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: 录制 · {id}\n  tags: [recording]\nspec:\n  capabilities:\n    network: [\"*\"]\n  steps:\n{body}\n"
-    )
+        .collect();
+    clean = clean.trim_matches('_').to_string();
+    if clean.is_empty() {
+        clean = "recorded_step".into();
+    }
+    let base = clean.clone();
+    let mut n = 2;
+    while seen.contains(&clean) {
+        clean = format!("{base}_{n}");
+        n += 1;
+    }
+    seen.insert(clean.clone());
+    clean
 }
 
 /// Save the recorder's last output as a complete flow under the recordings
@@ -543,9 +823,29 @@ fn save_recording_as_flow(
         candidate = dir.join(format!("{stem}-{n}.lumoflow.yaml"));
         n += 1;
     }
-    let body = wrap_recording_fragment(&stem, &yaml_hint);
+    let body = wrap_recording_fragment(&stem, &yaml_hint)?;
     std::fs::write(&candidate, body).map_err(|e| format!("write {}: {e}", candidate.display()))?;
     Ok(candidate.display().to_string())
+}
+
+#[tauri::command]
+fn load_element_library(app: AppHandle) -> Result<Value, String> {
+    load_element_library_value(&app)
+}
+
+#[tauri::command]
+fn save_element_library(app: AppHandle, library: Value) -> Result<(), String> {
+    let mut normalized = library;
+    normalize_element_library(&mut normalized);
+    if let Some(obj) = normalized.as_object_mut() {
+        obj.insert(
+            "updatedAt".into(),
+            chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                .into(),
+        );
+    }
+    save_element_library_value(&app, &normalized)
 }
 
 #[tauri::command]
@@ -721,7 +1021,15 @@ async fn run_flow(
     let flow_path = Path::new(&path);
     let flow = parse_and_validate(&home, flow_path)?;
     let inputs = parse_inputs(&inputs_json)?;
-    execute_flow(&home, Some(flow_path), flow, inputs, no_store, DebugOpts::default()).await
+    execute_flow(
+        &home,
+        Some(flow_path),
+        flow,
+        inputs,
+        no_store,
+        DebugOpts::default(),
+    )
+    .await
 }
 
 /// Run a single step from the flow by `step_id`. The step is extracted from
@@ -748,7 +1056,15 @@ async fn run_step(
     // Rewrite the id so the persisted run is identifiable as a sub-run.
     flow.metadata.id = format!("{}::{step_id}", flow.metadata.id);
     let inputs = parse_inputs(&inputs_json)?;
-    execute_flow(&home, Some(flow_path), flow, inputs, no_store, DebugOpts::default()).await
+    execute_flow(
+        &home,
+        Some(flow_path),
+        flow,
+        inputs,
+        no_store,
+        DebugOpts::default(),
+    )
+    .await
 }
 
 /// F-20: run a flow under the breakpoint debugger. Pauses *before* the first
@@ -930,6 +1246,8 @@ fn save_provider(app: AppHandle, profile: ProviderInput) -> Result<ProviderStatu
         api_key,
         api_key_env,
         default_model: profile.default_model.filter(|s| !s.is_empty()),
+        vision_model: profile.vision_model.filter(|s| !s.is_empty()),
+        ocr_model: profile.ocr_model.filter(|s| !s.is_empty()),
         models: profile
             .models
             .into_iter()
@@ -989,6 +1307,25 @@ fn enable_llm_network_for_session(app: AppHandle) -> Result<ProviderStatus, Stri
     let path = providers_path(&home);
     let cfg = ProvidersConfig::load(&path).map_err(|e| e.to_string())?;
     Ok(make_provider_status(&path, &cfg))
+}
+
+#[tauri::command]
+fn list_ocr_models(app: AppHandle) -> Result<Vec<lumo_ai::OcrModelStatus>, String> {
+    let home = app_home(&app)?;
+    std::env::set_var("LUMO_HOME", home);
+    Ok(lumo_ai::ocr_model_catalog())
+}
+
+#[tauri::command]
+async fn download_ocr_model(
+    app: AppHandle,
+    model: String,
+) -> Result<lumo_ai::OcrModelDownload, String> {
+    let home = app_home(&app)?;
+    std::env::set_var("LUMO_HOME", home);
+    lumo_ai::download_modelscope_model(&model)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1100,10 +1437,9 @@ async fn generate_flow(
     let model = match model {
         Some(m) if !m.trim().is_empty() => m,
         _ => {
-            let active = cfg
-                .active
-                .clone()
-                .ok_or_else(|| "no active provider — set one in Settings → Providers".to_string())?;
+            let active = cfg.active.clone().ok_or_else(|| {
+                "no active provider — set one in Settings → Providers".to_string()
+            })?;
             let profile = cfg
                 .get(&active)
                 .ok_or_else(|| format!("active provider `{active}` not found"))?;
@@ -1114,7 +1450,10 @@ async fn generate_flow(
             format!("{active}/{dm}")
         }
     };
-    lumo_ai::copilot::generate_flow(&router, &model, &prompt, 2).await
+    lumo_ai::copilot::generate_flow_with_validator(&router, &model, &prompt, 2, |yaml| {
+        validate_generated_flow_yaml(&home, yaml)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1137,6 +1476,11 @@ fn list_skills(app: AppHandle) -> Result<Vec<SkillDto>, String> {
 /// Apply the *panel* alpha (CSS-driven via the slider in Settings → Appearance).
 /// This complements `set_window_alpha`, which controls the underlying window
 /// background. Kept for backward compatibility with the previous build.
+///
+/// Orphan: no current JS caller — the live UI drives `set_window_alpha` /
+/// `apply_window_alpha` instead. Retained as a thin back-compat alias (the
+/// percent→u8 alpha conversion) so older saved configs / external callers
+/// don't break; safe to drop once back-compat is no longer a concern.
 #[tauri::command]
 fn apply_window_appearance(app: AppHandle, options: AppearanceOptions) -> Result<(), String> {
     let alpha = ((options.opacity.min(100) as f32 / 100.0) * 255.0).round() as u8;
@@ -1192,8 +1536,13 @@ async fn recorder_start(
 
     let (recorder, backend): (Arc<dyn Recorder>, &'static str) = match target_str.as_str() {
         "browser" => (Arc::new(BrowserRecorder::new()), "BrowserRecorder (CDP)"),
-        // desktop & mixed land in a follow-up — fall back to noop heartbeat
-        // so the UI still gets life signs from the recorder.
+        // desktop & mixed both drive the cross-app DesktopRecorder (R-02):
+        // OS-accessibility polling that streams desktop.* events live to the
+        // WebView. A combined browser+desktop "mixed" recorder doesn't exist
+        // yet, so mixed currently captures the desktop lane only (the browser
+        // lane stays available via the dedicated "browser" target).
+        "desktop" => (Arc::new(DesktopRecorder::new()), "DesktopRecorder (AX)"),
+        "mixed" => (Arc::new(DesktopRecorder::new()), "DesktopRecorder (AX, mixed→desktop)"),
         _ => (Arc::new(NoopRecorder::new()), "NoopRecorder (heartbeat)"),
     };
 
@@ -1227,7 +1576,10 @@ async fn recorder_start(
 }
 
 #[tauri::command]
-async fn recorder_stop(state: State<'_, DesktopState>) -> Result<RecorderStopResult, String> {
+async fn recorder_stop(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<RecorderStopResult, String> {
     let session = {
         let mut slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
         slot.active.take()
@@ -1241,12 +1593,14 @@ async fn recorder_stop(state: State<'_, DesktopState>) -> Result<RecorderStopRes
     let backend_label = session.backend.clone();
     let events = session.recorder.stop().await.map_err(|e| e.to_string())?;
     let yaml_patch = events_to_yaml_patch(&events);
+    let element_count = upsert_recorded_elements(&app, &events).unwrap_or(0);
     Ok(RecorderStopResult {
         events: events.len(),
         note: format!(
-            "captured {} events from {} backend",
+            "captured {} events from {} backend; {} element(s) saved",
             events.len(),
-            backend_label
+            backend_label,
+            element_count
         ),
         yaml_hint: yaml_patch,
     })
@@ -1264,6 +1618,10 @@ pub fn run() {
     tauri::Builder::default()
         .manage(DesktopState::default())
         .setup(|app| {
+            let handle = app.handle().clone();
+            if let Ok(home) = app_home(&handle) {
+                std::env::set_var("LUMO_HOME", home);
+            }
             setup_tray(app)?;
             Ok(())
         })
@@ -1284,6 +1642,8 @@ pub fn run() {
             delete_flow,
             duplicate_flow,
             save_recording_as_flow,
+            load_element_library,
+            save_element_library,
             inspect_flow,
             read_flow_source,
             reveal_flow_file,
@@ -1308,6 +1668,8 @@ pub fn run() {
             use_provider,
             init_providers,
             enable_llm_network_for_session,
+            list_ocr_models,
+            download_ocr_model,
             test_provider,
             generate_flow,
             list_skills,
@@ -1331,7 +1693,10 @@ fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
     let hide = MenuItem::with_id(&handle, "tray_hide", "隐藏窗口", true, None::<&str>)?;
     let quit = MenuItem::with_id(&handle, "tray_quit", "退出", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(&handle)?;
-    let menu = Menu::with_items(&handle, &[&show, &runs, &models, &settings, &sep, &hide, &quit])?;
+    let menu = Menu::with_items(
+        &handle,
+        &[&show, &runs, &models, &settings, &sep, &hide, &quit],
+    )?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?.to_owned();
 
     TrayIconBuilder::with_id("main")
@@ -1544,6 +1909,339 @@ fn exports_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn element_library_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let home = app_home(app)?;
+    std::fs::create_dir_all(&home).map_err(|e| format!("create {}: {e}", home.display()))?;
+    Ok(home.join("element-library.json"))
+}
+
+fn empty_element_library() -> Value {
+    serde_json::json!({
+        "version": 1,
+        "elements": [],
+        "images": [],
+        "datatables": [],
+    })
+}
+
+fn normalize_element_library(value: &mut Value) {
+    if !value.is_object() {
+        *value = empty_element_library();
+        return;
+    }
+    let obj = value.as_object_mut().expect("checked object");
+    obj.entry("version").or_insert(Value::from(1));
+    for key in ["elements", "images", "datatables"] {
+        if !matches!(obj.get(key), Some(Value::Array(_))) {
+            obj.insert(key.into(), Value::Array(Vec::new()));
+        }
+    }
+}
+
+fn load_element_library_value(app: &AppHandle) -> Result<Value, String> {
+    let path = element_library_path(app)?;
+    if !path.exists() {
+        return Ok(empty_element_library());
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut library: Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    normalize_element_library(&mut library);
+    Ok(library)
+}
+
+fn save_element_library_value(app: &AppHandle, library: &Value) -> Result<(), String> {
+    let path = element_library_path(app)?;
+    let text = serde_json::to_string_pretty(library).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn upsert_recorded_elements(app: &AppHandle, events: &[RawEvent]) -> Result<usize, String> {
+    let mut library = load_element_library_value(app)?;
+    normalize_element_library(&mut library);
+    let Some(elements) = library.get_mut("elements").and_then(Value::as_array_mut) else {
+        return Ok(0);
+    };
+    let mut changed = 0usize;
+    for event in events {
+        if let Some(element) = recorded_element_from_event(event) {
+            upsert_element(elements, element);
+            changed += 1;
+        }
+    }
+    if changed > 0 {
+        if let Some(obj) = library.as_object_mut() {
+            obj.insert(
+                "updatedAt".into(),
+                chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    .into(),
+            );
+        }
+        save_element_library_value(app, &library)?;
+    }
+    Ok(changed)
+}
+
+fn upsert_element(elements: &mut Vec<Value>, incoming: Value) {
+    let Some(id) = incoming
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Some(existing) = elements
+        .iter_mut()
+        .find(|el| el.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    {
+        merge_recorded_element(existing, incoming);
+    } else {
+        elements.push(incoming);
+    }
+}
+
+fn merge_recorded_element(existing: &mut Value, incoming: Value) {
+    let preserved_label = existing.get("label").cloned();
+    let preserved_group = existing.get("group").cloned();
+    let preserved_used_in = existing.get("usedIn").cloned();
+    *existing = incoming;
+    if let Some(label) =
+        preserved_label.filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
+    {
+        existing["label"] = label;
+    }
+    if let Some(group) =
+        preserved_group.filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
+    {
+        existing["group"] = group;
+    }
+    if let Some(old_used) = preserved_used_in.and_then(|v| v.as_array().cloned()) {
+        let mut merged = existing
+            .get("usedIn")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for item in old_used {
+            if !merged.iter().any(|v| v == &item) {
+                merged.push(item);
+            }
+        }
+        existing["usedIn"] = Value::Array(merged);
+    }
+}
+
+fn recorded_element_from_event(event: &RawEvent) -> Option<Value> {
+    match event.source.as_str() {
+        "dom" => recorded_dom_element(event),
+        "desktop" => recorded_desktop_element(event),
+        _ => None,
+    }
+}
+
+/// R-02 desktop element ingestion. A `focus_field` / `focus_changed` event
+/// carries a [`FocusSnapshot`] (app / window_title / focused_role / name /
+/// value). When the focused control is identifiable we mint a desktop
+/// element-library entry whose fingerprints describe the AX target so the
+/// user can reuse it in `desktop.*` steps. We deliberately skip
+/// `app_changed` / `launched` / `heartbeat` (no actionable control there).
+fn recorded_desktop_element(event: &RawEvent) -> Option<Value> {
+    if !matches!(event.kind.as_str(), "focus_field" | "focus_changed") {
+        return None;
+    }
+    let payload = &event.payload;
+    let str_field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let role = str_field("focused_role");
+    let name = str_field("focused_name");
+    let app = str_field("app");
+    let window = str_field("window_title");
+    // Need at least a named/typed control to be worth saving.
+    if role.is_none() && name.is_none() {
+        return None;
+    }
+    let source_label = window.or(app).unwrap_or("桌面应用");
+    // Reuse the same id hashing as DOM: (source | css(=role) | xpath(unused) | label(=name)).
+    let id = recorded_element_id(source_label, role, None, name);
+    let captured_at = format_event_time(event.at_ms);
+    let mut fingerprints = Map::new();
+    if let Some(v) = role {
+        fingerprints.insert("ax_role".into(), v.into());
+    }
+    if let Some(v) = name {
+        fingerprints.insert("ax_name".into(), v.into());
+        fingerprints.insert("text_includes".into(), v.into());
+    }
+    if let Some(v) = app {
+        fingerprints.insert("app".into(), v.into());
+    }
+    if let Some(v) = window {
+        fingerprints.insert("window_title".into(), v.into());
+    }
+    let display_label = name
+        .map(str::to_string)
+        .or_else(|| role.map(|r| format!("桌面控件 · {r}")))
+        .unwrap_or_else(|| "桌面控件".into());
+    let element = serde_json::json!({
+        "id": id,
+        "label": display_label,
+        "group": format!("录制 · {source_label}"),
+        "automation": "desktop",
+        "scope": "local",
+        "syncState": "local",
+        "owner": "Recorder",
+        "source": source_label,
+        "tag": role.unwrap_or("control"),
+        "role": role.unwrap_or("element"),
+        "capturedAt": captured_at,
+        "lastValidated": captured_at,
+        "usedIn": ["desktop.focus"],
+        "fingerprints": Value::Object(fingerprints),
+    });
+    Some(element)
+}
+
+fn recorded_dom_element(event: &RawEvent) -> Option<Value> {
+    if event.source != "dom" {
+        return None;
+    }
+    if !matches!(
+        event.kind.as_str(),
+        "click" | "input" | "change" | "keydown" | "similar_grab"
+    ) {
+        return None;
+    }
+    let payload = &event.payload;
+    let css = if event.kind == "similar_grab" {
+        payload.get("generalized_selector").and_then(Value::as_str)
+    } else {
+        payload.get("selector").and_then(Value::as_str)
+    }
+    .map(str::trim)
+    .filter(|s| !s.is_empty());
+    let xpath = payload
+        .get("xpath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let label = payload
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if css.is_none() && xpath.is_none() && label.is_none() {
+        return None;
+    }
+    let url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("录制页面");
+    let tag = payload
+        .get("tag")
+        .and_then(Value::as_str)
+        .unwrap_or("element");
+    let id = recorded_element_id(url, css, xpath, label);
+    let captured_at = format_event_time(event.at_ms);
+    let mut fingerprints = Map::new();
+    if let Some(v) = css {
+        fingerprints.insert("css".into(), v.into());
+    }
+    if let Some(v) = xpath {
+        fingerprints.insert("xpath".into(), v.into());
+    }
+    if let Some(v) = label {
+        fingerprints.insert("aria_label".into(), v.into());
+        if v.len() < 32 {
+            fingerprints.insert("text_includes".into(), v.into());
+        }
+    }
+    let display_label = label
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("录制元素 · {tag}"));
+    let used_in = match event.kind.as_str() {
+        "input" | "change" => "browser.type",
+        "similar_grab" => "browser.extract",
+        _ => "browser.click",
+    };
+    let sibling_count = payload
+        .get("sibling_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut element = serde_json::json!({
+        "id": id,
+        "label": display_label,
+        "group": format!("录制 · {}", source_group(url)),
+        "automation": "web",
+        "scope": "local",
+        "syncState": "local",
+        "owner": "Recorder",
+        "source": url,
+        "tag": tag,
+        "role": role_for_tag(tag),
+        "capturedAt": captured_at,
+        "lastValidated": captured_at,
+        "usedIn": [used_in],
+        "fingerprints": Value::Object(fingerprints),
+    });
+    if sibling_count > 0 {
+        element["siblingCount"] = Value::from(sibling_count);
+        element["similar"] = Value::Array(vec![Value::from("同款元素")]);
+    }
+    Some(element)
+}
+
+fn recorded_element_id(
+    source: &str,
+    css: Option<&str>,
+    xpath: Option<&str>,
+    label: Option<&str>,
+) -> String {
+    let key = format!(
+        "{}|{}|{}|{}",
+        source,
+        css.unwrap_or_default(),
+        xpath.unwrap_or_default(),
+        label.unwrap_or_default()
+    );
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("el_rec_{:016x}", hasher.finish())
+}
+
+fn format_event_time(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn source_group(source: &str) -> String {
+    let without_scheme = source.split("://").nth(1).unwrap_or(source);
+    without_scheme
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("页面")
+        .to_string()
+}
+
+fn role_for_tag(tag: &str) -> &'static str {
+    match tag {
+        "input" | "textarea" => "textbox",
+        "button" => "button",
+        "select" => "combobox",
+        "a" => "link",
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
+        _ => "element",
+    }
+}
+
 fn scan_flows_in(dir: &Path, source: &str) -> Vec<FlowSummary> {
     let mut out = Vec::new();
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -1637,6 +2335,24 @@ fn parse_and_validate(home: &Path, flow_path: &Path) -> Result<Flow, String> {
     Ok(flow)
 }
 
+fn validate_generated_flow_yaml(home: &Path, yaml: &str) -> Result<(), String> {
+    if yaml.trim().is_empty() {
+        return Err("empty YAML".into());
+    }
+    let flow = lumo_dsl::parse_str(yaml).map_err(|e| format!("parse: {e}"))?;
+    lumo_dsl::validate(&flow).map_err(|e| format!("validate: {e}"))?;
+    let registry = build_action_registry(home, None);
+    let skills = load_skill_registry(home, None);
+    validate_steps(
+        &flow.spec.steps,
+        &flow.spec.capabilities,
+        &registry,
+        &skills,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// F-20: breakpoint-debug options threaded into a run. Default ⇒ a normal run
 /// (no breakpoints, no single-step) so existing callers are unaffected.
 #[derive(Default)]
@@ -1720,8 +2436,10 @@ fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
 }
 
 fn validation_report(path: &str, flow: &Flow) -> ValidationReport {
-    let warnings = if flow_uses_action(&flow.spec.steps, "ai.chat") {
-        vec!["This flow uses ai.chat; configure providers.toml and the corresponding API key environment variables before running it.".into()]
+    let warnings = if flow_uses_action(&flow.spec.steps, "ai.chat")
+        || flow_uses_action(&flow.spec.steps, "image.ocr")
+    {
+        vec!["This flow uses AI actions; configure providers.toml and the corresponding API key environment variables before running it.".into()]
     } else {
         Vec::new()
     };
@@ -1910,12 +2628,21 @@ fn validate_capability_declaration(
     capabilities: &lumo_dsl::Capabilities,
 ) -> anyhow::Result<()> {
     let missing = match step.action.as_str() {
-        "file.read" | "file.exists" | "excel.read_rows" if capabilities.fs_read.is_empty() => {
+        "file.read" | "file.exists" | "file.list" | "file.metadata" | "file.copy" | "file.move"
+        | "file.rename" | "excel.read_rows" | "excel.read_cell" | "excel.sheet_names"
+        | "image.locate" | "image.compare" | "image.ocr"
+            if capabilities.fs_read.is_empty() =>
+        {
             Some("fs.read")
         }
-        "file.write" | "excel.write_row" if capabilities.fs_write.is_empty() => Some("fs.write"),
+        "file.write" | "file.mkdir" | "file.copy" | "file.move" | "file.rename" | "file.delete"
+        | "excel.write_row" | "excel.write_cell"
+            if capabilities.fs_write.is_empty() =>
+        {
+            Some("fs.write")
+        }
         "http.request" | "browser.open" if capabilities.network.is_empty() => Some("network"),
-        "ai.chat" if capabilities.llm.is_empty() => Some("llm"),
+        "ai.chat" | "image.ocr" if capabilities.llm.is_empty() => Some("llm"),
         _ => None,
     };
     if let Some(kind) = missing {
@@ -2070,10 +2797,12 @@ fn make_provider_status(path: &Path, cfg: &ProvidersConfig) -> ProviderStatus {
                 kind: p.kind.clone(),
                 wire_api: p.wire_api.clone(),
                 default_model: p.default_model.clone(),
+                vision_model: p.vision_model.clone(),
+                ocr_model: p.ocr_model.clone(),
                 base_url: p.base_url.clone(),
                 api_key_env: p.api_key_env.clone(),
                 has_inline_key: p.api_key.is_some(),
-                has_key: p.resolve_api_key().is_some(),
+                has_key: p.kind == "local" || p.resolve_api_key().is_some(),
                 reasoning_effort: p.reasoning_effort.clone(),
                 models: p.models.clone(),
                 headers: p.headers.clone(),
@@ -2638,6 +3367,45 @@ mod path_sandbox_tests {
 }
 
 #[cfg(test)]
+mod recording_flow_tests {
+    use super::wrap_recording_fragment;
+
+    #[test]
+    fn wrap_recording_fragment_drops_empty_and_schema_unknown_steps() {
+        let fragment = r##"
+# Recorder YAML patch
+- id: click_1
+  action: browser.click
+  "# note": recorder spotted 12 similar items
+  with:
+    selectors:
+      css: button.login
+      xpath: //button[1]
+- id: empty_1
+  with: {}
+- id: type_1
+  action: browser.type
+  with:
+    selectors:
+      id: user
+    text: alice
+    clear: true
+"##;
+        let source = wrap_recording_fragment("rec-smoke", fragment).expect("wrap recording");
+        assert!(!source.contains("# note"), "{source}");
+        assert!(!source.contains("empty_1"), "{source}");
+
+        let flow = lumo_dsl::parse_str(&source).expect("recording flow parses");
+        assert_eq!(flow.metadata.id, "rec-smoke");
+        assert_eq!(flow.spec.steps.len(), 2);
+        assert_eq!(flow.spec.steps[0].id, "click_1");
+        assert_eq!(flow.spec.steps[0].action, "browser.click");
+        assert_eq!(flow.spec.steps[1].id, "type_1");
+        assert_eq!(flow.spec.steps[1].action, "browser.type");
+    }
+}
+
+#[cfg(test)]
 mod debug_flow_tests {
     //! F-20: integration coverage for the breakpoint debugger at the *desktop*
     //! layer — the `debug_flow` command's real work lives in `execute_flow`, so
@@ -2687,7 +3455,11 @@ spec:
         )
         .await;
 
-        assert_eq!(r1.report.paused_at.as_deref(), Some("two"), "paused before `two`");
+        assert_eq!(
+            r1.report.paused_at.as_deref(),
+            Some("two"),
+            "paused before `two`"
+        );
         assert!(!r1.report.success, "a paused run is not a success");
 
         // `one` is persisted ok with its F-19 vars snapshot; `two` (the
@@ -2714,7 +3486,10 @@ spec:
         // serde contract the webview reads: camelCase, no snake_case leak.
         let report_json = serde_json::to_value(&r1.report).unwrap();
         assert_eq!(report_json["pausedAt"], serde_json::json!("two"));
-        assert!(report_json.get("runId").is_some(), "report uses camelCase runId");
+        assert!(
+            report_json.get("runId").is_some(),
+            "report uses camelCase runId"
+        );
         let one_json = serde_json::to_value(one).unwrap();
         assert!(
             one_json.get("varsJson").is_some(),
@@ -2737,7 +3512,10 @@ spec:
         )
         .await;
 
-        assert!(r2.report.success, "continuing past the breakpoint completes the run");
+        assert!(
+            r2.report.success,
+            "continuing past the breakpoint completes the run"
+        );
         assert_eq!(r2.report.paused_at, None, "no further pause");
     }
 
@@ -2791,7 +3569,10 @@ spec:
             },
         )
         .await;
-        assert!(r4.report.success, "stepping off the last step completes the run");
+        assert!(
+            r4.report.success,
+            "stepping off the last step completes the run"
+        );
         assert_eq!(r4.report.paused_at, None);
     }
 }

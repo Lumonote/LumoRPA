@@ -12,6 +12,7 @@ use hmac::{Hmac, Mac};
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Sha256;
@@ -20,6 +21,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(SendAction);
+    r.register(DingtalkAction);
+    r.register(FeishuAction);
+    r.register(WecomAction);
 }
 
 pub struct SendAction;
@@ -223,56 +227,178 @@ impl Action for SendAction {
         if text.is_none() && payload.is_none() {
             return Err(StepError::msg("notify.send requires `text` or `payload`"));
         }
+        deliver(
+            ctx, &provider, &url, text, payload, title, &msgtype, secret, timeout_ms,
+        )
+        .await
+    }
+}
 
-        let (final_url, body) = build_request(
-            &provider,
-            &url,
-            text.as_deref(),
-            payload.clone(),
-            title.as_deref(),
-            &msgtype,
-            secret.as_deref(),
-        )?;
+/// Shared delivery path for `notify.send` and the per-platform robot actions:
+/// build (and sign) the request, POST it through the SSRF-gated client, and map
+/// HTTP/provider failures to a step error. Caller must have run the network gate
+/// and the `text`/`payload` presence check already.
+#[allow(clippy::too_many_arguments)]
+async fn deliver(
+    ctx: &StepCtx,
+    provider: &str,
+    url: &str,
+    text: Option<String>,
+    payload: Option<Value>,
+    title: Option<String>,
+    msgtype: &str,
+    secret: Option<String>,
+    timeout_ms: u64,
+) -> Result<ActionResult, StepError> {
+    let (final_url, body) = build_request(
+        provider,
+        url,
+        text.as_deref(),
+        payload,
+        title.as_deref(),
+        msgtype,
+        secret.as_deref(),
+    )?;
 
-        // 复用 http 模块的 SSRF 网关:逐跳重定向重新鉴权,防止授权 host 302
-        // 跳到未授权内网地址(如 169.254.169.254 云元数据)绕过网络沙箱
-        // (notify 出站,与 http.request/download/upload 同一防护)。
-        let client = crate::http::build_gated_client(ctx.network_grants(), timeout_ms)?;
-        let resp = client
-            .post(&final_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_redirect() {
-                    StepError::msg(
-                        "notify.send: blocked redirect to ungranted host (network capability)",
-                    )
-                } else {
-                    // reqwest 的 Error::Display 会带上完整 URL(含 query);dingtalk 带
-                    // secret 时 URL 含 ?sign=<HMAC>。without_url() 剥掉 URL,防签名落日志/快照。
-                    StepError::msg(format!("notify.send send: {}", e.without_url()))
-                }
-            })?;
-        let status = resp.status().as_u16();
-        let text_resp = resp
-            .text()
-            .await
-            .map_err(|e| StepError::msg(format!("notify.send body: {}", e.without_url())))?;
-        let response: Value =
-            serde_json::from_str(&text_resp).unwrap_or(Value::String(text_resp.clone()));
+    // 复用 http 模块的 SSRF 网关:逐跳重定向重新鉴权,防止授权 host 302
+    // 跳到未授权内网地址(如 169.254.169.254 云元数据)绕过网络沙箱。
+    let client = crate::http::build_gated_client(ctx.network_grants(), timeout_ms)?;
+    let resp = client
+        .post(&final_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_redirect() {
+                StepError::msg(
+                    "notify: blocked redirect to ungranted host (network capability)",
+                )
+            } else {
+                // reqwest 的 Error::Display 会带上完整 URL(含 query);dingtalk 带
+                // secret 时 URL 含 ?sign=<HMAC>。without_url() 剥掉 URL,防签名落日志/快照。
+                StepError::msg(format!("notify send: {}", e.without_url()))
+            }
+        })?;
+    let status = resp.status().as_u16();
+    let text_resp = resp
+        .text()
+        .await
+        .map_err(|e| StepError::msg(format!("notify body: {}", e.without_url())))?;
+    let response: Value =
+        serde_json::from_str(&text_resp).unwrap_or(Value::String(text_resp.clone()));
 
-        let ok = (200..300).contains(&status) && provider_success(&provider, &response);
-        if !ok {
-            return Err(StepError::msg(format!(
-                "notify.send `{provider}` failed: status={status} response={response}"
-            )));
-        }
+    let ok = (200..300).contains(&status) && provider_success(provider, &response);
+    if !ok {
+        return Err(StepError::msg(format!(
+            "notify `{provider}` failed: status={status} response={response}"
+        )));
+    }
 
-        Ok(ActionResult::from(serde_json::json!({
-            "status": status,
-            "ok": ok,
-            "response": response,
-        })))
+    Ok(ActionResult::from(serde_json::json!({
+        "status": status,
+        "ok": ok,
+        "response": response,
+    })))
+}
+
+/// Shared input for the per-platform robot actions (`notify.dingtalk` /
+/// `notify.feishu` / `notify.wecom`): same fields as `notify.send` minus the
+/// `provider` discriminator (fixed by the action id). Secrets arrive pre-resolved
+/// as plaintext, exactly like `notify.send`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RobotIn {
+    url: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    payload: Option<Value>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "default_msgtype")]
+    msgtype: String,
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+async fn robot_execute(
+    ctx: &mut StepCtx,
+    action: &str,
+    provider: &str,
+    input: Value,
+) -> Result<ActionResult, StepError> {
+    let RobotIn {
+        url,
+        text,
+        payload,
+        title,
+        msgtype,
+        secret,
+        timeout_ms,
+    } = serde_json::from_value(input)
+        .map_err(|e| StepError::msg(format!("{action} input invalid: {e}")))?;
+    ctx.ensure_network_url(&url)?;
+    if text.is_none() && payload.is_none() {
+        return Err(StepError::msg(format!("{action} requires `text` or `payload`")));
+    }
+    deliver(
+        ctx, provider, &url, text, payload, title, &msgtype, secret, timeout_ms,
+    )
+    .await
+}
+
+pub struct DingtalkAction;
+#[async_trait]
+impl Action for DingtalkAction {
+    fn id(&self) -> &'static str {
+        "notify.dingtalk"
+    }
+    fn summary(&self) -> &'static str {
+        "Send a text/markdown message to a DingTalk group robot webhook (optional HMAC signing)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RobotIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        robot_execute(ctx, "notify.dingtalk", "dingtalk", input).await
+    }
+}
+
+pub struct FeishuAction;
+#[async_trait]
+impl Action for FeishuAction {
+    fn id(&self) -> &'static str {
+        "notify.feishu"
+    }
+    fn summary(&self) -> &'static str {
+        "Send a text message to a Feishu group robot webhook (optional HMAC signing)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RobotIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        robot_execute(ctx, "notify.feishu", "feishu", input).await
+    }
+}
+
+pub struct WecomAction;
+#[async_trait]
+impl Action for WecomAction {
+    fn id(&self) -> &'static str {
+        "notify.wecom"
+    }
+    fn summary(&self) -> &'static str {
+        "Send a text/markdown message to a WeCom group robot webhook"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RobotIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        robot_execute(ctx, "notify.wecom", "wecom", input).await
     }
 }

@@ -124,7 +124,9 @@ fn type_matches(ty: &str, v: &Value) -> bool {
     match ty {
         "string" => v.is_string(),
         // Accept an integral float (e.g. a template that rendered `5` to `5.0`).
-        "integer" => v.is_i64() || v.is_u64() || v.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false),
+        "integer" => {
+            v.is_i64() || v.is_u64() || v.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false)
+        }
         "number" => v.is_number(),
         "boolean" => v.is_boolean(),
         "array" => v.is_array(),

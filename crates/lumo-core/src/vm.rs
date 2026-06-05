@@ -284,7 +284,8 @@ impl FlowVm {
         .with_step_timeout(self.step_timeout)
         .with_vault(self.vault_identity.clone())
         .with_resume_memo(self.load_resume_memo())
-        .with_debug(self.build_debug_controller());
+        .with_debug(self.build_debug_controller())
+        .with_resources(flow.spec.resources.clone());
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
@@ -605,6 +606,10 @@ async fn execute_step(
     // step_runs path column.
     ctx.set_current_step(&step.id);
     ctx.set_current_step_path(&path);
+    // T3: bind this step to its declared resource (if any) so a resource-aware
+    // action can resolve the shared, run-scoped handle. `None` ⇒ unchanged
+    // per-step behavior.
+    ctx.set_current_resource(step.resource.as_deref());
 
     let mut attempt: u32 = 1;
     loop {
@@ -753,12 +758,54 @@ async fn execute_step(
                     error
                 );
                 let delay = compute_backoff(&backoff, initial_ms, attempt);
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                // P1-1: race the backoff sleep against the run's cancel token so a
+                // cancellation during the wait wins immediately instead of stalling
+                // for the full backoff. Mirrors the Cancelled path above.
+                let cancel = ctx.cancel_token();
+                let cancelled = {
+                    let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay));
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        biased;
+                        _ = wait_cancel(&cancel) => true,
+                        _ = &mut sleep => false,
+                    }
+                };
+                if cancelled {
+                    persist_step(
+                        ctx,
+                        StepPersist {
+                            step_id: &step.id,
+                            path: &path,
+                            parent_path: parent_path.as_deref(),
+                            depth,
+                            idx,
+                            state: "cancelled",
+                            attempt: attempt as i64,
+                            input_hash: &input_hash,
+                            output: None,
+                            error: Some("run cancelled".into()),
+                            started_at,
+                            finished_at: Utc::now(),
+                        },
+                    )
+                    .await;
+                    return Err(ExecError::Cancelled);
+                }
                 attempt += 1;
             }
             Err(e) => {
                 let finished_at = Utc::now();
                 let _elapsed_ms = t0.elapsed().as_millis() as i64;
+                // P1-4: even on failure the action may have already incurred AI
+                // spend via the `vision_locate`/`ocr` hooks before erroring. Drain
+                // it here — mirroring the Ok branch — so it is attributed to this
+                // failing step instead of bleeding into the next successful one.
+                // Done before `try_ai_recovery` so recovery's own spend stays
+                // separate.
+                if let Some(provider) = ctx.ai_provider().cloned() {
+                    persist_ai_usage(ctx, &provider.take_usage()).await;
+                }
                 let ai_mode = effective_ai_mode(ctx, step);
                 let try_ai = matches!(ai_mode, AiMode::Fallback | AiMode::Primary)
                     && matches!(

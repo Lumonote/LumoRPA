@@ -22,76 +22,196 @@ use serde_json::{json, Map, Value};
 /// input struct. Extended as each family is converted.
 const DERIVED_CLOSED: &[&str] = &[
     // hash_ops
-    "hash.sha256", "hash.sha512", "hash.sha1", "hash.md5",
-    "util.base64_encode", "util.base64_decode", "util.uuid",
+    "hash.sha256",
+    "hash.sha512",
+    "hash.sha1",
+    "hash.md5",
+    "util.base64_encode",
+    "util.base64_decode",
+    "util.uuid",
     // math_ops
-    "math.round", "math.random", "math.min", "math.max", "math.sum", "math.avg", "math.abs",
+    "math.round",
+    "math.random",
+    "math.min",
+    "math.max",
+    "math.sum",
+    "math.avg",
+    "math.abs",
     // regex_ops
-    "regex.match", "regex.find_all", "regex.replace", "regex.captures",
+    "regex.match",
+    "regex.find_all",
+    "regex.replace",
+    "regex.captures",
     // archive
-    "archive.zip", "archive.unzip",
+    "archive.zip",
+    "archive.unzip",
     // clipboard
-    "clipboard.get", "clipboard.set",
+    "clipboard.get",
+    "clipboard.set",
     // data
-    "data.json_parse", "data.json_format",
+    "data.json_parse",
+    "data.json_format",
     // db_ops
-    "db.sqlite_query", "db.sqlite_exec",
+    "db.sqlite_query",
+    "db.sqlite_exec",
+    "db.sqlite_batch",
     // csv_ops
-    "csv.parse", "csv.stringify", "csv.read", "csv.write",
+    "csv.parse",
+    "csv.stringify",
+    "csv.read",
+    "csv.write",
     // excel
-    "excel.read_rows", "excel.write_row",
+    "excel.read_rows",
+    "excel.write_row",
+    "excel.sheet_names",
+    "excel.read_cell",
+    "excel.write_cell",
+    "excel.read_range",
+    "excel.write_range",
+    "excel.find_replace",
+    "excel.set_formula",
     // file
-    "file.read", "file.write", "file.exists",
+    "file.read",
+    "file.write",
+    "file.exists",
+    "file.list",
+    "file.mkdir",
+    "file.copy",
+    "file.move",
+    "file.rename",
+    "file.delete",
+    "file.metadata",
+    "file.append",
     // system_ops
-    "system.shell", "system.env_get", "system.sleep", "system.platform",
+    "system.shell",
+    "system.env_get",
+    "system.sleep",
+    "system.platform",
+    "system.process_list",
     // date_ops (date.diff's `unit` is a derived Rust enum → keeps its enum constraint)
-    "date.now", "date.parse", "date.format", "date.add", "date.diff", "date.weekday",
+    "date.now",
+    "date.parse",
+    "date.format",
+    "date.add",
+    "date.diff",
+    "date.weekday",
+    "date.workday_add",
     // mcp — discover only; mcp.call stays hand-written (`arguments: Value` can't
     // express the hand-written `{type:object}` without loosening it).
     "mcp.discover",
     // control — VM-dispatched, but schemas still serve `lumo validate`/`actions`.
     // Held hand-written: control.log (level enum), control.for_each (struct looser
     // than its schema), control.try / control.parallel (intentionally permissive).
-    "control.set_var", "control.if", "control.for", "control.fail", "control.sleep",
+    "control.set_var",
+    "control.if",
+    "control.for",
+    "control.fail",
+    "control.sleep",
     // json_ops — json.merge kept hand-written (`a`/`b: Value` can't express {type:object}).
-    "json.get", "json.set", "json.keys", "json.values", "json.delete",
+    "json.get",
+    "json.set",
+    "json.keys",
+    "json.values",
+    "json.delete",
     // http — upload's `mode` is a derived Rust enum (keeps ["multipart","body"]).
-    "http.request", "http.download", "http.upload",
+    "http.request",
+    "http.download",
+    "http.upload",
     // table_ops — data.join's `type` is a derived Rust enum (keeps ["inner","left"]).
     // data.filter / data.group_by stay hand-written: their op enums live on `String`
     // fields nested inside arrays / maps that the validator recurses into.
     "data.join",
+    // data.dedup's `keep` and data.sort_multi's per-key `order` are derived Rust
+    // enums (keep their enum constraint); `by`/`keys` shapes derive cleanly too.
+    "data.dedup",
+    "data.sort_multi",
     // list_ops
-    "list.length", "list.append", "list.sort", "list.unique", "list.range",
-    "list.contains", "list.get", "list.slice", "list.reverse", "list.pluck",
+    "list.length",
+    "list.append",
+    "list.sort",
+    "list.unique",
+    "list.range",
+    "list.contains",
+    "list.get",
+    "list.slice",
+    "list.reverse",
+    "list.pluck",
     // string_ops
-    "string.upper", "string.lower", "string.trim", "string.length", "string.split",
-    "string.join", "string.replace", "string.contains", "string.starts_with",
-    "string.ends_with", "string.substring", "string.repeat", "string.pad_left",
-    "string.pad_right", "string.format",
+    "string.upper",
+    "string.lower",
+    "string.trim",
+    "string.length",
+    "string.split",
+    "string.join",
+    "string.replace",
+    "string.contains",
+    "string.starts_with",
+    "string.ends_with",
+    "string.substring",
+    "string.repeat",
+    "string.pad_left",
+    "string.pad_right",
+    "string.format",
+    "string.encode_convert",
     // browser — wait's `condition` is a derived Rust enum (keeps the 4 conditions);
     // click/type/wait share `MultiSelector`, which now derives JsonSchema +
     // deny_unknown_fields so the nested `selectors:` object stays closed too.
-    "browser.launch", "browser.close", "browser.open", "browser.click",
-    "browser.type", "browser.extract", "browser.wait",
+    "browser.launch",
+    "browser.close",
+    "browser.open",
+    "browser.click",
+    "browser.type",
+    "browser.extract",
+    "browser.wait",
+    "browser.info",
     // browser F-10 completions (scroll's `to` is a derived enum; screenshot gates fs-write).
-    "browser.eval", "browser.screenshot", "browser.scroll", "browser.hover",
-    "browser.select", "browser.cookies", "browser.set_cookie",
+    "browser.eval",
+    "browser.screenshot",
+    "browser.scroll",
+    "browser.hover",
+    "browser.select",
+    "browser.cookies",
+    "browser.set_cookie",
     // browser F-10 part 2 — tab's `op` is a derived enum (activate/close); tabs
     // takes no input (empty closed struct, like browser.close); upload's `files`
     // is a required string array, gated by fs-read.
-    "browser.tabs", "browser.tab", "browser.upload",
+    "browser.tabs",
+    "browser.tab",
+    "browser.upload",
+    // browser 批次B — download_wait gates fs-write; dialog (accept/dismiss);
+    // frame (op enum eval/extract, flattened FrameSel by url/name/index);
+    // extract_table (header-keyed rows).
+    "browser.download_wait",
+    "browser.dialog",
+    "browser.frame",
+    "browser.extract_table",
     // email (F-3) — SMTP send / IMAP fetch; secrets arrive pre-resolved as plain
     // string inputs, gated by network (+ fs.read per attachment).
-    "email.send", "email.fetch",
+    "email.send",
+    "email.fetch",
     // pdf (F-4) — local read/write via lopdf; fs.read / fs.write gated.
-    "pdf.extract_text", "pdf.info", "pdf.write",
+    "pdf.extract_text",
+    "pdf.info",
+    "pdf.write",
     // transfer (F-6) — FTP + S3-compatible upload/download; fs + network gated.
     // (SFTP deferred — see transfer.rs module header.)
-    "ftp.upload", "ftp.download", "s3.put", "s3.get",
-    // image (F-2) — pure-Rust template matching (image + imageproc); reads gated
-    // by fs.read. OCR text recognition deferred (no accurate pure-Rust Chinese engine).
-    "image.locate", "image.compare",
+    "ftp.upload",
+    "ftp.download",
+    "s3.put",
+    "s3.get",
+    // image (F-2) — template matching reads locally; OCR reads local images and
+    // calls the configured OCR/vision model.
+    "image.locate",
+    "image.compare",
+    "image.ocr",
+    // notify (F-8) — per-platform robot actions share a derived RobotIn (closed);
+    // notify.send stays hand-written (its `provider` discriminator + open payload).
+    "notify.dingtalk",
+    "notify.feishu",
+    "notify.wecom",
+    // docx (批次B) — zip-level OOXML read/template-fill; fs.read / fs.write gated.
+    "docx.read_text",
+    "docx.replace_placeholders",
 ];
 
 /// F-1 `desktop.*` actions live behind the optional `desktop` feature (rdev).
@@ -166,8 +286,8 @@ fn assert_validator_safe(id: &str, v: &Value) {
                 }
             }
             // data, not schemas — never descend (avoids false keyword hits).
-            "enum" | "required" | "type" | "description" | "title" | "format"
-            | "default" | "const" | "examples" => {}
+            "enum" | "required" | "type" | "description" | "title" | "format" | "default"
+            | "const" | "examples" => {}
             // anything else may itself be a schema (`items`, `additionalProperties`)
             // or an array of schemas (`allOf`/`anyOf`/`oneOf`).
             _ => assert_validator_safe(id, sub),
@@ -180,7 +300,11 @@ fn derived_schemas_are_validator_safe() {
     let reg = registry();
     for id in DERIVED_CLOSED.iter().chain(DESKTOP_CLOSED) {
         let schema = schema_of(&reg, id);
-        assert_eq!(schema["type"], json!("object"), "`{id}`: top-level schema must be an object");
+        assert_eq!(
+            schema["type"],
+            json!("object"),
+            "`{id}`: top-level schema must be an object"
+        );
         assert_eq!(
             schema["additionalProperties"],
             json!(false),
@@ -219,7 +343,10 @@ fn valid_object(schema: &Value) -> Map<String, Value> {
     let props = schema.get("properties").and_then(Value::as_object);
     if let Some(req) = schema.get("required").and_then(Value::as_array) {
         for key in req.iter().filter_map(Value::as_str) {
-            let sub = props.and_then(|p| p.get(key)).cloned().unwrap_or_else(|| json!({}));
+            let sub = props
+                .and_then(|p| p.get(key))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             m.insert(key.to_string(), dummy_for(&sub));
         }
     }
@@ -238,7 +365,10 @@ fn derived_schemas_enforce_required_unknown_and_types() {
         // (1) the synthesised minimal object must validate — otherwise we can't
         // trust the negative probes below.
         if let Err(e) = validate_input(schema, &Value::Object(base.clone())) {
-            errs.push(format!("`{id}`: synthesised minimal input {:?} was REJECTED: {e}", base));
+            errs.push(format!(
+                "`{id}`: synthesised minimal input {:?} was REJECTED: {e}",
+                base
+            ));
             continue;
         }
 
@@ -246,7 +376,9 @@ fn derived_schemas_enforce_required_unknown_and_types() {
         let mut unknown = base.clone();
         unknown.insert("__lumo_unknown_field__".into(), json!(1));
         if validate_input(schema, &Value::Object(unknown)).is_ok() {
-            errs.push(format!("`{id}`: an unknown field was ACCEPTED (additionalProperties:false lost)"));
+            errs.push(format!(
+                "`{id}`: an unknown field was ACCEPTED (additionalProperties:false lost)"
+            ));
         }
 
         // (3) removing any required field must be rejected.
@@ -285,5 +417,9 @@ fn derived_schemas_enforce_required_unknown_and_types() {
         }
     }
 
-    assert!(errs.is_empty(), "derived schemas under-enforce:\n{}", errs.join("\n"));
+    assert!(
+        errs.is_empty(),
+        "derived schemas under-enforce:\n{}",
+        errs.join("\n")
+    );
 }

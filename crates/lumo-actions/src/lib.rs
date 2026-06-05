@@ -10,6 +10,7 @@ pub mod date_ops;
 pub mod db_ops;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod docx;
 pub mod email;
 pub mod excel;
 pub mod file;
@@ -23,6 +24,7 @@ pub mod mcp;
 pub mod notify;
 pub mod pdf;
 pub mod regex_ops;
+pub mod resource_store;
 pub mod schema;
 pub mod selector_stats;
 pub mod selectors;
@@ -67,4 +69,5 @@ pub fn register_all(registry: &mut ActionRegistry) {
     clipboard::register(registry);
     table_ops::register(registry);
     transfer::register(registry);
+    docx::register(registry);
 }

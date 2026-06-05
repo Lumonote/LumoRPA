@@ -127,7 +127,10 @@ async fn timeout_inside_try_is_not_caught() {
     // catch branch, silently recovering from a timeout and continuing the run.)
     let vm = FlowVm::new(reg(), None).with_step_timeout(Duration::from_millis(40));
     let err = vm
-        .run(&parse_str(GUARDED_SLEEP_FLOW).unwrap(), RunOptions::default())
+        .run(
+            &parse_str(GUARDED_SLEEP_FLOW).unwrap(),
+            RunOptions::default(),
+        )
         .await
         .expect_err("a timeout inside try must propagate, not be caught");
     assert!(matches!(err, ExecError::Timeout { .. }), "got: {err}");
@@ -147,7 +150,10 @@ async fn cancel_inside_try_is_not_caught() {
         canceller.cancel();
     });
     let err = vm
-        .run(&parse_str(GUARDED_SLEEP_FLOW).unwrap(), RunOptions::default())
+        .run(
+            &parse_str(GUARDED_SLEEP_FLOW).unwrap(),
+            RunOptions::default(),
+        )
         .await
         .expect_err("cancellation inside try must abort the run, not be caught");
     assert!(matches!(err, ExecError::Cancelled), "got: {err}");

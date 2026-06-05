@@ -104,8 +104,16 @@ async fn resume_replays_completed_steps_and_reruns_the_rest() {
         .await;
     assert!(r1.is_err(), "run 1 should fail at b");
     assert_eq!(calls_a.load(Ordering::SeqCst), 1, "a ran in run 1");
-    assert_eq!(calls_b.load(Ordering::SeqCst), 1, "b ran (and failed) in run 1");
-    assert_eq!(calls_c.load(Ordering::SeqCst), 0, "c was never reached in run 1");
+    assert_eq!(
+        calls_b.load(Ordering::SeqCst),
+        1,
+        "b ran (and failed) in run 1"
+    );
+    assert_eq!(
+        calls_c.load(Ordering::SeqCst),
+        0,
+        "c was never reached in run 1"
+    );
 
     let prior_id = repo.list_runs(10).unwrap()[0].id.clone();
 

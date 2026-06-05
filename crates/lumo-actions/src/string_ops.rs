@@ -27,6 +27,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(PadLeftAction);
     r.register(PadRightAction);
     r.register(FormatAction);
+    r.register(EncodeConvertAction);
 }
 
 fn text_only_schema() -> &'static Value {
@@ -504,6 +505,103 @@ impl Action for FormatAction {
             };
             out = out.replace(&needle, &rep);
         }
+        Ok(ActionResult::from(Value::String(out)))
+    }
+}
+
+/// `string.encode_convert` — re-encode text between UTF-8 and a legacy codepage
+/// (GBK / GB18030 / Big5 / …) via the pure-Rust `encoding_rs`.
+///
+/// IO shape (chosen to stay consistent with the other in-memory `string.*` ops:
+/// no fs gating, JSON-string in/out): the value travels as a JSON string. A
+/// non-UTF-8 side cannot be a faithful JSON string, so that side is carried as
+/// **base64 of the raw encoded bytes** — `input_base64` says the input string is
+/// base64 of `from`-encoded bytes; `output_base64` (default true when `to` is not
+/// UTF-8) returns base64 of the `to`-encoded bytes. Converting *to* UTF-8 yields
+/// a plain string; converting *from* UTF-8 takes a plain string.
+pub struct EncodeConvertAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EncodeConvertIn {
+    text: String,
+    /// Source encoding label (e.g. `utf-8`, `gbk`, `gb18030`, `big5`).
+    #[serde(default = "default_utf8")]
+    from: String,
+    /// Target encoding label.
+    to: String,
+    /// Treat `text` as base64 of the raw `from`-encoded bytes (required when
+    /// `from` is not UTF-8, since such bytes aren't valid UTF-8 JSON strings).
+    #[serde(default)]
+    input_base64: bool,
+    /// Return base64 of the raw `to`-encoded bytes. Defaults to true unless `to`
+    /// is UTF-8, where a plain string round-trips losslessly.
+    #[serde(default)]
+    output_base64: Option<bool>,
+}
+fn default_utf8() -> String {
+    "utf-8".into()
+}
+
+#[async_trait]
+impl Action for EncodeConvertAction {
+    fn id(&self) -> &'static str {
+        "string.encode_convert"
+    }
+    fn summary(&self) -> &'static str {
+        "Convert text between UTF-8 and GBK/GB18030/Big5 (base64 for non-UTF-8 bytes)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<EncodeConvertIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        use base64::Engine;
+        let EncodeConvertIn {
+            text,
+            from,
+            to,
+            input_base64,
+            output_base64,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("string.encode_convert invalid: {e}")))?;
+
+        let from_enc = encoding_rs::Encoding::for_label(from.as_bytes())
+            .ok_or_else(|| StepError::msg(format!("string.encode_convert unknown `from`: {from}")))?;
+        let to_enc = encoding_rs::Encoding::for_label(to.as_bytes())
+            .ok_or_else(|| StepError::msg(format!("string.encode_convert unknown `to`: {to}")))?;
+
+        // 1) Materialize the source bytes in `from`'s encoding.
+        let src_bytes: Vec<u8> = if input_base64 {
+            base64::engine::general_purpose::STANDARD
+                .decode(text.as_bytes())
+                .map_err(|e| StepError::msg(format!("string.encode_convert bad base64: {e}")))?
+        } else {
+            // `text` is a UTF-8 JSON string; encode it into `from` first so the
+            // subsequent decode is symmetric (no-op when from == utf-8).
+            let (enc, _, _) = from_enc.encode(&text);
+            enc.into_owned()
+        };
+
+        // 2) Decode `from`-bytes → Unicode, then encode → `to`-bytes.
+        let (decoded, _, had_errors) = from_enc.decode(&src_bytes);
+        if had_errors {
+            return Err(StepError::msg(format!(
+                "string.encode_convert: input is not valid {}",
+                from_enc.name()
+            )));
+        }
+        let (out_bytes_cow, _, _) = to_enc.encode(&decoded);
+        let out_bytes = out_bytes_cow.into_owned();
+
+        // 3) Emit as a plain string (UTF-8 target) or base64 (anything else,
+        //    or when explicitly requested).
+        let as_b64 = output_base64.unwrap_or(to_enc != encoding_rs::UTF_8);
+        let out = if as_b64 {
+            base64::engine::general_purpose::STANDARD.encode(&out_bytes)
+        } else {
+            String::from_utf8(out_bytes)
+                .map_err(|e| StepError::msg(format!("string.encode_convert utf8: {e}")))?
+        };
         Ok(ActionResult::from(Value::String(out)))
     }
 }

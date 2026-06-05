@@ -2,18 +2,27 @@
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, ResourceFactory, RunTeardown, StepCtx};
+use lumo_dsl::ResourceDecl;
 use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::resource_store::ResourceStore;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(RequestAction);
     r.register(DownloadAction);
     r.register(UploadAction);
+    // T3: a `spec.resources.<name>` of kind `http` is one gated client reused by
+    // every step that binds to it (so the connection pool / keep-alive persists),
+    // reclaimed at run end. Unbound steps build a fresh client per call (back-compat).
+    r.register_teardown(Arc::new(HttpTeardown));
+    r.register_resource_factory(Arc::new(HttpFactory));
 }
 
 /// Build a `reqwest::Client` whose redirect policy re-authorizes EVERY hop
@@ -48,6 +57,127 @@ pub(crate) fn build_gated_client(
         .map_err(|e| StepError::msg(format!("http client: {e}")))
 }
 
+// ─── T3: `http` resource — one gated client per run, reused across steps ───────
+//
+// A `spec.resources.<name>: {kind: http, timeout_ms?: ...}` is one
+// `reqwest::Client` built once on the first step that binds to it
+// (`Step.resource`), kept in `HTTP_CLIENTS` keyed by `(run_id, name)`, reused by
+// every later bound step — so the connection pool (TCP/TLS keep-alive) and
+// redirect policy persist — and dropped at run end by [`HttpTeardown`]. An
+// unbound step builds a fresh client per call, exactly as before.
+//
+// Mirrors the browser rule "the declaration wins when bound": a bound step uses
+// the resource's declared `timeout_ms` (the per-step `timeout_ms` is for unbound
+// steps). The redirect policy bakes in the run's network grants, which are
+// constant for the whole run, so one cached client stays correctly SSRF-gated
+// for every step.
+
+const HTTP_KIND: &str = "http";
+
+/// Gated clients opened for `http` resources, keyed `(run_id, resource name)`.
+/// `reqwest::Client` is `Send + Sync` and cheaply clonable (it shares its pool
+/// behind an `Arc`), so cloning the cached client per request reuses the pool.
+static HTTP_CLIENTS: ResourceStore<reqwest::Client> = ResourceStore::new();
+
+/// The `http` resource the step binds to, or `None` when it binds nothing (or
+/// binds a non-`http` / undeclared resource) — in which case the step builds a
+/// client per call, exactly as before.
+fn http_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == HTTP_KIND => Some(name),
+        _ => None,
+    }
+}
+
+/// The request timeout declared by an `http` resource (`timeout_ms:`, flattened
+/// into `config`), defaulting to the same 30s a per-step request uses.
+fn http_timeout_from_decl(decl: &ResourceDecl) -> u64 {
+    decl.config
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(default_timeout_ms)
+}
+
+/// Build (once) and return the shared gated client for an `http` resource at
+/// `(run_id, slot)`, reusing it on later calls. Idempotent: on a concurrent open
+/// the first client wins and the loser is dropped by the store.
+async fn ensure_client(
+    run_id: &str,
+    slot: &str,
+    grants: &[String],
+    timeout_ms: u64,
+) -> Result<Arc<reqwest::Client>, StepError> {
+    if let Some(client) = HTTP_CLIENTS.get(run_id, slot) {
+        return Ok(client);
+    }
+    let client = build_gated_client(grants, timeout_ms)?;
+    Ok(HTTP_CLIENTS.get_or_put(run_id, slot, Arc::new(client)))
+}
+
+/// The client an HTTP step should use: a step bound to an `http` resource reuses
+/// the run's shared client (built with the resource's declared timeout); an
+/// unbound step builds a fresh client with its own `timeout_ms`. Returns an owned
+/// `reqwest::Client` either way (a clone of the cached one shares its pool), so
+/// callers are unchanged.
+async fn client_for(ctx: &StepCtx, step_timeout_ms: u64) -> Result<reqwest::Client, StepError> {
+    match http_slot(ctx) {
+        Some(name) => {
+            let timeout_ms = http_timeout_from_decl(&ctx.resource_decl(&name)?);
+            let client = ensure_client(ctx.run_id(), &name, ctx.network_grants(), timeout_ms).await?;
+            Ok((*client).clone())
+        }
+        None => build_gated_client(ctx.network_grants(), step_timeout_ms),
+    }
+}
+
+/// Drop every `http` client opened for `run_id` (releasing its connection pool).
+/// Idempotent — a no-op when the run opened none. The end-of-run teardown body;
+/// also exposed for tests.
+#[doc(hidden)]
+pub fn close_run_clients(run_id: &str) {
+    let _ = HTTP_CLIENTS.take_run(run_id);
+}
+
+/// Whether any `http` resource client is currently open for `run_id`. For tests.
+#[doc(hidden)]
+pub fn http_client_open(run_id: &str) -> bool {
+    HTTP_CLIENTS.has_run(run_id)
+}
+
+/// End-of-run hook: drops every `http` resource client for the run so cached
+/// connection pools don't linger past the flow.
+struct HttpTeardown;
+
+#[async_trait]
+impl RunTeardown for HttpTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_clients(run_id);
+    }
+}
+
+/// T3 resource factory for `http`. Note: the gated client is built **lazily** by
+/// the first bound step, not here — its redirect policy must bake in the run's
+/// network grants, which live on the `StepCtx` (capabilities), not in the decl
+/// that `open` receives. So `open` validates the declaration and returns; the
+/// action opens-and-reuses via [`ensure_client`]. (If the VM ever drives `open`
+/// directly it will need to pass grants — the trait's documented escape hatch.)
+struct HttpFactory;
+
+#[async_trait]
+impl ResourceFactory for HttpFactory {
+    fn kind(&self) -> &str {
+        HTTP_KIND
+    }
+
+    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        // No-op: the gated client is built lazily by the first bound step (its
+        // redirect policy must bake in the run's network grants, which aren't in
+        // the decl). Registered so the kind is discoverable for a future VM driver.
+        Ok(())
+    }
+}
+
 pub struct RequestAction;
 
 #[derive(Deserialize, JsonSchema)]
@@ -62,10 +192,27 @@ struct ReqIn {
     query: HashMap<String, String>,
     #[serde(default)]
     body: Option<Value>,
+    /// Optional HTTP authentication, applied as an `Authorization` header
+    /// (back-compat: new + optional). Bearer token or HTTP Basic.
+    #[serde(default)]
+    auth: Option<Auth>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
+}
+
+/// HTTP auth scheme for `http.request`. A tagged enum so the derived schema
+/// carries the `kind: ["bearer","basic"]` constraint and the dispatch is
+/// exhaustive. Secrets arrive pre-resolved as plain strings (same as the
+/// existing email/transfer actions).
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+enum Auth {
+    /// `Authorization: Bearer <token>`.
+    Bearer { token: String },
+    /// `Authorization: Basic base64(user:pass)`.
+    Basic { user: String, pass: String },
 }
 fn default_method() -> String {
     "GET".into()
@@ -96,13 +243,14 @@ impl Action for RequestAction {
             headers,
             query,
             body,
+            auth,
             timeout_ms,
             max_bytes,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.request input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
 
-        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
+        let client = client_for(ctx, timeout_ms).await?;
 
         let mut req = client
             .request(
@@ -112,6 +260,13 @@ impl Action for RequestAction {
                 &url,
             )
             .query(&query);
+
+        // Auth first, so an explicit `headers.Authorization` (if any) still wins.
+        match auth {
+            Some(Auth::Bearer { token }) => req = req.bearer_auth(token),
+            Some(Auth::Basic { user, pass }) => req = req.basic_auth(user, Some(pass)),
+            None => {}
+        }
 
         for (k, v) in &headers {
             req = req.header(k, v);
@@ -213,7 +368,7 @@ impl Action for DownloadAction {
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_write(&dest_path)?;
 
-        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
+        let client = client_for(ctx, timeout_ms).await?;
         let mut req = client.get(&url);
         for (k, v) in &headers {
             req = req.header(k, v);
@@ -367,7 +522,7 @@ impl Action for UploadAction {
         // Reuse the SSRF-gated client: every redirect hop is re-authorized
         // against the network grants, so an upload can't be bounced to an
         // ungranted host (data exfiltration).
-        let client = build_gated_client(ctx.network_grants(), timeout_ms)?;
+        let client = client_for(ctx, timeout_ms).await?;
 
         let resp = match mode {
             UploadMode::Multipart => {
@@ -443,5 +598,86 @@ impl Action for UploadAction {
             "text": text,
             "json": body_json,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn decl(yaml: &str) -> ResourceDecl {
+        serde_yaml::from_str(yaml).expect("valid ResourceDecl yaml")
+    }
+
+    fn ctx_with(resources: &[(&str, &str)], current: Option<&str>) -> StepCtx {
+        let map: BTreeMap<String, ResourceDecl> = resources
+            .iter()
+            .map(|(name, yaml)| (name.to_string(), decl(yaml)))
+            .collect();
+        let ctx = StepCtx::new(
+            "run-http".into(),
+            "flow-http".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            lumo_dsl::Capabilities::default(),
+            Vec::new(),
+        )
+        .with_resources(map);
+        ctx.set_current_resource(current);
+        ctx
+    }
+
+    #[test]
+    fn http_slot_selects_only_http_kind_bindings() {
+        let resources = &[
+            ("api", "kind: http\ntimeout_ms: 5000\n"),
+            ("db", "kind: sqlite\npath: /tmp/x.db\n"),
+        ];
+        assert_eq!(
+            http_slot(&ctx_with(resources, Some("api"))).as_deref(),
+            Some("api")
+        );
+        // Unbound / non-http / undeclared ⇒ None ⇒ per-call client (back-compat).
+        assert_eq!(http_slot(&ctx_with(resources, None)), None);
+        assert_eq!(http_slot(&ctx_with(resources, Some("db"))), None);
+        assert_eq!(http_slot(&ctx_with(resources, Some("ghost"))), None);
+    }
+
+    #[test]
+    fn http_timeout_from_decl_reads_or_defaults() {
+        assert_eq!(
+            http_timeout_from_decl(&decl("kind: http\ntimeout_ms: 5000\n")),
+            5000
+        );
+        // Omitted ⇒ the same default a per-step request uses.
+        assert_eq!(
+            http_timeout_from_decl(&decl("kind: http\n")),
+            default_timeout_ms()
+        );
+    }
+
+    #[test]
+    fn http_factory_kind_matches() {
+        assert_eq!(HttpFactory.kind(), HTTP_KIND);
+        assert_eq!(HTTP_KIND, "http");
+    }
+
+    // Building a `reqwest::Client` is lazy (no socket until a request), so the
+    // reuse + teardown contract is testable without a server.
+    #[tokio::test]
+    async fn http_resource_opens_one_client_then_reuses_it() {
+        let run = "http-reuse-unit";
+        assert!(!http_client_open(run));
+        let c1 = ensure_client(run, "api", &[], 1_000).await.unwrap();
+        // A second open of the same slot reuses the first client (later args ignored).
+        let c2 = ensure_client(run, "api", &[], 9_999).await.unwrap();
+        assert!(Arc::ptr_eq(&c1, &c2), "second ensure reuses the cached client");
+        assert!(http_client_open(run));
+        // Teardown drops it; idempotent.
+        close_run_clients(run);
+        assert!(!http_client_open(run));
+        close_run_clients(run); // no-op, must not panic
     }
 }

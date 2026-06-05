@@ -142,7 +142,9 @@ mod tests {
         let a = authorization_header(&input);
         let b = authorization_header(&input);
         assert_eq!(a, b, "签名对相同输入必须确定");
-        assert!(a.starts_with("AWS4-HMAC-SHA256 Credential=AKID/20240101/us-east-1/s3/aws4_request"));
+        assert!(
+            a.starts_with("AWS4-HMAC-SHA256 Credential=AKID/20240101/us-east-1/s3/aws4_request")
+        );
         assert!(a.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
         assert!(a.contains("Signature="));
         // 不得泄漏 secret。

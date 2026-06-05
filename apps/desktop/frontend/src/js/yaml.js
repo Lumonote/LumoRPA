@@ -198,6 +198,30 @@ export function findStepByPath(steps, path) {
   return parent;
 }
 
+// F-20: the VM identifies a step by a slash-joined chain of *step ids* down
+// the nesting tree (`parentId/childId/...`, see lumo-core vm.rs run_block_at).
+// `path` is the index-based selection path (e.g. [0, "do", 1]); we walk it,
+// collecting each step node's id, so breakpoints on NESTED nodes match the
+// path the VM actually checks instead of just the leaf id.
+export function stepIdChain(steps, path) {
+  const ids = [];
+  let cur = steps;
+  let node = null;
+  for (let i = 0; i < path.length; i++) {
+    const seg = path[i];
+    if (typeof seg === "number") {
+      node = cur ? cur[seg] : null;
+      if (!node) return null;
+      ids.push(node.id);
+      cur = node;
+    } else {
+      cur = node ? node[seg] : null;
+    }
+  }
+  if (ids.some((id) => id == null || id === "")) return null;
+  return ids.join("/");
+}
+
 export function pathKey(path) {
   return (path || []).map((p) => (typeof p === "number" ? String(p) : `:${p}`)).join("/");
 }
@@ -334,26 +358,22 @@ export function emitStep(step, baseIndent) {
   const cIndent = " ".repeat(baseIndent + 2);
   let out = `${pad}- id: ${yamlScalar(step.id)}\n${cIndent}action: ${yamlScalar(step.action)}\n`;
   if (step.when !== undefined && step.when !== null && step.when !== "") {
-    out += `${cIndent}when: ${yamlInline(step.when)}\n`;
+    out += emitYamlField("when", step.when, baseIndent + 2);
   }
-  if (step.bind) out += `${cIndent}bind: ${yamlScalar(step.bind)}\n`;
+  if (step.bind) out += emitYamlField("bind", step.bind, baseIndent + 2);
   if (step.with && Object.keys(step.with).length) {
     out += `${cIndent}with:\n`;
-    for (const [k, v] of Object.entries(step.with)) {
-      out += `${cIndent}  ${k}: ${yamlInline(v)}\n`;
-    }
+    out += emitYamlMapEntries(step.with, baseIndent + 4);
   }
   if (step.retry && Object.keys(step.retry).length) {
     out += `${cIndent}retry:\n`;
-    for (const [k, v] of Object.entries(step.retry)) {
-      out += `${cIndent}  ${k}: ${yamlInline(v)}\n`;
-    }
+    out += emitYamlMapEntries(step.retry, baseIndent + 4);
   }
   if (step.ai && (step.ai.mode || step.ai.model || step.ai.prompt)) {
     out += `${cIndent}ai:\n`;
-    if (step.ai.mode) out += `${cIndent}  mode: ${step.ai.mode}\n`;
-    if (step.ai.model) out += `${cIndent}  model: ${yamlScalar(step.ai.model)}\n`;
-    if (step.ai.prompt) out += `${cIndent}  prompt: ${yamlInline(step.ai.prompt)}\n`;
+    if (step.ai.mode) out += emitYamlField("mode", step.ai.mode, baseIndent + 4);
+    if (step.ai.model) out += emitYamlField("model", step.ai.model, baseIndent + 4);
+    if (step.ai.prompt) out += emitYamlField("prompt", step.ai.prompt, baseIndent + 4);
   }
   for (const kind of ["do", "else", "catch", "finally"]) {
     const arr = step[kind];
@@ -365,6 +385,59 @@ export function emitStep(step, baseIndent) {
     }
   }
   return out.replace(/\n$/, "");
+}
+
+function emitYamlMapEntries(obj, indent) {
+  return Object.entries(obj)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => emitYamlField(k, v, indent))
+    .join("");
+}
+
+function emitYamlField(key, value, indent) {
+  const pad = " ".repeat(indent);
+  const name = yamlKey(key);
+  if (value === null || value === undefined) return `${pad}${name}: ~\n`;
+  if (typeof value === "string" && value.includes("\n")) {
+    const blockIndent = " ".repeat(indent + 2);
+    return `${pad}${name}: |\n${value.split("\n").map((line) => `${blockIndent}${line}`).join("\n")}\n`;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return `${pad}${name}: []\n`;
+    return `${pad}${name}:\n${value.map((item) => emitYamlListItem(item, indent + 2)).join("")}`;
+  }
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value).filter(([, v]) => v !== undefined);
+    if (!entries.length) return `${pad}${name}: {}\n`;
+    return `${pad}${name}:\n${emitYamlMapEntries(Object.fromEntries(entries), indent + 2)}`;
+  }
+  return `${pad}${name}: ${yamlInline(value)}\n`;
+}
+
+function emitYamlListItem(value, indent) {
+  const pad = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    if (!value.length) return `${pad}- []\n`;
+    return `${pad}-\n${value.map((item) => emitYamlListItem(item, indent + 2)).join("")}`;
+  }
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value).filter(([, v]) => v !== undefined);
+    if (!entries.length) return `${pad}- {}\n`;
+    return `${pad}-\n${emitYamlMapEntries(Object.fromEntries(entries), indent + 2)}`;
+  }
+  if (typeof value === "string" && value.includes("\n")) {
+    const blockIndent = " ".repeat(indent + 2);
+    return `${pad}- |\n${value.split("\n").map((line) => `${blockIndent}${line}`).join("\n")}\n`;
+  }
+  return `${pad}- ${yamlInline(value)}\n`;
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function yamlKey(key) {
+  return /^[A-Za-z_][\w.-]*$/.test(String(key)) ? String(key) : JSON.stringify(String(key));
 }
 
 export function yamlScalar(s) {

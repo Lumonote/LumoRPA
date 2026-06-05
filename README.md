@@ -6,12 +6,12 @@ LumoRPA is an early-stage, local-first RPA runtime built around flow-as-code YAM
 
 - Cargo workspace with DSL, VM, storage, actions, AI router, skills, recorder skeleton, CLI, and desktop crates.
 - LumoFlow YAML parsing, templating, structural validation, and CLI validation.
-- Built-in actions for control flow, file, HTTP, Excel, browser, AI chat, and skill invocation, with action schemas exposed through `lumo actions --show`.
+- Built-in actions for control flow, local data shaping, file, HTTP, Excel, browser, AI chat, and skill invocation, with action schemas exposed through `lumo actions --show`.
 - SQLite-backed run history for local execution, including nested paths for control-flow and loop iterations.
 - Claude-style `SKILL.md` loading and `skill.invoke` sub-flows.
 - Tauri desktop workbench for validating, running, inspecting, and packaging local automation flows.
 
-This repository is still in the M1 stage. Recorder implementation, scheduler, MCP server, and multi-worker orchestration are planned but not production-ready yet.
+The browser recorder (Chromium CDP), the scheduler (cron/file-watch/webhook), and the MCP server are implemented. Desktop recording backends (macOS AccessKit/osascript, Windows) exist in `lumo-recorder` but are not yet wired into the desktop app. Multi-worker/cloud orchestration (M3/M4) remains planned.
 
 ## Requirements
 
@@ -36,6 +36,9 @@ cargo run -p lumo-cli -- run --no-store examples/skill-driver.lumoflow.yaml
 ```
 
 The CLI loads installed skills from `$LUMO_HOME/skills` and also loads a `skills/` directory next to the flow file when present.
+
+The current LumoFlow YAML shape, template context, capability gates, and action
+families are documented in [`docs/05-LumoFlow-Instruction-Set.md`](docs/05-LumoFlow-Instruction-Set.md).
 
 ## Packaging the CLI
 
@@ -132,7 +135,9 @@ cargo run -p lumo-cli -- providers init
 cargo run -p lumo-cli -- providers list
 ```
 
-Network calls are disabled by default. Set `LUMO_ALLOW_LLM_NETWORK=1` before running flows that use `ai.chat`.
+Network calls are disabled by default. Set `LUMO_ALLOW_LLM_NETWORK=1` before running flows that use `ai.chat`, cloud-backed `image.ocr`, or AI hook modes. Each provider can set `default_model`, plus separate `vision_model` and `ocr_model` defaults for screenshot grounding and OCR.
+
+For local OCR, add/use the seeded `local-ocr` profile and set `ocr_model` to a ModelScope preset such as `modelscope/ZhipuAI/GLM-OCR` or `modelscope/PaddlePaddle/PaddleOCR-VL-1.6`. The desktop Models page can download the supported OCR presets with the ModelScope CLI (`pip install modelscope`); local inference then uses the configured Python runtime (`LUMO_OCR_PYTHON`, default `python3`) and the model's Transformers/ModelScope dependencies.
 
 ## Useful Commands
 
@@ -170,7 +175,7 @@ crates/lumo-actions   Built-in deterministic actions
 crates/lumo-ai        Provider config, AI router, ai.chat action
 crates/lumo-skills    SKILL.md loader and skill.invoke action
 crates/lumo-storage   SQLite schema and repository
-crates/lumo-recorder  Recorder trait and M2 placeholder
+crates/lumo-recorder  Browser CDP recorder (event capture + selector scoring) and desktop a11y backends; NoopRecorder is only the desktop/mixed fallback
 crates/lumo-cli       lumo command-line interface
 apps/desktop          Tauri desktop workbench and package config
 examples/             Runnable flow examples
@@ -182,5 +187,5 @@ docs/                 Product and architecture design notes
 1. Keep `cargo fmt`, `cargo clippy -D warnings`, and workspace tests green.
 2. Expand action-specific JSON schemas for richer Studio form generation.
 3. Add encrypted vault storage and management commands.
-4. Replace the recorder placeholder with a minimal browser CDP recorder.
+4. Wire `DesktopRecorder` into the desktop/mixed `recorder_start` branch (currently falls back to `NoopRecorder`) and let `desktop.*` events feed the element library. (The browser CDP recorder is done.)
 5. Add scheduler/MCP entry points on top of the durable run store.

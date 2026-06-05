@@ -7,7 +7,7 @@
 //! `image.locate` recovers the exact coordinates. Gating + validation too.
 
 mod common;
-use common::{fs_caps, ok_with, run, run_with};
+use common::{fs_caps, ok_with, run, run_with, Capabilities};
 use image::{GrayImage, Luma};
 use serde_json::json;
 
@@ -46,8 +46,16 @@ async fn locate_finds_embedded_template() {
         Some(true),
         "out={out}"
     );
-    assert_eq!(out.get("x").and_then(|v| v.as_u64()), Some(tx as u64), "out={out}");
-    assert_eq!(out.get("y").and_then(|v| v.as_u64()), Some(ty as u64), "out={out}");
+    assert_eq!(
+        out.get("x").and_then(|v| v.as_u64()),
+        Some(tx as u64),
+        "out={out}"
+    );
+    assert_eq!(
+        out.get("y").and_then(|v| v.as_u64()),
+        Some(ty as u64),
+        "out={out}"
+    );
     assert_eq!(
         out.get("center_x").and_then(|v| v.as_u64()),
         Some((tx + tw / 2) as u64)
@@ -101,9 +109,13 @@ async fn locate_rejects_oversized_template() {
     noise(20, 20).save(&hay).unwrap();
     noise(40, 40).save(&tpl).unwrap();
 
-    let err = run_with("image.locate", json!({ "image": hay, "template": tpl }), caps)
-        .await
-        .unwrap_err();
+    let err = run_with(
+        "image.locate",
+        json!({ "image": hay, "template": tpl }),
+        caps,
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("larger than image"), "got: {err}");
 }
 
@@ -121,12 +133,51 @@ async fn locate_denies_ungranted_path() {
 }
 
 #[tokio::test]
+async fn ocr_denies_ungranted_path_before_ai_provider() {
+    let err = run("image.ocr", json!({ "image": "/nope/captcha.png" }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(err.contains("fs.read"), "got: {err}");
+}
+
+#[tokio::test]
+async fn ocr_requires_llm_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("captcha.png");
+    noise(16, 16).save(&image).unwrap();
+
+    let err = run_with("image.ocr", json!({ "image": image }), fs_caps(dir.path()))
+        .await
+        .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(err.contains("llm"), "got: {err}");
+}
+
+#[tokio::test]
+async fn ocr_requires_ai_provider_when_capabilities_are_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("captcha.png");
+    noise(16, 16).save(&image).unwrap();
+    let mut caps = fs_caps(dir.path());
+    caps.llm = vec!["*".into()];
+
+    let err = run_with("image.ocr", json!({ "image": image }), caps)
+        .await
+        .unwrap_err();
+    assert!(err.contains("requires AI provider"), "got: {err}");
+}
+
+#[tokio::test]
 async fn locate_rejects_unknown_field() {
     // deny_unknown_fields fires during parse, before the capability gate.
     let err = run_with(
         "image.locate",
         json!({ "image": "/x.png", "template": "/y.png", "bogus": 1 }),
-        fs_caps(std::path::Path::new("/tmp")),
+        Capabilities {
+            fs_read: vec!["/tmp/**".into()],
+            ..Default::default()
+        },
     )
     .await
     .unwrap_err();

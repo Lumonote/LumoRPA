@@ -84,7 +84,10 @@ async fn connect_to_existing_chrome_does_not_kill_it() {
     let events = rec.stop().await.expect("stop disconnects");
     assert!(!rec.is_running());
     // The `launched` event records that we attached, not spawned.
-    let launched = events.iter().find(|e| e.kind == "launched").expect("launched event");
+    let launched = events
+        .iter()
+        .find(|e| e.kind == "launched")
+        .expect("launched event");
     assert_eq!(
         launched.payload.get("connected").and_then(|v| v.as_bool()),
         Some(true)

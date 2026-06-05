@@ -781,8 +781,7 @@ fn selectors_block(payload: &serde_json::Value) -> serde_yaml::Mapping {
     // even when they arrive in the `css` field, so the winner reflects that.)
     if let Some(best) = best_candidate(None, None, css, label, xpath) {
         let s = best.selector.trim();
-        let is_anchor_kind =
-            matches!(best.kind, SelectorKind::Id | SelectorKind::DataTestId);
+        let is_anchor_kind = matches!(best.kind, SelectorKind::Id | SelectorKind::DataTestId);
         // Either it came in as a dedicated kind, or it's a css path whose whole
         // value is just `#id` / `[data-testid=...]`.
         if is_anchor_kind || s.starts_with('#') {
@@ -952,11 +951,6 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
                 if general.is_empty() {
                     continue;
                 }
-                let sibling_count = evt
-                    .payload
-                    .get("sibling_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
                 let mut step = serde_yaml::Mapping::new();
                 step.insert("id".into(), id_for("extract").into());
                 step.insert("action".into(), "browser.extract".into());
@@ -964,16 +958,6 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
                 with.insert("selector".into(), general.into());
                 with.insert("all".into(), true.into());
                 step.insert("with".into(), with.into());
-                // Attach a sibling-count comment via a `_note` field — the user
-                // sees how many items were spotted, schema layer rejects it so
-                // they must strip before running. That's fine; reviewers should
-                // skim recorder output anyway.
-                if sibling_count > 0 {
-                    step.insert(
-                        "# note".into(),
-                        format!("recorder spotted {sibling_count} similar items").into(),
-                    );
-                }
                 steps.push(step.into());
             }
             _ => {}
@@ -1284,7 +1268,10 @@ mod tests {
         assert!(yaml.contains("browser.extract"));
         assert!(yaml.contains("ul.cards > li.card"));
         assert!(yaml.contains("all: true"));
-        assert!(yaml.contains("12 similar items"));
+        assert!(
+            !yaml.contains("# note"),
+            "recorder patch must be runnable without stripping schema-unknown fields:\n{yaml}"
+        );
     }
 
     #[test]
@@ -1318,7 +1305,10 @@ mod tests {
         );
         click.source = "dom".into();
         let yaml = events_to_yaml_patch(&[click]);
-        assert!(yaml.contains("id: login-btn"), "should hoist #id → id:\n{yaml}");
+        assert!(
+            yaml.contains("id: login-btn"),
+            "should hoist #id → id:\n{yaml}"
+        );
         // CSS path still kept as a fallback.
         assert!(yaml.contains("css:"));
         assert!(yaml.contains("xpath:"));
@@ -1357,4 +1347,3 @@ mod tests {
         assert!(yaml.contains("button.login-button"));
     }
 }
-

@@ -1,16 +1,16 @@
 //! F-2 图像 / 模板匹配动作。
 //!
 //! 纯 Rust 的 `image` + `imageproc`(均 MIT),无 C 依赖、可交叉编译 / 信创友好。
-//! 仅覆盖路线图 F-2 的「图像 / 模板匹配」一半 —— **OCR 文本识别暂缓**:目标是
-//! 中文,而当前没有准确的纯 Rust 中文 OCR 引擎(ocrs/RTen 仅拉丁文;准确的中文
-//! 需 MNN/C++ 或 tesseract 的 C 依赖,违反信创),待上游成熟再补。
+//! OCR 文本识别走可配置的多模态模型,避免引入平台相关的本地 C/C++ OCR 依赖。
 //!
 //! - `image.locate` —— 在大图(haystack)中用归一化互相关定位模板小图,返回最佳
 //!   匹配的左上角 + 中心坐标 + 分数(中心坐标可供 F-1 坐标驱动点击)。
 //! - `image.compare` —— 两张**同尺寸**图的整体相似度(归一化互相关,1≈完全一致)。
+//! - `image.ocr` —— 调用 AI hook provider 对本地图片做 OCR/结构化识别。
 //!
-//! 二者均 LOCAL(不触网),走 `fs.read` 能力闸门(先校验能力、再读盘);解码 +
-//! 匹配是 CPU 密集且同步,挪到 `spawn_blocking` 不阻塞 async 执行器。
+//! 模板匹配动作均 LOCAL(不触网),走 `fs.read` 能力闸门(先校验能力、再读盘);
+//! `image.ocr` 额外需要 `llm` 能力和已配置 AI provider。解码 + 匹配是 CPU
+//! 密集且同步,挪到 `spawn_blocking` 不阻塞 async 执行器。
 //!
 //! 性能注:`match_template` 复杂度约 O(W·H·w·h),超大 haystack(如 4K 整屏)会偏慢,
 //! 后续可换并行版 / 先降采样;当前求正确优先。
@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 pub fn register(r: &mut ActionRegistry) {
     r.register(LocateAction);
     r.register(CompareAction);
+    r.register(OcrAction);
 }
 
 /// 读图并转灰度(模板匹配在 luma 上进行)。
@@ -45,6 +46,41 @@ fn finite(x: f32) -> f32 {
         x
     } else {
         0.0
+    }
+}
+
+fn infer_media_type(path: &Path, explicit: Option<String>) -> Result<String, StepError> {
+    if let Some(mt) = explicit {
+        let mt = mt.trim();
+        if mt.is_empty() {
+            return Err(StepError::msg(
+                "image.ocr: media_type must not be empty".to_string(),
+            ));
+        }
+        if !mt.starts_with("image/") {
+            return Err(StepError::msg(format!(
+                "image.ocr: media_type must start with image/, got {mt}"
+            )));
+        }
+        return Ok(mt.to_string());
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Ok("image/png".to_string()),
+        "jpg" | "jpeg" => Ok("image/jpeg".to_string()),
+        "webp" => Ok("image/webp".to_string()),
+        "gif" => Ok("image/gif".to_string()),
+        "bmp" => Ok("image/bmp".to_string()),
+        "tif" | "tiff" => Ok("image/tiff".to_string()),
+        _ => Err(StepError::msg(format!(
+            "image.ocr: cannot infer media_type from {}; pass media_type explicitly",
+            path.display()
+        ))),
     }
 }
 
@@ -208,4 +244,67 @@ fn compare(a: &Path, b: &Path) -> Result<f32, StepError> {
     let result = match_template(&ga, &gb, MatchTemplateMethod::CrossCorrelationNormalized);
     let ex = find_extremes(&result);
     Ok(finite(ex.max_value))
+}
+
+// ---------------------------------------------------------------------------
+// image.ocr
+// ---------------------------------------------------------------------------
+
+pub struct OcrAction;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OcrIn {
+    /// 本地图片路径。
+    image: PathBuf,
+    /// 可选提示词。留空时默认提取全部可读文字并保留换行。
+    #[serde(default)]
+    prompt: Option<String>,
+    /// 可选模型覆盖。留空时使用 provider 的 `ocr_model` / `vision_model` / 默认模型。
+    #[serde(default)]
+    model: Option<String>,
+    /// 可选 MIME 类型。留空时按扩展名推断。
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+#[async_trait]
+impl Action for OcrAction {
+    fn id(&self) -> &'static str {
+        "image.ocr"
+    }
+    fn summary(&self) -> &'static str {
+        "Extract text or structured data from a local image using the configured OCR/vision model"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<OcrIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let OcrIn {
+            image,
+            prompt,
+            model,
+            media_type,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("image.ocr input invalid: {e}")))?;
+        ctx.ensure_fs_read(&image)?;
+        ctx.ensure_llm(model.as_deref().unwrap_or(""))?;
+        let provider = ctx
+            .ai_provider()
+            .cloned()
+            .ok_or_else(|| StepError::msg("image.ocr requires AI provider configuration"))?;
+        let media_type = infer_media_type(&image, media_type)?;
+        let bytes = tokio::fs::read(&image)
+            .await
+            .map_err(|e| StepError::msg(format!("image.ocr read {}: {e}", image.display())))?;
+        let prompt = prompt.unwrap_or_default();
+        let text = provider
+            .ocr_image(bytes.into(), &media_type, &prompt, model.as_deref())
+            .await?;
+        Ok(ActionResult::from(serde_json::json!({
+            "text": text,
+            "media_type": media_type,
+        })))
+    }
 }

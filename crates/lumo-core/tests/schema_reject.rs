@@ -103,5 +103,8 @@ async fn unknown_field_rejected_before_execute() {
 async fn missing_required_rejected_before_execute() {
     let (ok, ran) = run(MISSING_REQUIRED).await;
     assert!(!ok, "a missing required field must fail the run");
-    assert!(!ran, "the action must NOT execute when a required field is missing");
+    assert!(
+        !ran,
+        "the action must NOT execute when a required field is missing"
+    );
 }

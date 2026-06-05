@@ -48,6 +48,7 @@ export const ACTION_ZH = {
   "browser.type":     { label: "填写输入框",       hint: "在 CSS 选择器匹配的输入框中输入文本" },
   "browser.extract":  { label: "批量抓取数据",     hint: "提取 innerText / 属性 / 字段映射" },
   "browser.wait":     { label: "等待页面元素",     hint: "等待选择器或文本出现" },
+  "browser.info":     { label: "读取网页信息",     hint: "读取 URL、标题、HTML 或文本" },
   "browser.eval":     { label: "执行页面脚本",     hint: "在页面上下文执行 JavaScript" },
   "browser.screenshot": { label: "网页截图",       hint: "截取当前页面并保存为图片" },
   "browser.scroll":   { label: "滚动页面",         hint: "滚动到位置、元素或方向" },
@@ -87,10 +88,20 @@ export const ACTION_ZH = {
 
   "excel.read_rows":  { label: "读取 Excel",       hint: "读取 .xlsx 表格的行" },
   "excel.write_row":  { label: "写入 Excel",       hint: "追加一行到 .xlsx 表格" },
+  "excel.sheet_names": { label: "列出工作表",      hint: "读取工作簿中的工作表名称" },
+  "excel.read_cell":  { label: "读取单元格",       hint: "按 A1 地址读取单元格" },
+  "excel.write_cell": { label: "写入单元格",       hint: "按 A1 地址写入单元格" },
 
   "file.read":        { label: "读取文件",         hint: "从本地路径读文件" },
   "file.write":       { label: "写入文件",         hint: "把数据写到本地路径" },
   "file.exists":      { label: "文件存在?",        hint: "判断路径是否存在" },
+  "file.list":        { label: "列出目录",         hint: "读取目录条目，可递归" },
+  "file.mkdir":       { label: "创建目录",         hint: "创建本地目录" },
+  "file.copy":        { label: "复制文件",         hint: "复制本地文件" },
+  "file.move":        { label: "移动文件",         hint: "移动或重命名文件 / 目录" },
+  "file.rename":      { label: "重命名",           hint: "在当前目录内重命名文件 / 目录" },
+  "file.delete":      { label: "删除路径",         hint: "删除文件、链接或目录" },
+  "file.metadata":    { label: "读取元数据",       hint: "读取大小、类型和时间信息" },
   "archive.zip":      { label: "创建 ZIP",         hint: "把文件或目录打包成 ZIP" },
   "archive.unzip":    { label: "解压 ZIP",         hint: "安全解压 ZIP 到目标目录" },
 
@@ -104,6 +115,7 @@ export const ACTION_ZH = {
 
   "image.locate":     { label: "定位图片",         hint: "在截图中查找模板图片位置" },
   "image.compare":    { label: "比较图片",         hint: "比较两张图片的差异" },
+  "image.ocr":        { label: "识别图片文字",     hint: "通过 OCR/视觉模型提取图片文字" },
 
   "mcp.call":         { label: "调用 MCP 工具",    hint: "通过 MCP stdio 调用工具" },
   "mcp.discover":     { label: "发现 MCP 工具",    hint: "列出 MCP 服务暴露的工具" },
@@ -207,6 +219,45 @@ export const ACTION_ZH = {
   "db.sqlite_exec":     { label: "SQLite 写入",      hint: "执行 INSERT/UPDATE/DDL" },
 };
 
+// Scenario presets per action: ready-to-tweak `with` payloads surfaced in the
+// inspector. Picking one only populates the form; the user still clicks
+// "写入 YAML" to commit. Keep these small but real (valid `with` shapes).
+export const ACTION_PRESETS = {
+  "browser.extract": [
+    {
+      name: "抓表格",
+      with: { selector: "table tr", fields: { 列1: "td:nth-child(1)", 列2: "td:nth-child(2)" } },
+    },
+    {
+      name: "抓列表",
+      with: { selector: "ul li", attr: "innerText", multiple: true },
+    },
+  ],
+  "browser.click": [
+    { name: "点击按钮", with: { selector: "button" } },
+    { name: "点击链接(文本)", with: { selector: "a", text: "下一页" } },
+  ],
+  "http.request": [
+    {
+      name: "GET JSON",
+      with: { method: "GET", url: "https://api.example.com/items", headers: { Accept: "application/json" } },
+    },
+    {
+      name: "POST JSON",
+      with: {
+        method: "POST",
+        url: "https://api.example.com/items",
+        headers: { "Content-Type": "application/json" },
+        body: { name: "demo" },
+      },
+    },
+  ],
+  "excel.read_rows": [
+    { name: "读取首个工作表", with: { path: "./data.xlsx" } },
+    { name: "读取指定工作表", with: { path: "./data.xlsx", sheet: "Sheet1" } },
+  ],
+};
+
 export function categoryOf(actionId) {
   if (actionId.startsWith("browser."))                     return "browser";
   if (actionId.startsWith("desktop."))                     return "desktop";
@@ -248,8 +299,8 @@ export function zhAction(actionId) {
 }
 
 export const PRESETS = {
-  glass: { window: 0, panel: 18 },
-  frost: { window: 4, panel: 32 },
+  glass: { window: 0, panel: 14 },
+  frost: { window: 0, panel: 28 },
   solid: { window: 96, panel: 96 },
   invisible: { window: 0, panel: 8 },
 };

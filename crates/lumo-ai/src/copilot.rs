@@ -21,6 +21,22 @@ pub async fn generate_flow(
     prompt: &str,
     max_attempts: u32,
 ) -> Result<String, String> {
+    generate_flow_with_validator(router, model, prompt, max_attempts, validate_yaml).await
+}
+
+/// Same generation loop as [`generate_flow`], but lets callers supply a stricter
+/// synchronous validator. The desktop app uses this to include registry/schema
+/// and capability checks, not only DSL structure.
+pub async fn generate_flow_with_validator<F>(
+    router: &AiRouter,
+    model: &str,
+    prompt: &str,
+    max_attempts: u32,
+    validate_candidate: F,
+) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<(), String>,
+{
     let attempts = max_attempts.max(1);
     let mut last_err: Option<String> = None;
     for attempt in 0..attempts {
@@ -36,7 +52,7 @@ pub async fn generate_flow(
             .await
             .map_err(|e| format!("chat: {e}"))?;
         let candidate = extract_yaml(&resp.content);
-        match validate_yaml(&candidate) {
+        match validate_candidate(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(e) => {
                 tracing::debug!("copilot attempt {} validate failed: {e}", attempt + 1);
@@ -51,24 +67,54 @@ pub async fn generate_flow(
 }
 
 fn system_prompt() -> String {
-    r#"You are a LumoRPA flow generator. Produce ONLY a single YAML document
-matching the lumo/v1 Flow schema. Wrap output in ```yaml ... ``` fences.
+    r#"You are a LumoRPA flow generator. Produce ONLY one YAML document
+matching the lumorpa.io/v1 Flow schema. Wrap output in ```yaml ... ``` fences.
 
-Schema highlights:
-- top: apiVersion, kind: Flow, metadata: { id }, spec: { triggers?, steps }
-- triggers: [{ kind: webhook | cron | file, with: ... }]
-  - cron uses { schedule: "<cron 6-field>" }
-  - file uses { path, events?: [create|modify|remove], pattern? }
-- steps: list of { id, action, with, when?, retry?, do?, else?, catch?, finally? }
-- action ids include: control.log, control.if, control.parallel, data.set, data.get,
-  file.read, file.write, http.request, browser.open, browser.click, browser.type,
-  browser.extract, excel.read, excel.write, mcp.call, mcp.discover, chat
-- capabilities: declare every fs.read/fs.write/network/llm/mcp grant the steps use.
+Flow skeleton:
+- top-level keys: apiVersion: lumorpa.io/v1, kind: Flow, metadata, spec.
+- metadata requires id. Use snake_case ids.
+- spec.steps is a list of steps. Each step requires id, action, and usually with.
+- supported step fields: id, action, with, bind, when, retry, ai, do, else, catch, finally, branches.
+- templates use {{ inputs.x }}, {{ vars.x }}, {{ steps.step_id.result }}, and loop bindings like {{ row.field }}.
+- if a later step reuses an output, prefer bind: name and then {{ vars.name }}.
+
+Common valid actions and input shapes:
+- control.log: with { message, level? }
+- control.set_var: with { name, value }
+- control.if: with { cond }, nested do/else.
+- control.for: with { from, to, step?, bind? }, nested do.
+- control.for_each: with { in, bind? }, nested do. Use {{ row.field }} or the custom bind.
+- control.try: with {}, nested do/catch/finally.
+- file.read: with { path }; file.write: with { path, content, append? }; file.exists/list/mkdir/copy/move/rename/delete/metadata are also valid file.* actions.
+- http.request: with { method?, url, headers?, body?, timeout_ms? }.
+- browser.open: with { url, headless?, timeout_ms?, wait_for? }.
+- browser.wait: with { selector? or selectors?, condition?, text?, timeout_ms? }.
+- browser.click: with { selector? or selectors?, prompt?, timeout_ms? }.
+- browser.type: with { selector? or selectors?, text, clear?, prompt?, timeout_ms? }.
+- browser.extract: with { selector, all?, attr?, map?, timeout_ms? }.
+- browser.info: with { fields?: [url|title|html|text], timeout_ms? } reads current page info.
+- excel.read_rows: with { file, sheet?, header?, limit? }.
+- excel.write_row: with { file, sheet?, row, headers?, replace_sheet? }.
+- excel.sheet_names/read_cell/write_cell support sheet discovery and A1-style cell access.
+- csv.parse/stringify/read/write, data.json_parse/json_format/filter/group_by/join,
+  list.*, string.*, regex.*, date.*, math.*, json.*, hash.*, pdf.*, image.* are also valid.
+- ai.chat uses action ai.chat with { prompt, model?, system?, temperature?, max_tokens? }.
+- image.ocr uses { image, prompt?, model?, media_type? } for local image OCR via the configured OCR/vision model.
+- skill.invoke uses { name, inputs? }; flow.call uses { path, inputs? }.
+
+Capabilities are required for side effects:
+- browser/http/email/notify/ftp/s3/mcp network calls need spec.capabilities.network grants.
+- file/csv/excel/pdf/archive/image local reads need fs.read grants.
+- file/csv/excel/pdf/archive/browser.screenshot/download writes need fs.write grants.
+- ai.chat, image.ocr, or step ai modes need llm grants.
 
 Rules:
-- step ids are snake_case and unique.
-- do NOT invent action ids.
-- output exactly one fenced YAML block. No prose."#
+- Do NOT invent action ids. Never use excel.read, excel.write, chat, data.set, or data.get.
+- Keep every step id unique, including nested blocks.
+- For browser scraping, open the page, wait for a selector or text, extract all matching rows,
+  then use control.for_each plus excel.write_row to write rows.
+- Declare the capabilities the generated steps need.
+- Output exactly one fenced YAML block. No prose."#
         .to_string()
 }
 
@@ -194,5 +240,14 @@ spec:
         let m = build_user_message("do x", Some("missing metadata.id"));
         assert!(m.contains("missing metadata.id"));
         assert!(m.contains("do x"));
+    }
+
+    #[test]
+    fn system_prompt_uses_current_action_ids() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("excel.read_rows"));
+        assert!(prompt.contains("excel.write_row"));
+        assert!(prompt.contains("ai.chat"));
+        assert!(prompt.contains("Never use excel.read, excel.write, chat, data.set, or data.get"));
     }
 }

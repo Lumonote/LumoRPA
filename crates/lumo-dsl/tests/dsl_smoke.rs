@@ -308,7 +308,9 @@ spec:
     llm: ["*"]
     mcp: ["*"]
   resources:
-    foo: bar
+    browser:
+      kind: chromium.cdp
+      profile: stealth-default
   steps:
     - id: a
       action: control.log
@@ -369,10 +371,10 @@ fn render_is_defined_test_still_works() {
     assert_eq!(out, json!("no"));
 }
 
-// ---- P1-10 Verification: example corpus must still parse -------------------
+// ---- P1-10 Verification: example corpus must still parse + validate --------
 
 #[test]
-fn example_corpus_parses_under_deny_unknown_fields() {
+fn example_corpus_parses_and_validates_under_deny_unknown_fields() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -392,14 +394,19 @@ fn example_corpus_parses_under_deny_unknown_fields() {
         }
         checked += 1;
         let src = std::fs::read_to_string(&path).unwrap();
-        if let Err(e) = parse_str(&src) {
-            failures.push(format!("{}: {e}", path.display()));
+        match parse_str(&src) {
+            Ok(flow) => {
+                if let Err(e) = validate(&flow) {
+                    failures.push(format!("{}: validation: {e}", path.display()));
+                }
+            }
+            Err(e) => failures.push(format!("{}: parse: {e}", path.display())),
         }
     }
     assert!(checked > 0, "expected to find example flows in {root:?}");
     assert!(
         failures.is_empty(),
-        "example flows failed to parse:\n{}",
+        "example flows failed to parse or validate:\n{}",
         failures.join("\n")
     );
 }

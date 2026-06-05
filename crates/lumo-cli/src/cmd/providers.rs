@@ -29,7 +29,7 @@ enum Sub {
     /// Add or update a profile (full upsert)
     Add {
         name: String,
-        /// "openai" | "anthropic"
+        /// "openai" | "anthropic" | "local"
         #[arg(long, default_value = "openai")]
         kind: String,
         /// For kind=openai: "chat" | "responses" (default: chat)
@@ -43,6 +43,12 @@ enum Sub {
         api_key_env: Option<String>,
         #[arg(long)]
         default_model: Option<String>,
+        /// Default model for image/vision grounding calls
+        #[arg(long)]
+        vision_model: Option<String>,
+        /// Default model for OCR calls
+        #[arg(long)]
+        ocr_model: Option<String>,
         /// Reasoning effort hint (passed to Responses API only)
         #[arg(long)]
         reasoning_effort: Option<String>,
@@ -67,6 +73,10 @@ enum Sub {
         #[arg(long)]
         default_model: Option<String>,
         #[arg(long)]
+        vision_model: Option<String>,
+        #[arg(long)]
+        ocr_model: Option<String>,
+        #[arg(long)]
         reasoning_effort: Option<String>,
         /// Extra header KEY=VALUE (repeatable, merged into existing)
         #[arg(long = "header", value_parser = parse_kv)]
@@ -77,7 +87,7 @@ enum Sub {
     },
     /// Remove a profile
     Remove { name: String },
-    /// Reset to the seeded default config (openai + anthropic + deepseek + ollama)
+    /// Reset to the seeded default config (cloud providers + local OCR)
     Init {
         #[arg(long)]
         force: bool,
@@ -141,6 +151,8 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
                 "base_url",
                 "key",
                 "default_model",
+                "vision_model",
+                "ocr_model",
             ]);
             for p in &cfg.profiles {
                 let is_active = cfg.active.as_deref() == Some(p.name.as_str());
@@ -177,6 +189,8 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
                     Cell::new(p.base_url.as_deref().unwrap_or("-")),
                     key_cell,
                     Cell::new(p.default_model.as_deref().unwrap_or("-")),
+                    Cell::new(p.vision_model.as_deref().unwrap_or("-")),
+                    Cell::new(p.ocr_model.as_deref().unwrap_or("-")),
                 ]);
             }
             println!("config: {}", path.display());
@@ -210,6 +224,8 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
             api_key,
             api_key_env,
             default_model,
+            vision_model,
+            ocr_model,
             reasoning_effort,
             headers,
             activate,
@@ -227,6 +243,8 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
                 api_key,
                 api_key_env,
                 default_model,
+                vision_model,
+                ocr_model,
                 models: vec![],
                 headers: hmap,
                 reasoning_effort,
@@ -248,6 +266,8 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
             api_key,
             api_key_env,
             default_model,
+            vision_model,
+            ocr_model,
             reasoning_effort,
             headers,
             unset_headers,
@@ -273,6 +293,12 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
                 }
                 if let Some(v) = default_model {
                     prof.default_model = Some(v);
+                }
+                if let Some(v) = vision_model {
+                    prof.vision_model = Some(v);
+                }
+                if let Some(v) = ocr_model {
+                    prof.ocr_model = Some(v);
                 }
                 if let Some(v) = reasoning_effort {
                     prof.reasoning_effort = Some(v);

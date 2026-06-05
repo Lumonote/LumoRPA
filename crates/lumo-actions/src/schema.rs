@@ -90,12 +90,20 @@ mod tests {
     fn flat_struct_matches_minimal_handwritten_shape() {
         let s = derive::<Sample>();
         assert_eq!(s["type"], json!("object"));
-        assert_eq!(s["required"], json!(["name"]), "Option field must not be required");
+        assert_eq!(
+            s["required"],
+            json!(["name"]),
+            "Option field must not be required"
+        );
         assert_eq!(s["properties"]["name"]["type"], json!("string"));
         // The crux: Option<u32> stays a single `"integer"`, NOT ["integer","null"]
         // — otherwise the core validator would stop type-checking the field.
         assert_eq!(s["properties"]["count"]["type"], json!("integer"));
-        assert_eq!(s["additionalProperties"], json!(false), "deny_unknown_fields");
+        assert_eq!(
+            s["additionalProperties"],
+            json!(false),
+            "deny_unknown_fields"
+        );
         assert!(s.get("$schema").is_none(), "cosmetic $schema stripped");
         assert!(s.get("title").is_none(), "cosmetic title stripped");
         assert!(s.get("definitions").is_none(), "no leftover definitions");
@@ -118,7 +126,10 @@ mod tests {
         }
         let s = derive::<WithEnum>();
         // Inlined enum the validator can actually check — no unresolved $ref.
-        assert_eq!(s["properties"]["mode"]["enum"], json!(["multipart", "body"]));
+        assert_eq!(
+            s["properties"]["mode"]["enum"],
+            json!(["multipart", "body"])
+        );
         assert!(
             !s.to_string().contains("$ref"),
             "schema must be fully inlined, got: {s}"

@@ -601,3 +601,105 @@ async fn join_unknown_type_errors() {
     .unwrap_err();
     assert!(err.contains("outer"), "got: {err}");
 }
+
+// ---- data.dedup -----------------------------------------------------------
+
+#[tokio::test]
+async fn dedup_by_single_key_keeps_first() {
+    let out = ok(
+        "data.dedup",
+        json!({
+            "items": [
+                {"id": 1, "v": "a"},
+                {"id": 2, "v": "b"},
+                {"id": 1, "v": "c"}
+            ],
+            "by": "id"
+        }),
+    )
+    .await;
+    assert_eq!(out, json!([{"id": 1, "v": "a"}, {"id": 2, "v": "b"}]));
+}
+
+#[tokio::test]
+async fn dedup_keep_last_takes_latest_occurrence() {
+    let out = ok(
+        "data.dedup",
+        json!({
+            "items": [
+                {"id": 1, "v": "a"},
+                {"id": 1, "v": "c"}
+            ],
+            "by": "id",
+            "keep": "last"
+        }),
+    )
+    .await;
+    assert_eq!(out, json!([{"id": 1, "v": "c"}]));
+}
+
+#[tokio::test]
+async fn dedup_by_multiple_keys() {
+    let out = ok(
+        "data.dedup",
+        json!({
+            "items": [
+                {"a": 1, "b": "x"},
+                {"a": 1, "b": "y"},
+                {"a": 1, "b": "x"}
+            ],
+            "by": ["a", "b"]
+        }),
+    )
+    .await;
+    assert_eq!(out, json!([{"a": 1, "b": "x"}, {"a": 1, "b": "y"}]));
+}
+
+// ---- data.sort_multi ------------------------------------------------------
+
+#[tokio::test]
+async fn sort_multi_two_keys_asc_then_desc() {
+    let out = ok(
+        "data.sort_multi",
+        json!({
+            "items": people(),
+            "keys": [
+                {"field": "dept", "order": "asc"},
+                {"field": "age", "order": "desc"}
+            ]
+        }),
+    )
+    .await;
+    // eng sorts before sales; within each dept, age descending.
+    assert_eq!(names(&out), ["Alice", "Bob", "Carol", "Dave"]);
+}
+
+#[tokio::test]
+async fn sort_multi_is_numeric_not_lexical() {
+    let out = ok(
+        "data.sort_multi",
+        json!({
+            "items": [{"n": 9}, {"n": 100}, {"n": 25}],
+            "keys": [{"field": "n"}]
+        }),
+    )
+    .await;
+    let ns: Vec<i64> = out
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["n"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ns, [9, 25, 100]);
+}
+
+#[tokio::test]
+async fn sort_multi_requires_a_key() {
+    let err = run(
+        "data.sort_multi",
+        json!({"items": [{"n": 1}], "keys": []}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("at least one key"), "got: {err}");
+}

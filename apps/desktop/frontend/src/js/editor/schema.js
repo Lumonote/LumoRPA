@@ -18,21 +18,46 @@ export function renderSchemaFields(schema, withValue) {
   return Object.entries(props)
     .map(([key, spec]) => {
       const cur = withValue?.[key];
+      const isSet = cur !== undefined && cur !== null;
       const type = Array.isArray(spec.type) ? spec.type[0] : spec.type;
       const desc = spec.description || "";
+      const hasDefault = Object.prototype.hasOwnProperty.call(spec, "default");
+      const examples = Array.isArray(spec.examples) ? spec.examples : [];
       let control = "";
-      const val = cur === undefined || cur === null ? "" : typeof cur === "string" ? cur : JSON.stringify(cur);
-      if (type === "boolean") {
+      let typeHint = "";
+      const val = !isSet ? "" : typeof cur === "string" ? cur : JSON.stringify(cur);
+      // Placeholder hint: prefer schema default, then first example.
+      let placeholder = "";
+      if (!isSet && hasDefault && spec.default !== null && spec.default !== undefined) {
+        placeholder = typeof spec.default === "string" ? spec.default : JSON.stringify(spec.default);
+      } else if (!isSet && examples.length) {
+        placeholder = typeof examples[0] === "string" ? examples[0] : JSON.stringify(examples[0]);
+      }
+      const ph = placeholder ? ` placeholder="${html(placeholder)}"` : "";
+
+      if (Array.isArray(spec.enum) && spec.enum.length) {
+        // Preselect current value, else schema default.
+        const selected = isSet ? cur : hasDefault ? spec.default : undefined;
+        const options = spec.enum
+          .map((opt) => {
+            const ov = typeof opt === "string" ? opt : JSON.stringify(opt);
+            const isSel = String(opt) === String(selected);
+            return `<option value="${html(ov)}"${isSel ? " selected" : ""}>${html(ov)}</option>`;
+          })
+          .join("");
+        control = `<select data-with-key="${html(key)}" data-type="string">${options}</select>`;
+      } else if (type === "boolean") {
         control = `<label class="toggle"><input type="checkbox" data-with-key="${html(key)}" data-type="boolean" ${cur ? "checked" : ""}/> ${cur ? "true" : "false"}</label>`;
       } else if (type === "integer" || type === "number") {
-        control = `<input type="number" data-with-key="${html(key)}" data-type="${type}" value="${html(val)}"/>`;
+        control = `<input type="number" data-with-key="${html(key)}" data-type="${type}" value="${html(val)}"${ph}/>`;
       } else if (type === "object" || type === "array") {
-        control = `<textarea data-with-key="${html(key)}" data-type="${type}" style="min-height: 60px">${html(val)}</textarea>`;
+        typeHint = " (JSON)";
+        control = `<textarea data-with-key="${html(key)}" data-type="${type}" style="min-height: 60px"${ph}>${html(val)}</textarea>`;
       } else {
-        control = `<input type="text" data-with-key="${html(key)}" data-type="string" value="${html(val)}"/>`;
+        control = `<input type="text" data-with-key="${html(key)}" data-type="string" value="${html(val)}"${ph}/>`;
       }
       return `<div class="prop-field">
-        <label>${html(key)} ${required.has(key) ? '<span class="req">●</span>' : ""}</label>
+        <label>${html(key)}${typeHint} ${required.has(key) ? '<span class="req">●</span>' : ""}</label>
         ${control}
         ${desc ? `<span class="hint">${html(desc)}</span>` : ""}
       </div>`;

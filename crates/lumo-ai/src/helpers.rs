@@ -1,17 +1,19 @@
 //! AI helper actions invoked by VM hooks. These are NOT registered into the
-//! user-facing `ActionRegistry`; they are direct function calls from
-//! `lumo-core::vm` at the four AI insertion points:
+//! user-facing `ActionRegistry`; most are direct function calls from
+//! `lumo-core::vm` at the AI insertion points:
 //!
 //! - `heal_selector`  — selector failure → vision/text reasoning to re-locate
-//! - `extract_visual` — extract failure → LLM "look at screenshot" (currently text-only)
+//! - `extract_visual` — extract failure → LLM looks at page text and optional screenshot
 //! - `decide`         — `control.if` cond missing/error → LLM semantic decision
 //! - `diagnose`       — final failure + `metadata.ai.diagnose_on_failure: true`
+//! - `ocr_image`      — explicit `image.ocr` action over a local image
 //!
-//! All four pull from the shared `AiRouter` and respect a `RunBudget`.
+//! All helpers pull from the shared `AiRouter` and respect a `RunBudget`.
 
 use crate::budget::RunBudget;
 use crate::{
     cost::cost_micro,
+    ocr_models::{is_local_ocr_model, run_modelscope_ocr},
     provider::{ChatMessage, ChatRequest, ChatResponse, ImageAttachment, Role},
     router::AiRouter,
 };
@@ -379,6 +381,52 @@ pub async fn vision_locate(
     ))
 }
 
+pub async fn ocr_image(
+    router: &AiRouter,
+    budget: &RunBudget,
+    image: Bytes,
+    media_type: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<(String, AiCallUsage), StepError> {
+    budget
+        .consume()
+        .map_err(|_| StepError::BudgetExceeded { max: budget.max() })?;
+
+    guard_image_size("ai.ocr_image", image.len())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&image);
+    let mut msg = ChatMessage::text(
+        Role::User,
+        if prompt.trim().is_empty() {
+            "Extract all readable text from this image. Preserve line breaks. Return plain text only."
+                .to_string()
+        } else {
+            prompt.to_string()
+        },
+    );
+    msg.attachments
+        .push(ImageAttachment::base64(media_type.to_string(), b64));
+
+    let req = ChatRequest {
+        model: model.unwrap_or("").to_string(),
+        system: Some(
+            "You are an OCR engine for RPA. Read text accurately from the attached image. \
+             Return only the requested text or structured data; do not add commentary."
+                .into(),
+        ),
+        temperature: Some(0.0),
+        max_tokens: Some(2000),
+        messages: vec![msg],
+    };
+    let t0 = Instant::now();
+    let resp = router
+        .chat(req)
+        .await
+        .map_err(|e| StepError::msg(format!("ai.ocr_image: {e}")))?;
+    let usage = usage_of("ocr_image", &resp, t0.elapsed().as_millis() as i64);
+    Ok((resp.content.trim().to_string(), usage))
+}
+
 /// Insertion point ④. LLM diagnostic appended to a final-failure error message
 /// when `metadata.ai.diagnose_on_failure: true`. Best-effort — never errors
 /// the run further; caller should swallow errors.
@@ -420,6 +468,8 @@ pub async fn diagnose(
 pub struct AiHooks {
     pub router: Arc<AiRouter>,
     pub budget: RunBudget,
+    vision_model: Option<String>,
+    ocr_model: Option<String>,
     /// P1-4: per-call usage accumulated across hook dispatches. The VM drains
     /// it with [`AiHookProvider::take_usage`] after each call to write
     /// `ai_calls` ledger rows (it owns the run/step context the hooks lack).
@@ -433,9 +483,20 @@ pub struct AiHooks {
 
 impl AiHooks {
     pub fn new(router: Arc<AiRouter>, budget: RunBudget) -> Self {
+        Self::with_model_defaults(router, budget, None, None)
+    }
+
+    pub fn with_model_defaults(
+        router: Arc<AiRouter>,
+        budget: RunBudget,
+        vision_model: Option<String>,
+        ocr_model: Option<String>,
+    ) -> Self {
         Self {
             router,
             budget,
+            vision_model,
+            ocr_model,
             usage: Mutex::new(Vec::new()),
         }
     }
@@ -468,7 +529,14 @@ pub fn build_hook_provider(
     }
     let router = Arc::new(AiRouter::from_config(cfg));
     let budget = RunBudget::new(max_calls_per_run);
-    Some(Arc::new(AiHooks::new(router, budget)))
+    let vision_model = cfg.active_vision_model();
+    let ocr_model = cfg.active_ocr_model();
+    Some(Arc::new(AiHooks::with_model_defaults(
+        router,
+        budget,
+        vision_model,
+        ocr_model,
+    )))
 }
 
 #[async_trait]
@@ -502,6 +570,11 @@ impl AiHookProvider for AiHooks {
         schema: Option<&Value>,
         model: Option<&str>,
     ) -> Result<Value, StepError> {
+        let model = if screenshot_png.is_some() {
+            model.or(self.vision_model.as_deref())
+        } else {
+            model
+        };
         let (value, usage) = extract_visual(
             &self.router,
             &self.budget,
@@ -548,6 +621,7 @@ impl AiHookProvider for AiHooks {
         marks: &[SoMMark],
         model: Option<&str>,
     ) -> Result<LocatedTarget, StepError> {
+        let model = model.or(self.vision_model.as_deref());
         let (target, usage) = vision_locate(
             &self.router,
             &self.budget,
@@ -559,6 +633,33 @@ impl AiHookProvider for AiHooks {
         .await?;
         self.push_usage(usage);
         Ok(target)
+    }
+
+    async fn ocr_image(
+        &self,
+        image: Bytes,
+        media_type: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, StepError> {
+        let model = model
+            .or(self.ocr_model.as_deref())
+            .or(self.vision_model.as_deref());
+        if let Some(model) = model.filter(|m| is_local_ocr_model(m)) {
+            self.budget
+                .consume()
+                .map_err(|_| StepError::BudgetExceeded {
+                    max: self.budget.max(),
+                })?;
+            guard_image_size("ai.ocr_image", image.len())?;
+            let (text, usage) = run_modelscope_ocr(image, media_type, prompt, model).await?;
+            self.push_usage(usage);
+            return Ok(text);
+        }
+        let (text, usage) =
+            ocr_image(&self.router, &self.budget, image, media_type, prompt, model).await?;
+        self.push_usage(usage);
+        Ok(text)
     }
 
     fn take_usage(&self) -> Vec<AiCallUsage> {

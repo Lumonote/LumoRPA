@@ -150,10 +150,23 @@ fn walk(
                 ),
             ));
         }
-        if (action.starts_with("file.")
-            && matches!(action, "file.read" | "file.exists" | "csv.read")
-            || matches!(action, "csv.read"))
-            && !ctx.has_fs_read
+        if matches!(
+            action,
+            "file.read"
+                | "file.exists"
+                | "file.list"
+                | "file.metadata"
+                | "file.copy"
+                | "file.move"
+                | "file.rename"
+                | "csv.read"
+                | "excel.read_rows"
+                | "excel.read_cell"
+                | "excel.sheet_names"
+                | "image.locate"
+                | "image.compare"
+                | "image.ocr"
+        ) && !ctx.has_fs_read
         {
             out.push(LintIssue::at(
                 LintSeverity::Warn,
@@ -164,7 +177,16 @@ fn walk(
         }
         if matches!(
             action,
-            "file.write" | "csv.write" | "excel.write_row" | "db.sqlite_exec"
+            "file.write"
+                | "file.mkdir"
+                | "file.copy"
+                | "file.move"
+                | "file.rename"
+                | "file.delete"
+                | "csv.write"
+                | "excel.write_row"
+                | "excel.write_cell"
+                | "db.sqlite_exec"
         ) && !ctx.has_fs_write
         {
             out.push(LintIssue::at(
@@ -176,11 +198,9 @@ fn walk(
                 ),
             ));
         }
-        if action.starts_with("ai.")
+        if (matches!(action, "ai.chat" | "image.ocr")
+            || (action.starts_with("ai.") && s.ai.as_ref().is_some_and(|a| a.is_enabled())))
             && !ctx.has_llm_cap
-            && s.ai
-                .as_ref()
-                .map_or(action == "ai.chat", |a| a.is_enabled())
         {
             out.push(LintIssue::at(
                 LintSeverity::Warn,
@@ -342,7 +362,9 @@ mod tests {
                 "http.request",
                 "file.read",
                 "file.write",
+                "file.copy",
                 "ai.chat",
+                "image.ocr",
                 "control.log",
                 "csv.read",
             ],
@@ -382,6 +404,40 @@ spec:
 "#;
         let r = lint(y);
         assert!(has(&r, "capability.network"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn warns_on_missing_file_copy_capabilities() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: copy
+      action: file.copy
+      with: { from: "./in.txt", to: "./out.txt" }
+"#;
+        let r = lint(y);
+        assert!(has(&r, "capability.fs_read"), "issues: {r:?}");
+        assert!(has(&r, "capability.fs_write"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn warns_on_missing_image_ocr_capabilities() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: ocr
+      action: image.ocr
+      with: { image: "./captcha.png" }
+"#;
+        let r = lint(y);
+        assert!(has(&r, "capability.fs_read"), "issues: {r:?}");
+        assert!(has(&r, "capability.llm"), "issues: {r:?}");
     }
 
     #[test]

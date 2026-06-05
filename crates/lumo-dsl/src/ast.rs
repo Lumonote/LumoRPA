@@ -66,9 +66,33 @@ pub struct FlowSpec {
     #[serde(default)]
     pub capabilities: Capabilities,
     #[serde(default)]
-    pub resources: BTreeMap<String, serde_yaml::Value>,
+    pub resources: BTreeMap<String, ResourceDecl>,
     #[serde(default)]
     pub steps: Vec<Step>,
+}
+
+/// A flow-level resource declaration (`spec.resources.<name>`): an external
+/// dependency — browser, db, http session, ftp/smtp connection — that the VM
+/// instantiates once per run and reuses across every step referencing it via
+/// `Step.resource`, then tears down at run end (T3). `profile` is a resource
+/// sub-field (e.g. a browser stealth profile); kind-specific settings flatten
+/// in alongside it.
+///
+/// Note: no `deny_unknown_fields` here — `#[serde(flatten)]` on `config`
+/// deliberately absorbs the kind-specific remainder, and the two are
+/// incompatible. Typos in `kind`-specific keys are caught at open time, not parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDecl {
+    /// Resource kind selector, e.g. `chromium.cdp`, `sqlite`, `http`, `ftp`, `smtp`.
+    pub kind: String,
+    /// Optional named profile within the kind (e.g. browser `stealth-default`).
+    /// `None` ⇒ the kind's default profile.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Kind-specific settings (url, host, headless, …), flattened so they sit
+    /// directly under the resource name in YAML next to `kind`/`profile`.
+    #[serde(flatten)]
+    pub config: serde_yaml::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +154,11 @@ pub struct Step {
     pub when: Option<String>,
     #[serde(default)]
     pub bind: Option<String>,
+    /// T3: optional reference to a flow-level resource (`spec.resources.<name>`)
+    /// whose shared, run-scoped handle this step should reuse. Validated against
+    /// declared resources; `None` ⇒ the step opens its own connection as before.
+    #[serde(default)]
+    pub resource: Option<String>,
     #[serde(default)]
     pub ai: Option<StepAi>,
     /// Nested steps for control-flow actions (for / for_each / if / try / parallel).

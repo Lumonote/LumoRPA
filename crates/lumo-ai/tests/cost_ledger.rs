@@ -25,6 +25,8 @@ fn profile_for(server_uri: String) -> ProvidersConfig {
             api_key: Some("test-key".into()),
             api_key_env: None,
             default_model: Some("gpt-4o-mini".into()),
+            vision_model: None,
+            ocr_model: None,
             models: vec![],
             headers: Default::default(),
             wire_api: None,

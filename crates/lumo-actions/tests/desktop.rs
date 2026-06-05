@@ -126,7 +126,12 @@ async fn type_rejects_unknown_field() {
 #[tokio::test]
 #[ignore = "actuates real input; needs a display + macOS Accessibility grant"]
 async fn move_actuates() {
-    let out = ok_with("desktop.move", json!({ "x": 100.0, "y": 100.0 }), desktop_caps()).await;
+    let out = ok_with(
+        "desktop.move",
+        json!({ "x": 100.0, "y": 100.0 }),
+        desktop_caps(),
+    )
+    .await;
     assert_eq!(out.get("x").and_then(|v| v.as_f64()), Some(100.0));
 }
 
@@ -134,6 +139,11 @@ async fn move_actuates() {
 #[ignore = "actuates real input; needs a display + macOS Accessibility grant"]
 async fn type_actuates_unicode() {
     // "你好 hello" = 8 Unicode scalar values; clipboard-paste handles the CJK.
-    let out = ok_with("desktop.type", json!({ "text": "你好 hello" }), desktop_caps()).await;
+    let out = ok_with(
+        "desktop.type",
+        json!({ "text": "你好 hello" }),
+        desktop_caps(),
+    )
+    .await;
     assert_eq!(out.get("typed").and_then(|v| v.as_u64()), Some(8));
 }

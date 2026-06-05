@@ -1,0 +1,257 @@
+# LumoFlow Instruction Set
+
+This document is the runtime-facing reference for the current LumoRPA flow
+instruction set. It describes the YAML shape, step semantics, capability gates,
+and action ids exposed by the default CLI registry.
+
+## Flow Shape
+
+```yaml
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: my-flow
+  version: 0.1.0
+  name: My Flow
+  description: Optional description
+  tags: [example]
+spec:
+  inputs:
+    - { name: who, type: string, default: world }
+  outputs: []
+  vault: []
+  capabilities: {}
+  steps:
+    - id: greet
+      action: control.log
+      with:
+        message: "hello {{ inputs.who }}"
+```
+
+Required top-level fields are `apiVersion`, `kind`, `metadata`, and `spec`.
+`apiVersion` must be `lumorpa.io/v1`; `kind` must be `Flow`.
+
+Each step supports:
+
+| Field | Purpose |
+| --- | --- |
+| `id` | Unique step id across the whole flow, including nested blocks. |
+| `action` | Registered action id, such as `file.read` or `browser.click`. |
+| `with` | Action input object validated against the action JSON schema. |
+| `bind` | Optional variable name that receives this step's output. |
+| `when` | Optional predicate. Falsy values skip the step. |
+| `retry` | Optional retry policy: `times`, `backoff`, `initial_ms`, `on`. |
+| `ai` | Optional AI hook policy: `mode: off`, `fallback`, or `primary`. |
+| `resource` | Optional name of a declared `spec.resources` entry to bind this step to (see [Resources](#resources)). |
+| `do`, `else`, `catch`, `finally`, `branches` | Nested control blocks for `control.*` actions. |
+
+## Templates
+
+String values in `with` are rendered with the flow context before action
+execution. A whole-field lookup preserves the original JSON type:
+
+```yaml
+with:
+  items: "{{ inputs.rows }}"
+  message: "processed {{ steps.count.result }} rows"
+```
+
+Available namespaces are:
+
+| Namespace | Meaning |
+| --- | --- |
+| `inputs.*` | Flow inputs after defaults are merged. |
+| `steps.<id>.result` | Prior step output. |
+| `vars.*` | Values set by `control.set_var` or `bind`. |
+| `env.*` | Environment variables. |
+| loop bindings | `index`, `row`, `item`, or a custom `bind` from loop input. |
+| `vault.*` | Secret placeholders resolved just before action dispatch. |
+
+Vault expressions render as placeholders such as `${{ vault.smtp.password }}` so
+secrets do not appear in rendered step snapshots.
+
+## Capabilities
+
+Flows are deny-by-default for side effects. Declare only the permissions a flow
+needs:
+
+```yaml
+spec:
+  capabilities:
+    fs.read: ["./input/**"]
+    fs.write: ["./output/**"]
+    network: ["example.com"]
+    llm: ["*"]
+    mcp: ["local-tools"]
+    desktop: ["mouse", "keyboard"]
+```
+
+Common gates:
+
+| Capability | Used by |
+| --- | --- |
+| `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`. |
+| `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`. |
+| `network` | HTTP, browser, email, notification, FTP/S3, MCP network targets. |
+| `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
+| `mcp` | MCP tool calls. |
+| `desktop` | Optional `desktop.*` actions when compiled with the `desktop` feature. |
+
+## Resources
+
+A flow can declare long-lived **resources** under `spec.resources` — a browser, a
+database connection, an HTTP client, an SMTP/FTP session — that are **opened once
+and reused** by every step that binds them, then torn down together at run end (on
+success, failure, or cancel). This is the "启动一次 / start once" model: a login or
+connection is paid for once per run instead of once per step.
+
+```yaml
+spec:
+  resources:
+    browser:                  # an arbitrary name you reference from steps
+      kind: chromium.cdp
+      profile: stealth-default
+      headless: true
+    orders:
+      kind: sqlite
+      path: "./output/orders.db"
+  steps:
+    - id: open
+      action: browser.open
+      resource: browser        # bind this step to the `browser` resource
+      with: { url: "https://example.com/orders" }
+    - id: save
+      action: db.sqlite_exec
+      resource: orders          # bind to `orders`; `db:` comes from the decl
+      with: { sql: "INSERT INTO orders(id) VALUES ('A-1')" }
+```
+
+**Binding.** A step's optional `resource:` field names one declared resource. An
+undeclared name is a hard validation error. A step with no `resource:` keeps its
+prior per-step behavior exactly — resources are opt-in and fully back-compatible.
+
+**Lifecycle.** A resource opens **lazily** on the first step that binds it (an
+unused resource never opens), is reused by later bound steps, and is closed at run
+end. Each run gets its own instances (keyed by run id), so concurrent runs never
+share a handle.
+
+### Resource kinds
+
+| `kind` | Used by | Reused handle | Config (in the decl) |
+| --- | --- | --- | --- |
+| `chromium.cdp` | `browser.*` | One Chrome session (tabs, cookies, pages) | `headless` (bool); `profile` (see below) |
+| `sqlite` | `db.sqlite_*` | One SQLite connection | `path` (the db file) |
+| `http` | `http.*` | One pooled HTTP client (keep-alive) | `timeout_ms` (optional) |
+| `smtp` | `email.send` | One pooled SMTP transport | — host/credentials come from the step (see below) |
+| `ftp` | `ftp.*` | One authenticated FTP session | — host/credentials come from the step (see below) |
+
+A bound step omits the per-call field it would otherwise pass: a `sqlite`-bound
+`db.sqlite_*` step omits `db:` (the decl `path` wins); a `chromium.cdp`-bound
+`browser.open` omits launch options (`headless`/`profile` come from the decl).
+(`email.fetch`/IMAP and `s3.*` are not resource-backed and behave as before.)
+
+### Profiles
+
+`profile: <name>` is a resource sub-field. Today it is meaningful only for
+`chromium.cdp`, where it makes the browser **persistent**: the named profile maps
+to a stable Chrome user-data directory under `$LUMO_HOME/browser-profiles/<name>`,
+so cookies, logins, and localStorage survive across runs. A persistent profile
+also gets a minimal **stealth baseline** — it drops the `navigator.webdriver`
+automation signal (`--disable-blink-features=AutomationControlled`) and the
+default-browser prompt. Because Chrome locks the directory, **one profile can be
+used by only one run at a time**. Deeper anti-detection (UA / fingerprint patches)
+is out of scope for the baseline. For the other kinds, `profile` is reserved (no
+effect today).
+
+### Security and capabilities
+
+- **Per-step capability gating is unchanged.** Binding a resource relaxes no gate —
+  every step still checks `network` / `fs.read` / `fs.write` as before.
+- **Resource config is static YAML and is never template-rendered.** `{{ … }}` and
+  `${{ vault.… }}` do **not** resolve inside a decl — never put secrets there.
+  Credential-bearing kinds (`smtp`, `ftp`) take their host and credentials from the
+  **first bound step's** inputs (which *are* vault-resolved), not from the decl.
+- **The browser profile directory is app-managed infrastructure** (under
+  `$LUMO_HOME`, like `lumo.db` / `selector-stats.json`), so it is not a
+  user-supplied path and is not subject to `fs.write` gating — exactly as Chrome's
+  default temporary profile isn't.
+
+See `examples/order-export.lumoflow.yaml` for a flow that reuses both a persistent
+browser and a shared SQLite connection.
+
+## Control Blocks
+
+`control.if` uses `do` and optional `else`.
+
+```yaml
+- id: gate
+  action: control.if
+  with: { cond: "inputs.count > 0" }
+  do:
+    - { id: positive, action: control.log, with: { message: ok } }
+  else:
+    - { id: empty, action: control.log, with: { message: empty } }
+```
+
+`control.for` and `control.for_each` require `do`. `control.try` supports
+`do`, `catch`, and `finally`. `control.parallel` accepts either `branches` or
+`do`, where `branches` is a list of step sequences.
+
+## Action Families
+
+Use `cargo run -p lumo-cli -- actions` to print the registry and
+`cargo run -p lumo-cli -- actions --show <id>` to inspect the input schema.
+
+<!-- ACTIONS_START -->
+| Family | Actions |
+| --- | --- |
+| AI | `ai.chat` |
+| Archive | `archive.zip`, `archive.unzip` |
+| Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table` |
+| Clipboard | `clipboard.get`, `clipboard.set` |
+| Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.try`, `control.parallel`, `control.fail` |
+| CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
+| Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
+| Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |
+| Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch` |
+| DOCX | `docx.read_text`, `docx.replace_placeholders` |
+| Email | `email.send`, `email.fetch` |
+| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula` |
+| File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append` |
+| Flow | `flow.call` |
+| FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
+| Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.uuid` |
+| HTTP | `http.request`, `http.download`, `http.upload` |
+| Image | `image.locate`, `image.compare`, `image.ocr` |
+| JSON | `json.get`, `json.set`, `json.merge`, `json.keys`, `json.values`, `json.delete` |
+| List | `list.length`, `list.append`, `list.sort`, `list.unique`, `list.range`, `list.contains`, `list.get`, `list.slice`, `list.reverse`, `list.pluck` |
+| Math | `math.round`, `math.random`, `math.min`, `math.max`, `math.sum`, `math.avg`, `math.abs` |
+| MCP | `mcp.call`, `mcp.discover` |
+| Notification | `notify.send`, `notify.dingtalk`, `notify.feishu`, `notify.wecom` |
+| PDF | `pdf.extract_text`, `pdf.info`, `pdf.write` |
+| Regex | `regex.match`, `regex.find_all`, `regex.replace`, `regex.captures` |
+| Skill | `skill.invoke` |
+| String | `string.upper`, `string.lower`, `string.trim`, `string.length`, `string.split`, `string.join`, `string.replace`, `string.contains`, `string.starts_with`, `string.ends_with`, `string.substring`, `string.repeat`, `string.pad_left`, `string.pad_right`, `string.format`, `string.encode_convert` |
+| System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list` |
+<!-- ACTIONS_END -->
+
+The optional `desktop` feature adds `desktop.move`, `desktop.click`,
+`desktop.scroll`, `desktop.key`, and `desktop.type`.
+
+`image.ocr` can use either the active cloud OCR/vision model or a local
+ModelScope OCR preset configured in `ocr_model` (for example
+`modelscope/ZhipuAI/GLM-OCR`, `modelscope/PaddlePaddle/PaddleOCR-VL-1.6`, or
+`modelscope/deepseek-ai/DeepSeek-OCR-2`). The desktop Models page lists the
+supported OCR presets and can download them into the local model cache.
+
+## Validation Checklist
+
+Before shipping a flow:
+
+1. Run `cargo run -p lumo-cli -- validate path/to/flow.lumoflow.yaml`.
+2. Run `cargo run -p lumo-cli -- actions --show <action>` for every unfamiliar
+   action and compare its required `with` fields.
+3. Declare capability grants for every filesystem, network, LLM, MCP, or desktop
+   operation.
+4. Keep step ids unique, including nested control blocks.
+5. Prefer `bind` for intermediate outputs that will be reused by later steps.

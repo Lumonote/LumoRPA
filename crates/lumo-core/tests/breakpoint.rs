@@ -90,9 +90,18 @@ impl Probes {
     }
     fn registry(&self) -> ActionRegistry {
         let mut reg = ActionRegistry::new();
-        reg.register(Probe { id: "probe.a", calls: self.a.clone() });
-        reg.register(Probe { id: "probe.b", calls: self.b.clone() });
-        reg.register(Probe { id: "probe.c", calls: self.c.clone() });
+        reg.register(Probe {
+            id: "probe.a",
+            calls: self.a.clone(),
+        });
+        reg.register(Probe {
+            id: "probe.b",
+            calls: self.b.clone(),
+        });
+        reg.register(Probe {
+            id: "probe.c",
+            calls: self.c.clone(),
+        });
         reg
     }
     fn counts(&self) -> (usize, usize, usize) {
@@ -124,13 +133,20 @@ async fn breakpoint_pauses_before_step_then_resume_continues() {
 
     assert_eq!(r1.paused_at.as_deref(), Some("b"), "paused before `b`");
     assert!(!r1.success, "a paused run is not a success");
-    assert_eq!(probes.counts(), (1, 0, 0), "a ran; b (the breakpoint) and c did not");
+    assert_eq!(
+        probes.counts(),
+        (1, 0, 0),
+        "a ran; b (the breakpoint) and c did not"
+    );
 
     // Persistence: `a` is recorded ok; the un-run breakpoint step `b` is absent
     // (so a resume re-executes from it), and the run row is `paused`.
     let steps = repo.list_steps(&r1.run_id).unwrap();
     assert_eq!(steps.len(), 1, "only `a` persisted");
-    assert_eq!((steps[0].path.as_str(), steps[0].state.as_str()), ("a", "ok"));
+    assert_eq!(
+        (steps[0].path.as_str(), steps[0].state.as_str()),
+        ("a", "ok")
+    );
     assert_eq!(repo.get_run(&r1.run_id).unwrap().unwrap().state, "paused");
 
     // ── Run 2: continue (resume, same breakpoint) → steps off b, runs b+c. ──
@@ -141,7 +157,10 @@ async fn breakpoint_pauses_before_step_then_resume_continues() {
         .await
         .expect("resume completes");
 
-    assert!(r2.success, "continuing past the breakpoint completes the run");
+    assert!(
+        r2.success,
+        "continuing past the breakpoint completes the run"
+    );
     assert_eq!(r2.paused_at, None, "no further pause");
     assert_eq!(
         probes.counts(),
@@ -163,7 +182,11 @@ async fn single_step_advances_one_step_per_resume() {
         .run(&flow, RunOptions::default())
         .await
         .unwrap();
-    assert_eq!(r1.paused_at.as_deref(), Some("a"), "pause before first step");
+    assert_eq!(
+        r1.paused_at.as_deref(),
+        Some("a"),
+        "pause before first step"
+    );
     assert_eq!(probes.counts(), (0, 0, 0), "nothing executed yet");
 
     // Each resume steps off the current step and pauses before the next.
@@ -174,7 +197,11 @@ async fn single_step_advances_one_step_per_resume() {
         .await
         .unwrap();
     assert_eq!(r2.paused_at.as_deref(), Some("b"));
-    assert_eq!(probes.counts(), (1, 0, 0), "stepped off a → a ran, paused before b");
+    assert_eq!(
+        probes.counts(),
+        (1, 0, 0),
+        "stepped off a → a ran, paused before b"
+    );
 
     let r3 = FlowVm::new(probes.registry(), Some(repo.clone()))
         .with_resume_from(Some(r2.run_id))
@@ -183,7 +210,11 @@ async fn single_step_advances_one_step_per_resume() {
         .await
         .unwrap();
     assert_eq!(r3.paused_at.as_deref(), Some("c"));
-    assert_eq!(probes.counts(), (1, 1, 0), "stepped off b → b ran, paused before c");
+    assert_eq!(
+        probes.counts(),
+        (1, 1, 0),
+        "stepped off b → b ran, paused before c"
+    );
 
     // Stepping off the last step finishes the run.
     let r4 = FlowVm::new(probes.registry(), Some(repo.clone()))
@@ -194,7 +225,11 @@ async fn single_step_advances_one_step_per_resume() {
         .unwrap();
     assert!(r4.success, "stepping off the last step completes the run");
     assert_eq!(r4.paused_at, None);
-    assert_eq!(probes.counts(), (1, 1, 1), "all three ran exactly once across the session");
+    assert_eq!(
+        probes.counts(),
+        (1, 1, 1),
+        "all three ran exactly once across the session"
+    );
 }
 
 #[tokio::test]
@@ -249,7 +284,11 @@ async fn breakpoint_inside_try_unwinds_without_catching_or_failing_container() {
         .await
         .expect("a paused run returns Ok with paused_at");
 
-    assert_eq!(r1.paused_at.as_deref(), Some("guard/try/c"), "paused before nested `c`");
+    assert_eq!(
+        r1.paused_at.as_deref(),
+        Some("guard/try/c"),
+        "paused before nested `c`"
+    );
     assert!(!r1.success);
     assert_eq!(
         probes.counts(),
@@ -285,7 +324,10 @@ async fn breakpoint_inside_try_unwinds_without_catching_or_failing_container() {
         .await
         .expect("resume completes");
 
-    assert!(r2.success, "continuing past the breakpoint completes the run");
+    assert!(
+        r2.success,
+        "continuing past the breakpoint completes the run"
+    );
     assert_eq!(r2.paused_at, None);
     assert_eq!(
         probes.counts(),

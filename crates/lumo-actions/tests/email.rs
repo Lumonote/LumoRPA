@@ -80,7 +80,10 @@ async fn send_is_denied_without_a_network_grant() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
-    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        err.contains("network"),
+        "should name the network cap: {err}"
+    );
     assert!(
         !err.contains("email.send smtp"),
         "gate must fire before the SMTP connect, got: {err}"
@@ -143,7 +146,10 @@ async fn fetch_rejects_zero_limit() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("limit"), "zero limit must be rejected, got: {err}");
+    assert!(
+        err.contains("limit"),
+        "zero limit must be rejected, got: {err}"
+    );
 }
 
 #[tokio::test]
@@ -161,7 +167,10 @@ async fn fetch_is_denied_without_a_network_grant() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
-    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        err.contains("network"),
+        "should name the network cap: {err}"
+    );
     assert!(
         !err.contains("connect") && !err.contains("handshake"),
         "gate must fire before the IMAP connect, got: {err}"

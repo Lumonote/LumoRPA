@@ -105,3 +105,58 @@ async fn weekday_is_one_indexed_from_monday() {
         json!(7)
     );
 }
+
+#[tokio::test]
+async fn workday_add_skips_the_weekend() {
+    // 2024-01-05 was a Friday; +1 business day lands on Monday 2024-01-08.
+    let out = ok(
+        "date.workday_add",
+        json!({"value": "2024-01-05", "days": 1}),
+    )
+    .await;
+    assert_eq!(out.as_str().unwrap(), "2024-01-08T00:00:00+00:00");
+}
+
+#[tokio::test]
+async fn workday_add_five_days_is_one_week() {
+    // Monday 2024-01-08 + 5 business days = the following Monday 2024-01-15.
+    let out = ok(
+        "date.workday_add",
+        json!({"value": "2024-01-08", "days": 5}),
+    )
+    .await;
+    assert_eq!(out.as_str().unwrap(), "2024-01-15T00:00:00+00:00");
+}
+
+#[tokio::test]
+async fn workday_add_negative_counts_backwards() {
+    // Monday 2024-01-08 - 1 business day = Friday 2024-01-05.
+    let out = ok(
+        "date.workday_add",
+        json!({"value": "2024-01-08", "days": -1}),
+    )
+    .await;
+    assert_eq!(out.as_str().unwrap(), "2024-01-05T00:00:00+00:00");
+}
+
+#[tokio::test]
+async fn workday_add_zero_is_unchanged() {
+    let out = ok(
+        "date.workday_add",
+        json!({"value": "2024-01-06", "days": 0}),
+    )
+    .await;
+    // Even on a Saturday, days=0 returns the input untouched.
+    assert_eq!(out.as_str().unwrap(), "2024-01-06T00:00:00+00:00");
+}
+
+#[tokio::test]
+async fn workday_add_rejects_unparseable_date() {
+    let err = run(
+        "date.workday_add",
+        json!({"value": "not-a-date", "days": 1}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("parse") || err.contains("cannot"), "got: {err}");
+}

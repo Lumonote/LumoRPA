@@ -117,6 +117,15 @@ impl AiHookProvider for StubHooks {
     ) -> Result<LocatedTarget, StepError> {
         Ok(LocatedTarget::default())
     }
+    async fn ocr_image(
+        &self,
+        _: bytes::Bytes,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<String, StepError> {
+        Ok(String::new())
+    }
     fn take_usage(&self) -> Vec<AiCallUsage> {
         std::mem::take(&mut self.usage.lock().unwrap())
     }

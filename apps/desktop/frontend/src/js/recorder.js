@@ -4,9 +4,11 @@
 import { $, html, toast } from "./dom.js";
 import { call } from "./api.js";
 import { state } from "./state.js";
-import { parseYaml } from "./yaml.js";
+import { emitStep, extractSteps, findStepRange, parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { refreshFlows, loadFlow } from "./flows.js";
+import { switchTopView } from "./views.js";
+import { refreshElementLibrary } from "./elements.js";
 
 let recorderTick = null;
 let recorderStartedAt = 0;
@@ -98,6 +100,13 @@ function onLiveRecorderEvent(evt) {
     if (kind === "launched") return payload.msg || "browser launched";
     if (kind === "heartbeat") return `tick #${payload.n ?? "?"}`;
     if (kind === "binding_ready") return `binding ready @ ${payload.url || ""}`;
+    // R-02 desktop lane (DesktopRecorder AX backend).
+    if (kind === "app_changed") return `🪟 切换应用 → ${payload.app || "?"}${payload.window_title ? "  ·  " + payload.window_title : ""}`;
+    if (kind === "focus_changed") return `🪟 切换窗口 → ${payload.window_title || payload.app || "?"}`;
+    if (kind === "focus_field") {
+      const ctrl = payload.focused_name || payload.focused_role || "?";
+      return `🎯 焦点控件 → ${ctrl}${payload.focused_role && payload.focused_name ? "  ·  " + payload.focused_role : ""}`;
+    }
     if (kind === "click") return `🖱  ${summarizeSelector(payload.selector)}${payload.label ? "  ·  " + payload.label : ""}`;
     if (kind === "input") return `⌨️  ${summarizeSelector(payload.selector)} = ${JSON.stringify(payload.value ?? "")}`;
     if (kind === "change") return `🔁  ${summarizeSelector(payload.selector)} = ${JSON.stringify(payload.value ?? "")}`;
@@ -114,6 +123,7 @@ function onLiveRecorderEvent(evt) {
     if (kind === "heartbeat") return "warn";
     if (kind === "similar_grab") return "ok";
     if (kind === "click" || kind === "input" || kind === "change") return "ok";
+    if (kind === "focus_field" || kind === "app_changed" || kind === "focus_changed") return "ok";
     if (kind === "bind_error") return "bad";
     return "tick";
   })();
@@ -155,6 +165,7 @@ export async function stopRecording() {
     recorderStreamAppend("tick", `[done] ${result.events} 事件 · ${result.note}`);
     renderRecorderPatch(result.yamlHint || "");
     toast("录制结束", `${result.events} 事件 · 看下方 YAML 草稿`, "ok");
+    await refreshElementLibrary().catch(() => {});
     await refreshRecorder();
   } catch (e) {
     toast("停止失败", String(e), "bad");
@@ -215,16 +226,17 @@ async function saveRecorderPatchAsFlow() {
     });
     await refreshFlows();
     await loadFlow(path);
+    switchTopView("design");
     pendingRecorderPatch = "";
     const box = $("recorderPatch");
-    if (box) box.innerHTML = `<div class="muted" style="padding:8px 10px">已保存到 ${html(path)}。可继续录制或返回设计页编辑。</div>`;
-    toast("已保存到流程库", path, "ok");
+    if (box) box.innerHTML = `<div class="muted" style="padding:8px 10px">已保存并打开 ${html(path)}。</div>`;
+    toast("已保存并打开", path, "ok");
   } catch (e) {
     toast("保存失败", String(e), "bad");
   }
 }
 
-function insertRecorderPatchIntoFlow() {
+async function insertRecorderPatchIntoFlow() {
   if (!pendingRecorderPatch.trim()) {
     toast("没有可插入内容", "先录制一段操作", "bad");
     return;
@@ -233,31 +245,261 @@ function insertRecorderPatchIntoFlow() {
     toast("请先打开流程", "录制结果会追加到当前编辑的流程末尾", "bad");
     return;
   }
-  // Strip the YAML header comments (everything before the first list dash) so
-  // the patch slots cleanly under `spec.steps`. Indent every line two spaces
-  // to match the existing spec.steps indentation.
-  const lines = pendingRecorderPatch.split("\n");
-  const firstStepIdx = lines.findIndex((l) => /^\s*-\s+/.test(l));
-  const stepsBlock = firstStepIdx >= 0 ? lines.slice(firstStepIdx) : lines;
-  const indented = stepsBlock
-    .filter((l) => l.length > 0)
-    .map((l) => "  " + l)
-    .join("\n");
-  const banner = "\n  # === recorder patch (review before keeping) ===\n";
-  const newSource = (state.source || "").replace(/\n*$/, "") + banner + indented + "\n";
-  state.source = newSource;
+  const nextSource = mergeRecorderPatchIntoSource(state.source || "", pendingRecorderPatch);
+  if (!nextSource) {
+    toast("没有可插入步骤", "本次录制没有产生可合并的 browser/desktop 动作", "bad");
+    return;
+  }
+  state.source = nextSource;
   try {
     state.ast = parseYaml(state.source);
   } catch (e) {
     toast("YAML 解析失败", String(e), "bad");
     return;
   }
-  // Mirror the source back into the open code editor if any.
-  const codeEl = $("codeArea");
-  if (codeEl) codeEl.value = newSource;
+  const codeEl = $("codeEditor");
+  if (codeEl) codeEl.value = state.source;
   renderActiveView();
-  toast("已合并", `Recorder patch 已追加到 ${state.flowPath}`, "ok");
-  pendingRecorderPatch = "";
-  const box = $("recorderPatch");
-  if (box) box.innerHTML = `<div class="muted" style="padding:8px 10px">已合并到 ${html(state.flowPath)}。可继续录制以追加更多步骤；记得 💾 保存。</div>`;
+  try {
+    await call("save_flow_source", { path: state.flowPath, source: state.source });
+    await refreshFlows();
+    await loadFlow(state.flowPath);
+    switchTopView("design");
+    toast("已合并并保存", `Recorder patch 已追加到 ${state.flowPath}`, "ok");
+    pendingRecorderPatch = "";
+    const box = $("recorderPatch");
+    if (box) box.innerHTML = `<div class="muted" style="padding:8px 10px">已合并并保存到 ${html(state.flowPath)}。</div>`;
+  } catch (e) {
+    toast("保存失败", `已临时合并到编辑器，但未写入文件：${String(e)}`, "bad");
+  }
+}
+
+export function mergeRecorderPatchIntoSource(source, patch) {
+  const patchSteps = recorderPatchSteps(patch);
+  if (!patchSteps.length) return "";
+  const sourceLines = source.split(/\r?\n/);
+  const ast = parseYaml(source || "spec:\n  steps:\n");
+  const steps = extractSteps(ast);
+  let baseIndent = 4;
+  let insertIdx = sourceLines.length;
+
+  const lastStep = Array.isArray(steps) ? steps[steps.length - 1] : null;
+  if (lastStep?.id) {
+    const range = findStepRange(sourceLines, lastStep.id);
+    if (range) {
+      baseIndent = range.baseIndent;
+      insertIdx = range.endIdx;
+    }
+  } else {
+    const stepsIdx = findStepsLine(sourceLines);
+    if (stepsIdx >= 0) {
+      const indent = sourceLines[stepsIdx].match(/^( *)/)?.[1]?.length || 0;
+      baseIndent = indent + 2;
+      insertIdx = stepsIdx + 1;
+    }
+  }
+
+  const indent = " ".repeat(baseIndent);
+  const inserted = [
+    `${indent}# === recorder patch (auto-merged) ===`,
+    ...patchSteps.flatMap((step) => emitStep(step, baseIndent).split("\n")),
+  ];
+  return [
+    ...sourceLines.slice(0, insertIdx),
+    ...inserted,
+    ...sourceLines.slice(insertIdx),
+  ].join("\n").replace(/\s*$/, "\n");
+}
+
+function recorderPatchSteps(patch) {
+  const patchLines = recorderPatchStepLines(patch);
+  if (!patchLines.length) return [];
+  const normalizedLines = normalizeRecorderPatchStepLines(patchLines);
+  const wrapped = [
+    "spec:",
+    "  steps:",
+    ...normalizedLines.map((line) => `    ${line}`),
+  ].join("\n");
+  try {
+    return sanitizeRecorderSteps(extractSteps(parseYaml(wrapped)));
+  } catch (e) {
+    console.warn("recorder patch parse failed", e);
+    return [];
+  }
+}
+
+function recorderPatchStepLines(patch) {
+  const lines = (patch || "").split(/\r?\n/);
+  const firstStepIdx = lines.findIndex((line) => /^\s*-\s+/.test(line));
+  if (firstStepIdx < 0) return [];
+  return lines
+    .slice(firstStepIdx)
+    .filter((line) => line.trim())
+    .map((line) => line.replace(/\s+$/, ""));
+}
+
+function normalizeRecorderPatchStepLines(lines) {
+  const first = lines.find((line) => /^\s*-\s+/.test(line));
+  const baseIndent = first?.match(/^( *)/)?.[1]?.length || 0;
+  return lines.map((line) => line.startsWith(" ".repeat(baseIndent)) ? line.slice(baseIndent) : line.trimStart());
+}
+
+function sanitizeRecorderSteps(steps) {
+  const seen = new Set();
+  return (Array.isArray(steps) ? steps : [])
+    .map((step, idx) => sanitizeRecorderStep(step, idx, seen))
+    .filter(Boolean);
+}
+
+function sanitizeRecorderStep(step, idx, seen) {
+  if (!isPlainObject(step)) return null;
+  const action = cleanString(step.action);
+  if (!action) return null;
+  const withBlock = sanitizeRecorderWith(action, step.with);
+  if (withBlock === null) return null;
+  const id = uniqueStepId(cleanString(step.id) || `${action.replace(/\W+/g, "_")}_${idx + 1}`, seen);
+  const out = { id, action };
+  if (step.when !== undefined && step.when !== null && step.when !== "") out.when = step.when;
+  if (cleanString(step.bind)) out.bind = cleanString(step.bind);
+  if (Object.keys(withBlock).length) out.with = withBlock;
+  const retry = pruneValue(step.retry);
+  if (isPlainObject(retry) && Object.keys(retry).length) out.retry = retry;
+  const ai = pruneValue(step.ai);
+  if (isPlainObject(ai) && Object.keys(ai).length) out.ai = ai;
+  return out;
+}
+
+function sanitizeRecorderWith(action, rawWith) {
+  const withBlock = isPlainObject(rawWith) ? rawWith : {};
+  if (action === "browser.open") {
+    const url = cleanString(withBlock.url);
+    if (!url) return null;
+    const out = { url };
+    copyBool(out, withBlock, "headless");
+    copyString(out, withBlock, "wait_for");
+    copyNumber(out, withBlock, "timeout_ms");
+    return out;
+  }
+  if (action === "browser.click") {
+    const out = selectorWith(withBlock);
+    if (!hasUsableSelector(out)) return null;
+    copyString(out, withBlock, "prompt");
+    copyString(out, withBlock, "model");
+    copyNumber(out, withBlock, "timeout_ms");
+    return out;
+  }
+  if (action === "browser.type") {
+    const out = selectorWith(withBlock);
+    if (!hasUsableSelector(out)) return null;
+    const text = typeof withBlock.text === "string" ? withBlock.text : cleanString(withBlock.text);
+    if (!text) return null;
+    out.text = text;
+    copyBool(out, withBlock, "clear");
+    copyString(out, withBlock, "prompt");
+    copyString(out, withBlock, "model");
+    copyNumber(out, withBlock, "timeout_ms");
+    return out;
+  }
+  if (action === "browser.extract") {
+    const selector = cleanString(withBlock.selector);
+    if (!selector) return null;
+    const out = { selector };
+    copyBool(out, withBlock, "all");
+    copyString(out, withBlock, "attr");
+    copyNumber(out, withBlock, "timeout_ms");
+    const map = pruneValue(withBlock.map);
+    if (isPlainObject(map) && Object.keys(map).length) out.map = map;
+    const frame = pruneValue(withBlock.frame);
+    if (isPlainObject(frame) && Object.keys(frame).length) out.frame = frame;
+    return out;
+  }
+  return pruneValue(withBlock) || {};
+}
+
+function selectorWith(withBlock) {
+  const out = {};
+  copyString(out, withBlock, "selector");
+  const selectors = sanitizeSelectors(withBlock.selectors);
+  if (Object.keys(selectors).length) out.selectors = selectors;
+  return out;
+}
+
+function sanitizeSelectors(selectors) {
+  if (!isPlainObject(selectors)) return {};
+  return ["id", "data_testid", "css", "aria_label", "text_includes", "xpath"].reduce((acc, key) => {
+    const value = cleanString(selectors[key]);
+    if (value) acc[key] = value;
+    return acc;
+  }, {});
+}
+
+function hasUsableSelector(withBlock) {
+  return !!cleanString(withBlock.selector)
+    || (isPlainObject(withBlock.selectors) && Object.keys(withBlock.selectors).some((key) => cleanString(withBlock.selectors[key])));
+}
+
+function pruneValue(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value.trim() ? value : undefined;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    const arr = value.map(pruneValue).filter((item) => item !== undefined);
+    return arr.length ? arr : undefined;
+  }
+  if (isPlainObject(value)) {
+    return Object.entries(value).reduce((acc, [key, item]) => {
+      const pruned = pruneValue(item);
+      if (pruned !== undefined) acc[key] = pruned;
+      return acc;
+    }, {});
+  }
+  return undefined;
+}
+
+function copyString(out, src, key) {
+  const value = cleanString(src?.[key]);
+  if (value) out[key] = value;
+}
+
+function copyNumber(out, src, key) {
+  const value = Number(src?.[key]);
+  if (Number.isFinite(value)) out[key] = value;
+}
+
+function copyBool(out, src, key) {
+  if (typeof src?.[key] === "boolean") out[key] = src[key];
+}
+
+function cleanString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function uniqueStepId(base, seen) {
+  const clean = base.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "recorded_step";
+  let id = clean;
+  let n = 2;
+  while (seen.has(id)) {
+    id = `${clean}_${n}`;
+    n += 1;
+  }
+  seen.add(id);
+  return id;
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function findStepsLine(lines) {
+  let inSpec = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^spec:\s*$/.test(line)) {
+      inSpec = true;
+      continue;
+    }
+    if (inSpec && /^\S/.test(line) && !/^spec:\s*$/.test(line)) inSpec = false;
+    if (inSpec && /^\s+steps:\s*$/.test(line)) return i;
+  }
+  return lines.findIndex((line) => /^\s*steps:\s*$/.test(line));
 }

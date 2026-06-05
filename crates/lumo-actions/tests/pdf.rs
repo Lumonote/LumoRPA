@@ -81,7 +81,10 @@ async fn write_from_plain_text_splits_lines() {
     .await;
     let text = ok_with("pdf.extract_text", json!({ "path": path }), caps).await;
     let body = text.get("text").and_then(|v| v.as_str()).unwrap();
-    assert!(body.contains("line one") && body.contains("line three"), "got: {body:?}");
+    assert!(
+        body.contains("line one") && body.contains("line three"),
+        "got: {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -115,9 +118,7 @@ async fn write_rejects_missing_path() {
 
 #[tokio::test]
 async fn extract_text_rejects_missing_path() {
-    let err = run("pdf.extract_text", json!({}))
-        .await
-        .unwrap_err();
+    let err = run("pdf.extract_text", json!({})).await.unwrap_err();
     assert!(err.contains("input invalid"), "got: {err}");
 }
 

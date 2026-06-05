@@ -4,11 +4,12 @@ use crate::action::ActionRef;
 use crate::ai_hook::AiHookProvider;
 use crate::error::{CapKind, StepError};
 use crate::registry::ActionRegistry;
-use lumo_dsl::{Capabilities, FlowAi, Step, TemplateCtx};
+use lumo_dsl::{Capabilities, FlowAi, ResourceDecl, Step, TemplateCtx};
 use lumo_storage::{ArtifactRow, Repo};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -182,6 +183,13 @@ pub struct StepCtx {
     pub registry: ActionRegistry,
     capabilities: Capabilities,
     vault_names: Vec<String>,
+    /// T3: flow-level resource declarations (`spec.resources`), seeded by the VM
+    /// from `FlowVm::run` via [`StepCtx::with_resources`]. Held as a thin `Arc`'d
+    /// map for ref validation ([`StepCtx::resource_decl`]) and config lookup
+    /// only — the *live* handles live in each action family's own
+    /// per-`(run_id, name)` storage, never here (keeps `!Send` handles like a CDP
+    /// `Page` out of the fork-able context).
+    resources: Arc<BTreeMap<String, ResourceDecl>>,
     repo: Option<Repo>,
     /// Root directory for blob artifacts (screenshots, DOM snapshots, ...).
     /// When unset, `attach_artifact` is a no-op so headless smoke tests don't
@@ -234,6 +242,10 @@ struct CtxInner {
     /// Used by `attach_artifact` so X-07 time-travel rows line up against
     /// the step_runs path column exactly.
     current_step_path: Option<String>,
+    /// T3: the resource name (`spec.resources.<name>`) the current step binds to
+    /// via `Step.resource`, set by the VM right before `Action::execute` (like
+    /// `current_step_id`). `None` ⇒ the step opens its own connection as before.
+    current_resource: Option<String>,
     /// Last page screenshot stashed by a browser action right before it
     /// surfaced an `ExtractFailed` error. The VM's `extract_visual` AI hook
     /// picks it up so the LLM can *see* the page (true multimodal extraction)
@@ -267,6 +279,7 @@ impl StepCtx {
             registry,
             capabilities,
             vault_names,
+            resources: Arc::new(BTreeMap::new()),
             repo,
             artifacts_dir: None,
             ai_provider: None,
@@ -287,6 +300,7 @@ impl StepCtx {
                 stats: RunStats::default(),
                 current_step_id: None,
                 current_step_path: None,
+                current_resource: None,
                 last_screenshot: None,
             })),
         }
@@ -311,6 +325,45 @@ impl StepCtx {
     pub fn with_vault(mut self, identity: Option<Arc<lumo_storage::VaultIdentity>>) -> Self {
         self.vault_identity = identity;
         self
+    }
+
+    /// T3: seed the flow-level resource declarations (`spec.resources`) so steps
+    /// can validate their `resource:` ref and look up its kind/profile/config.
+    /// Seeded by the VM from `FlowVm::run`. Absent ⇒ no declared resources.
+    pub fn with_resources(mut self, resources: BTreeMap<String, ResourceDecl>) -> Self {
+        self.resources = Arc::new(resources);
+        self
+    }
+
+    /// T3: whether a resource named `name` is declared in `spec.resources`.
+    pub fn has_resource(&self, name: &str) -> bool {
+        self.resources.contains_key(name)
+    }
+
+    /// T3: the declaration for resource `name`, or an error if it isn't declared
+    /// in `spec.resources`. Mirrors the `${{ vault.* }}` ref check: a reference
+    /// to an undeclared resource is rejected at resolve time. Returns a clone so
+    /// an action family can read `kind`/`profile`/`config` without holding a lock
+    /// on the context.
+    pub fn resource_decl(&self, name: &str) -> Result<ResourceDecl, StepError> {
+        self.resources.get(name).cloned().ok_or_else(|| {
+            StepError::msg(format!(
+                "resource `{name}` is not declared in spec.resources"
+            ))
+        })
+    }
+
+    /// T3: stash the resource name the step about to run binds to
+    /// (`Step.resource`) so a resource-aware action can resolve its shared,
+    /// run-scoped handle. Set by the VM right before `Action::execute`, mirroring
+    /// [`set_current_step`](Self::set_current_step). `None` clears it.
+    pub fn set_current_resource(&self, name: Option<&str>) {
+        self.inner.lock().current_resource = name.map(str::to_string);
+    }
+
+    /// T3: the resource name the current step binds to, if any.
+    pub fn current_resource(&self) -> Option<String> {
+        self.inner.lock().current_resource.clone()
     }
 
     pub fn ai_provider(&self) -> Option<&Arc<dyn AiHookProvider>> {
@@ -503,6 +556,7 @@ impl StepCtx {
             registry: self.registry.clone(),
             capabilities: self.capabilities.clone(),
             vault_names: self.vault_names.clone(),
+            resources: self.resources.clone(),
             repo: self.repo.clone(),
             artifacts_dir: self.artifacts_dir.clone(),
             ai_provider: self.ai_provider.clone(),
@@ -523,6 +577,7 @@ impl StepCtx {
                 stats: RunStats::default(),
                 current_step_id: g.current_step_id.clone(),
                 current_step_path: g.current_step_path.clone(),
+                current_resource: g.current_resource.clone(),
                 last_screenshot: None,
             })),
         }
@@ -1286,5 +1341,64 @@ mod tests {
                 "state written before the fork stays visible to both"
             );
         }
+    }
+
+    fn decl(kind: &str) -> ResourceDecl {
+        ResourceDecl {
+            kind: kind.into(),
+            profile: None,
+            config: serde_yaml::Value::Null,
+        }
+    }
+
+    fn ctx_with_resources(pairs: &[(&str, &str)]) -> StepCtx {
+        let resources = pairs
+            .iter()
+            .map(|(name, kind)| (name.to_string(), decl(kind)))
+            .collect::<BTreeMap<_, _>>();
+        test_ctx().with_resources(resources)
+    }
+
+    #[test]
+    fn resource_decl_returns_declared_and_rejects_undeclared() {
+        // T3: mirrors the vault-ref check — a declared resource resolves to its
+        // decl; an undeclared ref is a hard error at resolve time.
+        let ctx = ctx_with_resources(&[("browser", "chromium.cdp"), ("db", "sqlite")]);
+        assert!(ctx.has_resource("browser"));
+        assert_eq!(ctx.resource_decl("db").unwrap().kind, "sqlite");
+
+        assert!(!ctx.has_resource("ghost"));
+        let err = ctx.resource_decl("ghost").unwrap_err().to_string();
+        assert!(
+            err.contains("ghost") && err.contains("spec.resources"),
+            "undeclared-resource error should name the ref and spec.resources, got: {err}"
+        );
+    }
+
+    #[test]
+    fn current_resource_round_trips_and_clears() {
+        // T3: the per-step `resource:` ref is stashed like `current_step_id`.
+        let ctx = ctx_with_resources(&[("browser", "chromium.cdp")]);
+        assert_eq!(ctx.current_resource(), None);
+        ctx.set_current_resource(Some("browser"));
+        assert_eq!(ctx.current_resource().as_deref(), Some("browser"));
+        ctx.set_current_resource(None);
+        assert_eq!(ctx.current_resource(), None);
+    }
+
+    #[test]
+    fn fork_preserves_resource_decls_and_current_ref() {
+        // T3: a parallel-branch fork must keep the declared resources (so refs
+        // still validate in the branch) and the current resource ref captured at
+        // fork time.
+        let ctx = ctx_with_resources(&[("browser", "chromium.cdp")]);
+        ctx.set_current_resource(Some("browser"));
+        let child = ctx.fork();
+        assert!(child.has_resource("browser"));
+        assert_eq!(
+            child.resource_decl("browser").unwrap().kind,
+            "chromium.cdp"
+        );
+        assert_eq!(child.current_resource().as_deref(), Some("browser"));
     }
 }

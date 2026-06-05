@@ -197,3 +197,60 @@ async fn invalid_input_is_a_step_error() {
         "error names the action: {err}"
     );
 }
+
+// ---- string.encode_convert ------------------------------------------------
+
+#[tokio::test]
+async fn encode_convert_utf8_to_gbk_base64() {
+    // "你好" in GBK is the bytes C4 E3 BA C3 = base64 "xOO6ww==".
+    let out = ok(
+        "string.encode_convert",
+        json!({"text": "你好", "to": "gbk"}),
+    )
+    .await;
+    assert_eq!(out, json!("xOO6ww=="));
+}
+
+#[tokio::test]
+async fn encode_convert_gbk_base64_to_utf8_round_trips() {
+    let out = ok(
+        "string.encode_convert",
+        json!({
+            "text": "xOO6ww==",
+            "from": "gbk",
+            "to": "utf-8",
+            "input_base64": true
+        }),
+    )
+    .await;
+    assert_eq!(out, json!("你好"));
+}
+
+#[tokio::test]
+async fn encode_convert_unknown_encoding_errors() {
+    let err = run(
+        "string.encode_convert",
+        json!({"text": "x", "to": "not-an-encoding"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("unknown"), "got: {err}");
+}
+
+#[tokio::test]
+async fn encode_convert_rejects_invalid_input_bytes() {
+    // A byte sequence that is not decodable in Big5 must surface an error rather
+    // than silently producing replacement characters.
+    let err = run(
+        "string.encode_convert",
+        json!({
+            "text": "//8=",
+            "from": "big5",
+            "to": "utf-8",
+            "input_base64": true
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("not valid"), "got: {err}");
+}

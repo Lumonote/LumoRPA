@@ -24,13 +24,7 @@
         "decorations": true,
         "hiddenTitle": true,
         "titleBarStyle": "Transparent",
-        "backgroundColor": "#FFFFFF00",
-        "windowEffects": {
-          "effects": ["windowBackground"],
-          "state": "active",
-          "radius": 8,
-          "color": "#FFFFFF00"
-        }
+        "backgroundColor": "#FFFFFF00"
       }
     ],
     "security": {

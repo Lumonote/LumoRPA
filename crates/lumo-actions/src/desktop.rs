@@ -221,7 +221,9 @@ impl Action for ScrollAction {
         })
         .await
         .map_err(|e| StepError::msg(format!("desktop.scroll join: {e}")))??;
-        Ok(ActionResult::from(serde_json::json!({ "dx": dx, "dy": dy })))
+        Ok(ActionResult::from(
+            serde_json::json!({ "dx": dx, "dy": dy }),
+        ))
     }
 }
 
@@ -299,8 +301,8 @@ fn parse_combo(spec: &str) -> Result<(Vec<Key>, Key), StepError> {
             )));
         }
     }
-    let main =
-        main.ok_or_else(|| StepError::msg(format!("desktop.key: no non-modifier key in `{spec}`")))?;
+    let main = main
+        .ok_or_else(|| StepError::msg(format!("desktop.key: no non-modifier key in `{spec}`")))?;
     Ok((mods, main))
 }
 

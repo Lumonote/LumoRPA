@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, CancelToken, StepCtx};
 use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -95,7 +95,14 @@ fn collect_entries(
 }
 
 /// Synchronous compress step (runs in `spawn_blocking`). Returns `(entries, bytes)`.
-fn write_zip(dest: &Path, entries: Vec<(PathBuf, String)>) -> Result<(u64, u64), StepError> {
+/// Cooperatively cancellable: when `cancel` is set, the per-entry loop bails out
+/// with a clear error so the blocking thread stops promptly instead of running
+/// to completion after the VM has already been cancelled.
+fn write_zip(
+    dest: &Path,
+    entries: Vec<(PathBuf, String)>,
+    cancel: Option<&CancelToken>,
+) -> Result<(u64, u64), StepError> {
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -112,6 +119,9 @@ fn write_zip(dest: &Path, entries: Vec<(PathBuf, String)>) -> Result<(u64, u64),
     let mut count: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     for (abs, name) in entries {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StepError::msg("archive.zip cancelled"));
+        }
         zw.start_file(name.clone(), opts)
             .map_err(|e| StepError::msg(format!("archive.zip start `{name}`: {e}")))?;
         let mut f = std::fs::File::open(&abs)
@@ -169,9 +179,11 @@ impl Action for ZipAction {
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_write(&dest_path)?;
 
-        let (count, bytes) = tokio::task::spawn_blocking(move || write_zip(&dest_path, entries))
-            .await
-            .map_err(|e| StepError::msg(format!("archive.zip task: {e}")))??;
+        let cancel = ctx.cancel_token();
+        let (count, bytes) =
+            tokio::task::spawn_blocking(move || write_zip(&dest_path, entries, cancel.as_ref()))
+                .await
+                .map_err(|e| StepError::msg(format!("archive.zip task: {e}")))??;
 
         Ok(ActionResult::from(serde_json::json!({
             "dest": dest,
@@ -228,7 +240,14 @@ fn safe_join(dest: &Path, entry_name: &str) -> Result<PathBuf, StepError> {
 
 /// Synchronous extract step (runs in `spawn_blocking`). Returns the file count.
 /// Aborts (and removes the partial file) once uncompressed bytes exceed `max_total`.
-fn extract_zip(src: &Path, dest: &Path, max_total: u64) -> Result<u64, StepError> {
+/// Cooperatively cancellable: checks `cancel` before each entry so the blocking
+/// thread stops promptly on VM cancel instead of extracting the whole archive.
+fn extract_zip(
+    src: &Path,
+    dest: &Path,
+    max_total: u64,
+    cancel: Option<&CancelToken>,
+) -> Result<u64, StepError> {
     let file = std::fs::File::open(src)
         .map_err(|e| StepError::msg(format!("archive.unzip open {}: {e}", src.display())))?;
     let mut zr = zip::ZipArchive::new(file)
@@ -237,6 +256,9 @@ fn extract_zip(src: &Path, dest: &Path, max_total: u64) -> Result<u64, StepError
     let mut count: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     for i in 0..zr.len() {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StepError::msg("archive.unzip cancelled"));
+        }
         let mut entry = zr
             .by_index(i)
             .map_err(|e| StepError::msg(format!("archive.unzip entry {i}: {e}")))?;
@@ -338,9 +360,12 @@ impl Action for UnzipAction {
         }
 
         let dp = dest_path.clone();
-        let count = tokio::task::spawn_blocking(move || extract_zip(&src_path, &dp, max_total))
-            .await
-            .map_err(|e| StepError::msg(format!("archive.unzip task: {e}")))??;
+        let cancel = ctx.cancel_token();
+        let count = tokio::task::spawn_blocking(move || {
+            extract_zip(&src_path, &dp, max_total, cancel.as_ref())
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("archive.unzip task: {e}")))??;
 
         Ok(ActionResult::from(serde_json::json!({
             "dest": dest,

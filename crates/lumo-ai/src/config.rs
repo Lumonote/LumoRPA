@@ -11,6 +11,8 @@
 //! base_url = "https://api.openai.com/v1"
 //! api_key_env = "OPENAI_API_KEY"
 //! default_model = "gpt-4o"
+//! vision_model = "gpt-4o"
+//! ocr_model = "gpt-4o"
 //!
 //! [[providers]]
 //! name = "deepseek"
@@ -26,6 +28,11 @@
 //! base_url = "http://localhost:11434/v1"
 //! api_key = "ollama"                    # inline (NOT recommended)
 //! default_model = "qwen2.5:7b"
+//!
+//! [[providers]]
+//! name = "local-ocr"
+//! kind = "local"
+//! ocr_model = "modelscope/ZhipuAI/GLM-OCR"
 //!
 //! [[providers]]
 //! name = "claude"
@@ -66,7 +73,9 @@ pub struct ProvidersConfig {
 pub struct ProviderProfile {
     /// Profile alias (e.g. "deepseek"). Used in CLI + model prefix routing.
     pub name: String,
-    /// Backend protocol family: "openai" | "anthropic".
+    /// Backend protocol family: "openai" | "anthropic" | "local".
+    /// `local` profiles do not participate in `ai.chat`; they carry local
+    /// OCR/vision model defaults such as `modelscope/ZhipuAI/GLM-OCR`.
     pub kind: String,
     /// For kind=openai: which wire API to use. Defaults to "chat".
     ///   * "chat"      → POST {base_url}/chat/completions  (classic)
@@ -83,6 +92,14 @@ pub struct ProviderProfile {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Optional default for image/vision grounding calls. Falls back to
+    /// `default_model` when unset.
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    /// Optional default for OCR calls. Falls back to `vision_model`, then
+    /// `default_model` when unset.
+    #[serde(default)]
+    pub ocr_model: Option<String>,
     /// Optional list of supported model ids (purely informational; the
     /// router does not enforce this).
     #[serde(default)]
@@ -175,6 +192,8 @@ impl ProvidersConfig {
                     api_key: None,
                     api_key_env: Some("OPENAI_API_KEY".into()),
                     default_model: Some("gpt-4o-mini".into()),
+                    vision_model: Some("gpt-4o".into()),
+                    ocr_model: Some("gpt-4o".into()),
                     models: vec!["gpt-4o".into(), "gpt-4o-mini".into(), "o1-mini".into()],
                     headers: Default::default(),
                     reasoning_effort: None,
@@ -188,6 +207,8 @@ impl ProvidersConfig {
                     api_key: None,
                     api_key_env: Some("ANTHROPIC_AUTH_TOKEN".into()),
                     default_model: Some("claude-opus-4-7".into()),
+                    vision_model: Some("claude-sonnet-4-6".into()),
+                    ocr_model: Some("claude-sonnet-4-6".into()),
                     models: vec![
                         "claude-opus-4-7".into(),
                         "claude-sonnet-4-6".into(),
@@ -209,10 +230,35 @@ impl ProvidersConfig {
                     api_key: None,
                     api_key_env: Some("DEEPSEEK_API_KEY".into()),
                     default_model: Some("deepseek-chat".into()),
+                    vision_model: None,
+                    ocr_model: None,
                     models: vec!["deepseek-chat".into(), "deepseek-reasoner".into()],
                     headers: Default::default(),
                     reasoning_effort: None,
                     notes: Some("DeepSeek (OpenAI-compatible chat/completions).".into()),
+                },
+                ProviderProfile {
+                    name: "local-ocr".into(),
+                    kind: "local".into(),
+                    wire_api: None,
+                    base_url: None,
+                    api_key: None,
+                    api_key_env: None,
+                    default_model: None,
+                    vision_model: None,
+                    ocr_model: Some("modelscope/ZhipuAI/GLM-OCR".into()),
+                    models: vec![
+                        "modelscope/PaddlePaddle/PaddleOCR-VL-1.6".into(),
+                        "modelscope/ZhipuAI/GLM-OCR".into(),
+                        "modelscope/PaddlePaddle/PaddleOCR-VL-1.5".into(),
+                        "modelscope/deepseek-ai/DeepSeek-OCR-2".into(),
+                    ],
+                    headers: Default::default(),
+                    reasoning_effort: None,
+                    notes: Some(
+                        "Local OCR profile. Download the selected model from the desktop Models page."
+                            .into(),
+                    ),
                 },
                 ProviderProfile {
                     name: "ollama".into(),
@@ -222,6 +268,8 @@ impl ProvidersConfig {
                     api_key: Some("ollama".into()),
                     api_key_env: None,
                     default_model: Some("qwen2.5:7b".into()),
+                    vision_model: None,
+                    ocr_model: None,
                     models: vec![],
                     headers: Default::default(),
                     reasoning_effort: None,
@@ -265,5 +313,19 @@ impl ProvidersConfig {
 
     pub fn active_profile(&self) -> Option<&ProviderProfile> {
         self.active.as_ref().and_then(|n| self.get(n))
+    }
+
+    pub fn active_vision_model(&self) -> Option<String> {
+        self.active_profile()
+            .and_then(|p| p.vision_model.clone().or_else(|| p.default_model.clone()))
+    }
+
+    pub fn active_ocr_model(&self) -> Option<String> {
+        self.active_profile().and_then(|p| {
+            p.ocr_model
+                .clone()
+                .or_else(|| p.vision_model.clone())
+                .or_else(|| p.default_model.clone())
+        })
     }
 }

@@ -20,6 +20,8 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(FilterAction);
     r.register(GroupByAction);
     r.register(JoinAction);
+    r.register(DedupAction);
+    r.register(SortMultiAction);
 }
 
 // ---- data.filter ----------------------------------------------------------
@@ -178,7 +180,7 @@ struct GroupByIn {
 }
 
 /// `by` accepts a single field name or a list of them.
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum ByFields {
     One(String),
@@ -521,4 +523,146 @@ fn merge_rows(left: &Value, right: &Value, right_key: &str, prefix: &str) -> Val
         }
     }
     Value::Object(obj)
+}
+
+// ---- data.dedup -----------------------------------------------------------
+
+pub struct DedupAction;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DedupIn {
+    items: Vec<Value>,
+    /// Field name(s) whose combined value identifies a duplicate. A single
+    /// string or a list; an empty list dedups on the whole row.
+    by: ByFields,
+    /// Keep the `first` (default) or `last` occurrence of each key.
+    #[serde(default)]
+    keep: KeepWhich,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum KeepWhich {
+    #[default]
+    First,
+    Last,
+}
+
+#[async_trait]
+impl Action for DedupAction {
+    fn id(&self) -> &'static str {
+        "data.dedup"
+    }
+    fn summary(&self) -> &'static str {
+        "Drop duplicate objects keyed by one or more fields (keep first/last)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DedupIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DedupIn { items, by, keep } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("data.dedup invalid: {e}")))?;
+        let by = by.into_vec();
+
+        // `key_of` mirrors data.group_by / list.unique: the JSON form of the
+        // selected field values (or the whole row when `by` is empty).
+        let key_of = |row: &Value| -> String {
+            if by.is_empty() {
+                row.to_string()
+            } else {
+                let vals: Vec<Value> = by
+                    .iter()
+                    .map(|f| row.get(f).cloned().unwrap_or(Value::Null))
+                    .collect();
+                Value::Array(vals).to_string()
+            }
+        };
+
+        let mut order: Vec<String> = Vec::new();
+        let mut seen: HashMap<String, Value> = HashMap::new();
+        for row in items {
+            let k = key_of(&row);
+            match seen.get_mut(&k) {
+                Some(existing) => {
+                    if matches!(keep, KeepWhich::Last) {
+                        *existing = row;
+                    }
+                }
+                None => {
+                    order.push(k.clone());
+                    seen.insert(k, row);
+                }
+            }
+        }
+        let out: Vec<Value> = order.into_iter().map(|k| seen.remove(&k).unwrap()).collect();
+        Ok(ActionResult::from(Value::Array(out)))
+    }
+}
+
+// ---- data.sort_multi ------------------------------------------------------
+
+pub struct SortMultiAction;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SortMultiIn {
+    items: Vec<Value>,
+    /// Sort keys applied in order; earlier keys take precedence.
+    keys: Vec<SortKey>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SortKey {
+    field: String,
+    #[serde(default)]
+    order: SortOrder,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[async_trait]
+impl Action for SortMultiAction {
+    fn id(&self) -> &'static str {
+        "data.sort_multi"
+    }
+    fn summary(&self) -> &'static str {
+        "Stable multi-key sort of an array of objects with per-key asc/desc"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SortMultiIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let SortMultiIn { mut items, keys } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("data.sort_multi invalid: {e}")))?;
+        if keys.is_empty() {
+            return Err(StepError::msg("data.sort_multi requires at least one key"));
+        }
+        // `sort_by` is stable, so ties on all keys preserve input order — the
+        // documented contract. Numeric-aware ordering reuses `cmp_value`.
+        items.sort_by(|a, b| {
+            for k in &keys {
+                let av = a.get(&k.field).unwrap_or(&Value::Null);
+                let bv = b.get(&k.field).unwrap_or(&Value::Null);
+                let mut ord = cmp_value(av, bv);
+                if matches!(k.order, SortOrder::Desc) {
+                    ord = ord.reverse();
+                }
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            Ordering::Equal
+        });
+        Ok(ActionResult::from(Value::Array(items)))
+    }
 }

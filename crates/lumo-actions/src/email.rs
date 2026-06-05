@@ -16,7 +16,8 @@ use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, ResourceFactory, RunTeardown, StepCtx};
+use lumo_dsl::ResourceDecl;
 use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,9 +25,126 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::resource_store::ResourceStore;
+
 pub fn register(r: &mut ActionRegistry) {
     r.register(SendAction);
     r.register(FetchAction);
+    // T3: a `spec.resources.<name>` of kind `smtp` is one transport reused by
+    // every `email.send` that binds to it (so its connection pool persists across
+    // messages), reclaimed at run end. Unbound sends build a transport per call.
+    r.register_teardown(Arc::new(SmtpTeardown));
+    r.register_resource_factory(Arc::new(SmtpFactory));
+}
+
+// ─── T3: `smtp` resource — one transport per run, reused across sends ──────────
+//
+// A `spec.resources.<name>: {kind: smtp}` is one `AsyncSmtpTransport` built once
+// on the first `email.send` that binds to it (`Step.resource`), kept in
+// `SMTP_TRANSPORTS` keyed by `(run_id, name)`, reused by every later bound send —
+// so lettre's connection pool stays warm across messages — and dropped at run end
+// by [`SmtpTeardown`]. An unbound send builds a transport per call, as before.
+//
+// Unlike db/http, the connection identity (host/port/**credentials**) is NOT read
+// from the decl: credentials must stay vault-resolved, and the decl's config is
+// static YAML (never template-resolved). So the transport is built from the FIRST
+// bound send's inputs (vault-resolved like always); later bound sends reuse that
+// transport and their own host/port/credentials are ignored. The per-step network
+// gate on `host` still runs on every send (defense in depth).
+
+const SMTP_KIND: &str = "smtp";
+
+/// Transports opened for `smtp` resources, keyed `(run_id, resource name)`.
+/// `AsyncSmtpTransport` is `Send + Sync + Clone` (it shares a pool internally),
+/// so the cached `Arc` is sent straight to `send` without cloning.
+static SMTP_TRANSPORTS: ResourceStore<AsyncSmtpTransport<Tokio1Executor>> = ResourceStore::new();
+
+/// The `smtp` resource the send binds to, or `None` when it binds nothing (or
+/// binds a non-`smtp` / undeclared resource) — in which case it builds a
+/// transport per call, exactly as before.
+fn smtp_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == SMTP_KIND => Some(name),
+        _ => None,
+    }
+}
+
+/// Build an implicit-TLS (rustls) SMTP transport for `host:port` with `creds`.
+/// Shared by the bound (reused) and unbound (per-call) send paths.
+fn build_transport(
+    host: &str,
+    port: u16,
+    username: String,
+    password: String,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>, StepError> {
+    let creds = Credentials::new(username, password);
+    Ok(AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+        .map_err(|e| StepError::msg(format!("email.send tls setup: {e}")))?
+        .port(port)
+        .credentials(creds)
+        .build())
+}
+
+/// Build (once) and return the shared transport for an `smtp` resource at
+/// `(run_id, slot)`, reusing it on later sends. The first bound send's
+/// connection params establish it; later sends reuse it. Idempotent: on a
+/// concurrent open the first transport wins and the loser is dropped.
+async fn ensure_transport(
+    run_id: &str,
+    slot: &str,
+    host: &str,
+    port: u16,
+    username: String,
+    password: String,
+) -> Result<Arc<AsyncSmtpTransport<Tokio1Executor>>, StepError> {
+    if let Some(t) = SMTP_TRANSPORTS.get(run_id, slot) {
+        return Ok(t);
+    }
+    let t = build_transport(host, port, username, password)?;
+    Ok(SMTP_TRANSPORTS.get_or_put(run_id, slot, Arc::new(t)))
+}
+
+/// Drop every `smtp` transport opened for `run_id` (releasing its connection
+/// pool). Idempotent — a no-op when the run opened none. The end-of-run teardown
+/// body; also exposed for tests.
+#[doc(hidden)]
+pub fn close_run_transports(run_id: &str) {
+    let _ = SMTP_TRANSPORTS.take_run(run_id);
+}
+
+/// Whether any `smtp` resource transport is currently open for `run_id`. For tests.
+#[doc(hidden)]
+pub fn smtp_transport_open(run_id: &str) -> bool {
+    SMTP_TRANSPORTS.has_run(run_id)
+}
+
+/// End-of-run hook: drops every `smtp` transport for the run so cached SMTP
+/// connections don't linger past the flow.
+struct SmtpTeardown;
+
+#[async_trait]
+impl RunTeardown for SmtpTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_transports(run_id);
+    }
+}
+
+/// T3 resource factory for `smtp`. Like `http`, the transport is built **lazily**
+/// by the first bound send, not here — its credentials are vault-resolved step
+/// inputs, not part of the decl that `open` receives. So `open` only validates
+/// the declaration; the action opens-and-reuses via [`ensure_transport`].
+struct SmtpFactory;
+
+#[async_trait]
+impl ResourceFactory for SmtpFactory {
+    fn kind(&self) -> &str {
+        SMTP_KIND
+    }
+
+    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        Ok(())
+    }
 }
 
 // ─── email.send (SMTP) ─────────────────────────────────────────────────────────
@@ -88,7 +206,9 @@ impl Action for SendAction {
 
         // 1) 校验:至少一个收件人。空数组直接挡掉,不浪费连接。
         if to.is_empty() {
-            return Err(StepError::msg("email.send: `to` must have at least one recipient"));
+            return Err(StepError::msg(
+                "email.send: `to` must have at least one recipient",
+            ));
         }
 
         // 2) 解析信封地址(纯字符串解析,不触网)。地址非法立即报错。
@@ -128,18 +248,26 @@ impl Action for SendAction {
         ctx.ensure_network_url(&host)?;
 
         // 5) 发送:relay() 走隐式 TLS(rustls wrapper),端口可由调用方覆盖。
-        let creds = Credentials::new(username, password);
-        let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
-            .map_err(|e| StepError::msg(format!("email.send tls setup: {e}")))?
-            .port(port)
-            .credentials(creds)
-            .build();
-
-        let resp = mailer
-            .send(message)
-            .await
-            // 错误里只带 SMTP 层信息,不回显凭据。
-            .map_err(|e| StepError::msg(format!("email.send smtp: {e}")))?;
+        // T3:绑定了 `smtp` 资源时,复用本 run 的共享 transport(连接池跨多封信
+        // 保活)——首封建立、后续复用;未绑定则按原行为每封新建 transport。
+        let resp = match smtp_slot(ctx) {
+            Some(name) => {
+                let mailer =
+                    ensure_transport(ctx.run_id(), &name, &host, port, username, password).await?;
+                mailer
+                    .send(message)
+                    .await
+                    // 错误里只带 SMTP 层信息,不回显凭据。
+                    .map_err(|e| StepError::msg(format!("email.send smtp: {e}")))?
+            }
+            None => {
+                let mailer = build_transport(&host, port, username, password)?;
+                mailer
+                    .send(message)
+                    .await
+                    .map_err(|e| StepError::msg(format!("email.send smtp: {e}")))?
+            }
+        };
 
         let code = format!("{}", resp.code());
         let server_message: Vec<String> = resp.message().map(|s| s.to_string()).collect();
@@ -378,5 +506,77 @@ fn address_to_string(addr: &async_imap::imap_proto::types::Address<'_>) -> Strin
     match name {
         Some(n) if !n.is_empty() && !email.is_empty() => format!("{n} <{email}>"),
         _ => email,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn decl(yaml: &str) -> ResourceDecl {
+        serde_yaml::from_str(yaml).expect("valid ResourceDecl yaml")
+    }
+
+    fn ctx_with(resources: &[(&str, &str)], current: Option<&str>) -> StepCtx {
+        let map: BTreeMap<String, ResourceDecl> = resources
+            .iter()
+            .map(|(name, yaml)| (name.to_string(), decl(yaml)))
+            .collect();
+        let ctx = StepCtx::new(
+            "run-smtp".into(),
+            "flow-smtp".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            lumo_dsl::Capabilities::default(),
+            Vec::new(),
+        )
+        .with_resources(map);
+        ctx.set_current_resource(current);
+        ctx
+    }
+
+    #[test]
+    fn smtp_slot_selects_only_smtp_kind_bindings() {
+        let resources = &[("mail", "kind: smtp\n"), ("db", "kind: sqlite\npath: /tmp/x\n")];
+        assert_eq!(
+            smtp_slot(&ctx_with(resources, Some("mail"))).as_deref(),
+            Some("mail")
+        );
+        // Unbound / non-smtp / undeclared ⇒ None ⇒ per-call transport (back-compat).
+        assert_eq!(smtp_slot(&ctx_with(resources, None)), None);
+        assert_eq!(smtp_slot(&ctx_with(resources, Some("db"))), None);
+        assert_eq!(smtp_slot(&ctx_with(resources, Some("ghost"))), None);
+    }
+
+    #[test]
+    fn smtp_factory_kind_matches() {
+        assert_eq!(SmtpFactory.kind(), SMTP_KIND);
+        assert_eq!(SMTP_KIND, "smtp");
+    }
+
+    // `relay(host).build()` is lazy (no socket until `send`), so the reuse +
+    // teardown contract is testable without an SMTP server.
+    #[tokio::test]
+    async fn smtp_resource_opens_one_transport_then_reuses_it() {
+        let run = "smtp-reuse-unit";
+        assert!(!smtp_transport_open(run));
+        let t1 = ensure_transport(run, "mail", "smtp.example.com", 465, "u".into(), "p".into())
+            .await
+            .unwrap();
+        // The first bound send establishes the transport; a later send reuses it
+        // (its own host/credentials are ignored — same handle returned).
+        let t2 = ensure_transport(run, "mail", "other.example.com", 25, "x".into(), "y".into())
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&t1, &t2),
+            "second ensure reuses the cached transport"
+        );
+        assert!(smtp_transport_open(run));
+        close_run_transports(run);
+        assert!(!smtp_transport_open(run));
+        close_run_transports(run); // no-op, must not panic
     }
 }

@@ -1,4 +1,5 @@
 use crate::action::ActionRef;
+use crate::resource::ResourceFactory;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -19,6 +20,10 @@ pub trait RunTeardown: Send + Sync + 'static {
 pub struct ActionRegistry {
     inner: Arc<DashMap<String, ActionRef>>,
     teardowns: Arc<Mutex<Vec<Arc<dyn RunTeardown>>>>,
+    /// T3: resource factories keyed by [`ResourceFactory::kind`]. The VM/actions
+    /// look one up to lazily open a declared `spec.resources` entry of that kind
+    /// on first reference (see [`Self::register_resource_factory`]).
+    factories: Arc<DashMap<String, Arc<dyn ResourceFactory>>>,
 }
 
 impl ActionRegistry {
@@ -35,6 +40,20 @@ impl ActionRegistry {
     /// every registered hook with the run id once the flow finishes.
     pub fn register_teardown(&mut self, teardown: Arc<dyn RunTeardown>) {
         self.teardowns.lock().push(teardown);
+    }
+
+    /// T3: register a [`ResourceFactory`] under its [`kind`](ResourceFactory::kind).
+    /// The VM/actions look it up to lazily open a declared `spec.resources` entry
+    /// of that kind on first reference. A later registration for the same kind
+    /// replaces the earlier one (mirrors [`register`](Self::register) for actions).
+    pub fn register_resource_factory(&mut self, factory: Arc<dyn ResourceFactory>) {
+        let kind = factory.kind().to_string();
+        self.factories.insert(kind, factory);
+    }
+
+    /// T3: the resource factory registered for `kind`, if any.
+    pub fn resource_factory(&self, kind: &str) -> Option<Arc<dyn ResourceFactory>> {
+        self.factories.get(kind).map(|r| r.value().clone())
     }
 
     pub fn get(&self, id: &str) -> Option<ActionRef> {

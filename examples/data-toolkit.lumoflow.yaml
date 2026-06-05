@@ -1,0 +1,86 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: data-toolkit
+  version: 0.1.0
+  name: 数据处理指令集示例
+  description: 演示 JSON、列表、表格聚合、字符串格式化和哈希等本地纯数据动作。
+  tags: [example, data, instruction-set]
+
+spec:
+  inputs:
+    - name: orders_json
+      type: string
+      default: |
+        [
+          {"id": 1, "dept": "sales", "amount": 12.5, "owner": "Alice"},
+          {"id": 2, "dept": "eng", "amount": 42, "owner": "Bob"},
+          {"id": 3, "dept": "sales", "amount": 31, "owner": "Carol"}
+        ]
+
+  steps:
+    - id: parse_orders
+      action: data.json_parse
+      bind: orders
+      with:
+        text: "{{ inputs.orders_json }}"
+
+    - id: sales_only
+      action: data.filter
+      bind: sales_orders
+      with:
+        items: "{{ vars.orders }}"
+        where:
+          - { field: dept, op: eq, value: sales }
+
+    - id: owners
+      action: list.pluck
+      bind: owner_names
+      with:
+        items: "{{ vars.sales_orders }}"
+        key: owner
+
+    - id: sorted_owners
+      action: list.sort
+      bind: owner_names_sorted
+      with:
+        items: "{{ vars.owner_names }}"
+
+    - id: sales_summary
+      action: data.group_by
+      bind: summary
+      with:
+        items: "{{ vars.sales_orders }}"
+        by: dept
+        aggregations:
+          count: { op: count }
+          total_amount: { op: sum, field: amount }
+
+    - id: summary_json
+      action: data.json_format
+      bind: summary_text
+      with:
+        value:
+          owners: "{{ vars.owner_names_sorted }}"
+          groups: "{{ vars.summary }}"
+        pretty: false
+
+    - id: summary_hash
+      action: hash.sha256
+      bind: digest
+      with:
+        text: "{{ vars.summary_text }}"
+
+    - id: message
+      action: string.format
+      bind: report_line
+      with:
+        template: "sales owners={owners}; sha256={digest}"
+        values:
+          owners: "{{ vars.owner_names_sorted }}"
+          digest: "{{ vars.digest }}"
+
+    - id: report
+      action: control.log
+      with:
+        message: "{{ vars.report_line }}"

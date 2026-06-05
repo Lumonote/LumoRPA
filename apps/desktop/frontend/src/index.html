@@ -28,13 +28,13 @@
         </nav>
 
         <div class="topbar-right">
-          <div class="alpha-slider" title="整窗透明度（实时驱动 Tauri 窗口背景 alpha 0~255）">
-            <span>窗口</span>
+          <div class="alpha-slider" title="窗口底色不透明度：0 = 透明显示真实桌面，100 = 不透明">
+            <span>底色</span>
             <input id="windowAlphaTop" type="range" min="0" max="100" value="0" />
           </div>
-          <div class="alpha-slider" title="面板透明度（CSS 层）">
+          <div class="alpha-slider" title="界面面板不透明度：越低越能看到桌面内容">
             <span>面板</span>
-            <input id="panelAlphaTop" type="range" min="8" max="100" value="18" />
+            <input id="panelAlphaTop" type="range" min="8" max="100" value="14" />
           </div>
           <button class="icon" id="themeToggleBtn" title="切换深/浅主题">🌓</button>
         </div>
@@ -101,6 +101,7 @@
           <div class="editor-toolbar">
             <button id="loadFlowBtn">📂 载入</button>
             <button id="validateBtn">✓ 校验</button>
+            <button id="lintBtn" title="Flow Lint (D-19)：结构 / 权限 / 变量引用检查，结果以 toast 汇总">🔍 Lint</button>
             <button class="primary" id="runBtn">▶ 运行</button>
             <button id="runStepBtn" title="运行当前选中节点">▷ 单步</button>
             <button id="debugBtn" title="断点调试：在设了断点的节点执行前暂停，可单步 / 继续 / 停止 (F-20)">🐞 调试</button>
@@ -155,6 +156,22 @@
               </div>
               <div class="el-actions">
                 <input id="elSearch" type="search" placeholder="搜索元素 / 来源页面" />
+                <select id="elKindFilter" title="按元素范围筛选">
+                  <option value="all">全部范围</option>
+                  <option value="web">网页元素</option>
+                  <option value="desktop">桌面元素</option>
+                  <option value="cloud">云元素</option>
+                  <option value="local">本地元素</option>
+                  <option value="similar">相似元素</option>
+                </select>
+                <select id="elUsageFilter" title="按使用和同步状态筛选">
+                  <option value="all">全部状态</option>
+                  <option value="used">已使用</option>
+                  <option value="unused">未使用</option>
+                  <option value="dirty">待同步</option>
+                  <option value="readonly">只读</option>
+                </select>
+                <button id="elSyncBtn" class="ghost" title="同步云元素组状态">同步</button>
                 <button id="elCaptureBtn" class="primary" title="跳到录制器抓取新元素">+ 捕获</button>
                 <button id="elClearBtn" class="ghost" title="清空当前分类">清空</button>
               </div>
@@ -293,7 +310,7 @@
           <div class="panel-head">
             <h2>模型源 · BYOK · cc-switch 兼容</h2>
             <div style="display: flex; gap: 6px">
-              <button id="modelsInitBtn">⚡ 重置为默认 (openai/anthropic/deepseek/ollama)</button>
+              <button id="modelsInitBtn">⚡ 重置为默认模型源</button>
               <button class="primary" id="newProviderBtn">+ 新增</button>
             </div>
           </div>
@@ -339,23 +356,23 @@
               <section class="panel">
                 <div class="panel-head"><h2>透明度</h2></div>
                 <div class="panel-body flush">
-                  <div class="slider-field" title="窗口背景 alpha — 0 = 完全透过，看到桌面壁纸 / 100 = 不透明">
-                    <span>整窗透明度</span>
+                  <div class="slider-field" title="窗口底色不透明度 — 0 = 完全透过，看到真实桌面 / 100 = 不透明">
+                    <span>窗口底色</span>
                     <input id="windowAlphaSlider" type="range" min="0" max="100" value="0" />
                     <strong id="windowAlphaValue">0%</strong>
                   </div>
-                  <div class="slider-field" title="WebView 内面板叠加层 alpha">
-                    <span>面板透明度</span>
-                    <input id="panelAlphaSlider" type="range" min="8" max="100" value="18" />
-                    <strong id="panelAlphaValue">18%</strong>
+                  <div class="slider-field" title="界面面板不透明度 — 越低越能看到桌面上正在操作的内容">
+                    <span>界面面板</span>
+                    <input id="panelAlphaSlider" type="range" min="8" max="100" value="14" />
+                    <strong id="panelAlphaValue">14%</strong>
                   </div>
                   <div class="preset-row">
-                    <button data-preset="glass" class="is-active">🪟 玻璃</button>
-                    <button data-preset="frost">❄️ 磨砂</button>
+                    <button data-preset="glass" class="is-active">透视操作</button>
+                    <button data-preset="frost">半透明</button>
                     <button data-preset="solid">⬜ 实心</button>
-                    <button data-preset="invisible">👻 极简</button>
+                    <button data-preset="invisible">极简透视</button>
                   </div>
-                  <div class="note" style="margin: 4px 14px 14px">两个滑块互不影响：第一个直接驱动 Tauri 窗口背景 alpha（0~255 全范围），第二个驱动 CSS 面板叠加层。预设按钮联动两条滑块。</div>
+                  <div class="note" style="margin: 4px 14px 14px">两个滑块互不影响：窗口底色直接驱动 Tauri 透明背景；界面面板控制首页、工具栏和卡片自身的不透明度，用于边看桌面边编排自动化。</div>
                 </div>
               </section>
 

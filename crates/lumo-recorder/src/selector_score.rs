@@ -142,10 +142,7 @@ fn extract_classes(selector: &str) -> Vec<String> {
     for token in flat.split_whitespace() {
         // A compound token like `li.card.active:nth-of-type(2)`. Strip any
         // pseudo / attribute / id tail before splitting on `.`.
-        let head = token
-            .split([':', '[', '#'])
-            .next()
-            .unwrap_or(token);
+        let head = token.split([':', '[', '#']).next().unwrap_or(token);
         let mut parts = head.split('.');
         // First part is the (optional) tag name — skip it.
         let _tag = parts.next();
@@ -210,15 +207,16 @@ fn is_utility_class(class: &str) -> bool {
     let numericish = last
         .split('/')
         .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
-    let size_kw = matches!(last, "xs" | "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "full" | "auto");
+    let size_kw = matches!(
+        last,
+        "xs" | "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "full" | "auto"
+    );
     if !(numericish || size_kw) {
         return false;
     }
     // First token is a short lowercase abbreviation (`mt`, `px`, `w`, `gap`).
     let first = parts[0];
-    !first.is_empty()
-        && first.len() <= 5
-        && first.chars().all(|c| c.is_ascii_lowercase())
+    !first.is_empty() && first.len() <= 5 && first.chars().all(|c| c.is_ascii_lowercase())
 }
 
 /// Does `s` look like a generated hash tail — mixed alnum with digits, or a

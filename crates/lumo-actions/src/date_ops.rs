@@ -2,7 +2,7 @@
 //! / ISO-8601 strings on the wire so flows stay JSON-friendly.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
@@ -17,6 +17,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(AddAction);
     r.register(DiffAction);
     r.register(WeekdayAction);
+    r.register(WorkdayAddAction);
 }
 
 fn parse_any(value: &str) -> Result<DateTime<Utc>, StepError> {
@@ -256,5 +257,44 @@ impl Action for WeekdayAction {
         Ok(ActionResult::from(Value::from(
             dt.weekday().number_from_monday() as u64,
         )))
+    }
+}
+
+pub struct WorkdayAddAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WorkdayAddIn {
+    value: String,
+    /// Number of business days to add (may be negative to count backwards).
+    days: i64,
+}
+#[async_trait]
+impl Action for WorkdayAddAction {
+    fn id(&self) -> &'static str {
+        "date.workday_add"
+    }
+    fn summary(&self) -> &'static str {
+        "Add N business days to a date, skipping Saturdays and Sundays"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<WorkdayAddIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let WorkdayAddIn { value, days } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("date.workday_add invalid: {e}")))?;
+        let mut dt = parse_any(&value)?;
+        // Step one calendar day at a time toward the target, counting only
+        // weekdays. The anchor day itself is never counted; the result lands on
+        // a weekday. `days == 0` returns the input unchanged.
+        let step = if days >= 0 { 1 } else { -1 };
+        let mut remaining = days.abs();
+        while remaining > 0 {
+            dt += Duration::days(step);
+            if !matches!(dt.weekday(), Weekday::Sat | Weekday::Sun) {
+                remaining -= 1;
+            }
+        }
+        Ok(ActionResult::from(Value::String(dt.to_rfc3339())))
     }
 }

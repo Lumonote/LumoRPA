@@ -1,0 +1,88 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: order-export
+  version: 0.1.0
+  name: 订单导出(资源生命周期示例)
+  description: |
+    演示 T3「资源声明一次、全流程复用、运行结束统一回收」("启动一次")。
+
+    本例声明两个资源,每个都被多个步骤复用:
+      • browser(chromium.cdp + profile)——持久化用户目录:登录态 / cookie /
+        localStorage 跨运行保留,并应用最小化反检测基线(去除 navigator.webdriver
+        等),见 browser_profiles。所有 browser.* 步骤 `resource: browser` 共享同一会话。
+      • orders(sqlite)——同一数据库连接被「建表 / 写入 / 统计」多个步骤复用;
+        首个绑定步骤打开,其后复用,运行结束(成功 / 失败 / 取消)由 VM 统一关闭。
+
+    不绑定 `resource:` 的步骤(如 summary)保持原有逐次行为,完全向后兼容。
+  tags: [example, resources, browser, db]
+
+spec:
+  inputs:
+    - { name: orders_url, type: string, default: "https://example.com/orders" }
+
+  capabilities:
+    # browser 打开订单页(orders_url 默认主机)。
+    network: ["example.com"]
+    # orders 资源的 sqlite 文件落在 ./output 下(资源 path 是静态 YAML,不做模板渲染)。
+    fs.read: ["./output/**"]
+    fs.write: ["./output/**"]
+
+  resources:
+    # 持久化、带反检测基线的浏览器:profile 名映射到稳定的 Chrome user-data-dir
+    # ($LUMO_HOME/browser-profiles/stealth-default),故登录态跨运行保留。
+    browser:
+      kind: chromium.cdp
+      profile: stealth-default
+      headless: true
+    # 一个 SQLite 连接,被下面所有 `resource: orders` 的 db.* 步骤复用。
+    # 注意:资源 config 是静态 YAML,不做模板渲染(密钥务必走 vault 步骤输入,
+    # 不要写进资源声明)——所以这里用字面路径。
+    orders:
+      kind: sqlite
+      path: "./output/orders.db"
+
+  steps:
+    # ── browser 资源:三步共享同一持久会话 ──────────────────────────────
+    - id: open-orders
+      action: browser.open
+      resource: browser
+      with: { url: "{{ inputs.orders_url }}" }
+
+    - id: extract-title
+      action: browser.extract
+      resource: browser
+      with: { selector: "h1" }
+      bind: page_title
+
+    # ── orders 资源:建表 / 写入 / 统计共享同一连接(省略 `db:` 字段) ──────
+    - id: init-schema
+      action: db.sqlite_exec
+      resource: orders
+      with:
+        sql: "CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, buyer TEXT, amount REAL)"
+
+    - id: insert-order
+      action: db.sqlite_exec
+      resource: orders
+      with:
+        sql: "INSERT OR REPLACE INTO orders (id, buyer, amount) VALUES (?, ?, ?)"
+        args: ["A-1001", "{{ steps.extract-title.result }}", 59.9]
+
+    - id: count-orders
+      action: db.sqlite_query
+      resource: orders
+      bind: order_count
+      with:
+        sql: "SELECT COUNT(*) AS n FROM orders"
+
+    # ── browser 会话此处关闭;orders 连接由运行结束的 teardown 统一回收 ──────
+    - id: close-browser
+      action: browser.close
+      resource: browser
+      with: {}
+
+    # ── 未绑定资源的普通步骤(向后兼容,逐次执行) ──────────────────────
+    - id: summary
+      action: control.log
+      with: { message: "exported orders: {{ steps.count-orders.result }} (title: {{ vars.page_title }})" }
