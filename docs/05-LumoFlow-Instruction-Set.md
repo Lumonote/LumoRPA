@@ -90,8 +90,8 @@ Common gates:
 
 | Capability | Used by |
 | --- | --- |
-| `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`. |
-| `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`. |
+| `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
+| `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
 | `network` | HTTP, browser, email, notification, FTP/S3, MCP network targets. |
 | `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
 | `mcp` | MCP tool calls. |
@@ -216,7 +216,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
 | Email | `email.send`, `email.fetch` |
-| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula` |
+| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation` |
 | File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append` |
 | Flow | `flow.call` |
 | FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |

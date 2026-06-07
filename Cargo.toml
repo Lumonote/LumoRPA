@@ -82,6 +82,7 @@ tower-http      = { version = "0.6", default-features = false, features = ["trac
 chromiumoxide   = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 calamine        = "0.26"
 rust_xlsxwriter = "0.79"
+umya-spreadsheet = { version = "2.3.3", default-features = false }
 
 # tests
 pretty_assertions = "1"
