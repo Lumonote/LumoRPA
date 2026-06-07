@@ -32,10 +32,13 @@ use std::sync::Arc;
 /// resource (preserves each family's prior per-call / per-run behavior).
 pub const DEFAULT_SLOT: &str = "";
 
+/// Per-run → per-slot live-handle table: `run_id → (slot → handle)`.
+type SlotTable<H> = HashMap<String, HashMap<String, Arc<H>>>;
+
 /// A `static` store of live handles of type `H`, keyed by `(run_id, slot)`.
 /// Construct in a `static` via the `const` [`ResourceStore::new`].
 pub struct ResourceStore<H> {
-    inner: once_cell::sync::OnceCell<Mutex<HashMap<String, HashMap<String, Arc<H>>>>>,
+    inner: once_cell::sync::OnceCell<Mutex<SlotTable<H>>>,
 }
 
 impl<H> ResourceStore<H> {
@@ -45,7 +48,7 @@ impl<H> ResourceStore<H> {
         }
     }
 
-    fn map(&self) -> &Mutex<HashMap<String, HashMap<String, Arc<H>>>> {
+    fn map(&self) -> &Mutex<SlotTable<H>> {
         self.inner.get_or_init(|| Mutex::new(HashMap::new()))
     }
 

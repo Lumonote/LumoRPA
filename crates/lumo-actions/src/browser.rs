@@ -2791,7 +2791,7 @@ mod tests {
         // Removing the last slot drops the whole run bucket.
         assert_eq!(take_slot(&mut map, "run", "b"), Some(2));
         assert!(
-            map.get("run").is_none(),
+            !map.contains_key("run"),
             "empty run bucket must be removed so session_exists/teardown stay accurate"
         );
         // Unknown run / slot are clean Nones (idempotent close).
@@ -2807,8 +2807,8 @@ mod tests {
         put_slot(&mut map, "other", "a", 9);
         let drained = take_run(&mut map, "run").expect("run present");
         assert_eq!(drained.len(), 2, "end-of-run teardown reaps every slot");
-        assert!(map.get("run").is_none());
-        assert!(map.get("other").is_some(), "a different run is untouched");
+        assert!(!map.contains_key("run"));
+        assert!(map.contains_key("other"), "a different run is untouched");
         assert!(
             take_run(&mut map, "run").is_none(),
             "second drain of the same run is a clean None"
