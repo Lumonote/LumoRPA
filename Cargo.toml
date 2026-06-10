@@ -57,6 +57,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # storage
 rusqlite        = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+# T3 db 资源:PostgreSQL / MySQL。sqlx 0.8.6 锁定(0.9 起 MSRV 升到 1.94 > 本仓
+# 1.83)。仅 rustls(ring 经 tls-rustls)——不引 native-tls/openssl/任何 C-TLS,
+# 满足 aarch64 信创交叉编译(与 reqwest/lettre 同一套 rustls 范式)。运行期 SQL
+# 走 query/query_as 字符串(非 query! 宏),故构建期无需 DATABASE_URL。
+# uuid/bigdecimal:行→JSON 转换需显式解码 UUID/NUMERIC/DECIMAL 列(否则静默 null);
+# bigdecimal 纯 Rust 任意精度,金额列不丢精度。
+sqlx            = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "json", "chrono", "uuid", "bigdecimal"] }
 
 # common
 chrono          = { version = "0.4", features = ["serde"] }

@@ -18,6 +18,8 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(RequestAction);
     r.register(DownloadAction);
     r.register(UploadAction);
+    r.register(OAuth2TokenAction);
+    r.register(PaginateAction);
     // T3: a `spec.resources.<name>` of kind `http` is one gated client reused by
     // every step that binds to it (so the connection pool / keep-alive persists),
     // reclaimed at run end. Unbound steps build a fresh client per call (back-compat).
@@ -214,6 +216,18 @@ enum Auth {
     /// `Authorization: Basic base64(user:pass)`.
     Basic { user: String, pass: String },
 }
+
+impl Auth {
+    /// Apply this scheme to a request builder as an `Authorization` header.
+    /// Shared by `http.request` and `http.paginate` so both treat `auth`
+    /// identically (and stays exhaustive when new variants land).
+    fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            Auth::Bearer { token } => req.bearer_auth(token),
+            Auth::Basic { user, pass } => req.basic_auth(user, Some(pass)),
+        }
+    }
+}
 fn default_method() -> String {
     "GET".into()
 }
@@ -262,10 +276,8 @@ impl Action for RequestAction {
             .query(&query);
 
         // Auth first, so an explicit `headers.Authorization` (if any) still wins.
-        match auth {
-            Some(Auth::Bearer { token }) => req = req.bearer_auth(token),
-            Some(Auth::Basic { user, pass }) => req = req.basic_auth(user, Some(pass)),
-            None => {}
+        if let Some(auth) = &auth {
+            req = auth.apply(req);
         }
 
         for (k, v) in &headers {
@@ -601,6 +613,442 @@ impl Action for UploadAction {
     }
 }
 
+// ─── http.oauth2_token ─────────────────────────────────────────────────────────
+
+pub struct OAuth2TokenAction;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OAuth2TokenIn {
+    /// Token endpoint that issues the access token (the OAuth2 token URL).
+    token_url: String,
+    /// OAuth2 client id.
+    client_id: String,
+    /// OAuth2 client secret (arrives pre-resolved as a plain string).
+    client_secret: String,
+    /// Optional space-delimited scope string.
+    #[serde(default)]
+    scope: Option<String>,
+    /// Optional `audience` parameter (some providers, e.g. Auth0, require it).
+    #[serde(default)]
+    audience: Option<String>,
+    /// Where to put the client credentials: `basic` (default) sends them in an
+    /// `Authorization: Basic` header; `body` puts them in the form body.
+    #[serde(default)]
+    client_auth: ClientAuth,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_max_bytes")]
+    max_bytes: u64,
+}
+
+/// How `http.oauth2_token` presents the client credentials. An enum (not a free
+/// `String`) so the derived schema keeps the `["basic","body"]` constraint and
+/// the dispatch stays exhaustive.
+#[derive(Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+enum ClientAuth {
+    /// Credentials in the `Authorization: Basic` header (the spec default).
+    #[default]
+    Basic,
+    /// Credentials in the `application/x-www-form-urlencoded` body.
+    Body,
+}
+
+#[async_trait]
+impl Action for OAuth2TokenAction {
+    fn id(&self) -> &'static str {
+        "http.oauth2_token"
+    }
+    fn summary(&self) -> &'static str {
+        "Fetch an OAuth2 access token via the client-credentials grant"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<OAuth2TokenIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let OAuth2TokenIn {
+            token_url,
+            client_id,
+            client_secret,
+            scope,
+            audience,
+            client_auth,
+            timeout_ms,
+            max_bytes,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("http.oauth2_token input invalid: {e}")))?;
+        ctx.ensure_network_url(&token_url)?;
+
+        let client = client_for(ctx, timeout_ms).await?;
+
+        // Build the form body: grant_type is fixed; scope/audience are optional.
+        // For `client_auth: body` the credentials join the form; for `basic`
+        // (default) they ride an Authorization: Basic header instead.
+        let mut form: Vec<(&str, &str)> = vec![("grant_type", "client_credentials")];
+        if let Some(scope) = &scope {
+            form.push(("scope", scope));
+        }
+        if let Some(audience) = &audience {
+            form.push(("audience", audience));
+        }
+        let mut req = client.post(&token_url);
+        match client_auth {
+            ClientAuth::Basic => {
+                req = req.basic_auth(&client_id, Some(&client_secret));
+            }
+            ClientAuth::Body => {
+                form.push(("client_id", &client_id));
+                form.push(("client_secret", &client_secret));
+            }
+        }
+        // `.form(..)` sets `Content-Type: application/x-www-form-urlencoded`.
+        let req = req.form(&form);
+
+        let resp = req.send().await.map_err(|e| {
+            if e.is_redirect() {
+                StepError::msg(
+                    "http.oauth2_token: blocked redirect to ungranted host (network capability)",
+                )
+            } else {
+                StepError::msg(format!("http.oauth2_token send: {}", e.without_url()))
+            }
+        })?;
+        let status = resp.status();
+        if let Some(len) = resp.content_length() {
+            if len > max_bytes {
+                return Err(StepError::msg(format!(
+                    "http.oauth2_token: response Content-Length {len} exceeds max_bytes {max_bytes}"
+                )));
+            }
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| StepError::msg(format!("http.oauth2_token body: {}", e.without_url())))?;
+        if text.len() as u64 > max_bytes {
+            return Err(StepError::msg(format!(
+                "http.oauth2_token: response body {} bytes exceeds max_bytes {max_bytes}",
+                text.len()
+            )));
+        }
+        if !status.is_success() {
+            return Err(StepError::msg(format!(
+                "http.oauth2_token: token endpoint returned {} ({})",
+                status.as_u16(),
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+        let raw: Value = serde_json::from_str(&text).map_err(|e| {
+            StepError::msg(format!("http.oauth2_token: token response is not JSON: {e}"))
+        })?;
+        let access_token = raw.get("access_token").and_then(|v| v.as_str());
+        let access_token = access_token.ok_or_else(|| {
+            StepError::msg("http.oauth2_token: token response missing `access_token`")
+        })?;
+
+        // 输出只留白名单字段,不带 `raw`:token 响应可能附带 refresh_token /
+        // id_token 等更长寿命的凭据,而步骤输出会经 record_step_output 持久化
+        // 进运行历史库。expires_in 兼容数字与字符串两种 provider 习惯。
+        Ok(ActionResult::from(serde_json::json!({
+            "access_token": access_token,
+            "token_type": raw.get("token_type").and_then(|v| v.as_str()),
+            "expires_in": raw.get("expires_in").and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            }),
+            "scope": raw.get("scope").and_then(|v| v.as_str()),
+        })))
+    }
+}
+
+// ─── http.paginate ─────────────────────────────────────────────────────────────
+
+pub struct PaginateAction;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PaginateIn {
+    /// First page URL.
+    url: String,
+    #[serde(default = "default_method")]
+    method: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    query: HashMap<String, String>,
+    /// Optional HTTP authentication, applied to every page request (same shape
+    /// as `http.request`).
+    #[serde(default)]
+    auth: Option<Auth>,
+    /// JSON Pointer (RFC 6901, e.g. `/data/items`) to the array of items in each
+    /// page body. Omit to treat the whole body as the items array.
+    #[serde(default)]
+    items_path: Option<String>,
+    /// How to advance to the next page.
+    pagination: Pagination,
+    /// Hard cap on pages fetched. Hitting it sets `truncated: true` (no silent
+    /// truncation).
+    #[serde(default = "default_max_pages")]
+    max_pages: u32,
+    /// Per-page response body size cap.
+    #[serde(default = "default_max_bytes")]
+    max_bytes: u64,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+/// `http.paginate` next-page strategy. A tagged enum so the derived schema keeps
+/// the `style: ["next_url","page_number"]` constraint and the dispatch is
+/// exhaustive. (cursor-token style is a future addition.)
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "style", rename_all = "snake_case", deny_unknown_fields)]
+enum Pagination {
+    /// Follow a "next page URL" found in each response — either a JSON Pointer
+    /// into the body (`next_path`) and/or the `Link: <…>; rel="next"` header.
+    /// Stops when neither yields a URL.
+    NextUrl {
+        /// JSON Pointer to a string "next URL" field in the body (optional if
+        /// you rely on the `Link` header).
+        #[serde(default)]
+        next_path: Option<String>,
+        /// Also honor the `Link: rel="next"` header (default true).
+        #[serde(default = "default_true")]
+        use_link_header: bool,
+    },
+    /// Increment a `page` query param starting at `start` until a page yields no
+    /// items (or `max_pages` is hit).
+    PageNumber {
+        /// Query parameter name to carry the page number (default `page`).
+        #[serde(default = "default_page_param")]
+        param: String,
+        /// First page number (default 1).
+        #[serde(default = "default_page_start")]
+        start: u32,
+    },
+}
+
+fn default_max_pages() -> u32 {
+    50
+}
+fn default_true() -> bool {
+    true
+}
+fn default_page_param() -> String {
+    "page".into()
+}
+fn default_page_start() -> u32 {
+    1
+}
+
+/// Pull the items array out of one page body via `items_path` (a JSON Pointer),
+/// or the whole body when no path is given. A missing pointer / non-array yields
+/// an empty slice so a page with no items simply contributes nothing.
+fn page_items(body: &Value, items_path: &Option<String>) -> Vec<Value> {
+    let node = match items_path {
+        Some(ptr) => body.pointer(ptr),
+        None => Some(body),
+    };
+    match node {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Extract the `rel="next"` target from an RFC 8288 `Link` header value, e.g.
+/// `<https://api/x?page=2>; rel="next", <…>; rel="last"`.
+fn link_header_next(link: &str) -> Option<String> {
+    // 手扫而非 split(','):URL 里可以合法出现逗号,只认 `<…>` 之外的逗号为段界;
+    // rel 按参数精确比对(值可以是引号包裹的空格分隔列表),`rel=next-archive`
+    // 这类前缀串不会误中。
+    let mut rest = link;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let end = after.find('>')?;
+        let url = &after[..end];
+        let tail = &after[end + 1..];
+        let seg_end = tail.find(',').unwrap_or(tail.len());
+        let is_next = tail[..seg_end].split(';').any(|p| {
+            let p = p.trim().to_ascii_lowercase();
+            p.strip_prefix("rel=")
+                .map(|v| v.trim_matches('"').split_whitespace().any(|w| w == "next"))
+                .unwrap_or(false)
+        });
+        if is_next {
+            return Some(url.to_string());
+        }
+        rest = tail[seg_end..].strip_prefix(',').unwrap_or(&tail[seg_end..]);
+    }
+    None
+}
+
+#[async_trait]
+impl Action for PaginateAction {
+    fn id(&self) -> &'static str {
+        "http.paginate"
+    }
+    fn summary(&self) -> &'static str {
+        "Fetch and aggregate items across paginated HTTP responses"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<PaginateIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let PaginateIn {
+            url,
+            method,
+            headers,
+            query,
+            auth,
+            items_path,
+            pagination,
+            max_pages,
+            max_bytes,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("http.paginate input invalid: {e}")))?;
+
+        let http_method: reqwest::Method = method
+            .parse()
+            .map_err(|e| StepError::msg(format!("http.paginate bad method: {e}")))?;
+        let client = client_for(ctx, timeout_ms).await?;
+
+        let mut items: Vec<Value> = Vec::new();
+        let mut pages: u32 = 0;
+        let mut truncated = false;
+        // For next-url: the absolute URL of the next page (None ⇒ done).
+        let mut next_url: Option<String> = Some(url.clone());
+        // For page-number: the current page index.
+        let (page_param, mut page_num) = match &pagination {
+            Pagination::PageNumber { param, start } => (Some(param.clone()), *start),
+            Pagination::NextUrl { .. } => (None, 0),
+        };
+
+        loop {
+            if pages >= max_pages {
+                // Cap hit AND there is (or may be) more to fetch ⇒ truncated.
+                truncated = true;
+                break;
+            }
+
+            // Resolve the URL for this page.
+            let page_url = match (&pagination, &next_url) {
+                (Pagination::NextUrl { .. }, Some(u)) => u.clone(),
+                (Pagination::NextUrl { .. }, None) => break,
+                (Pagination::PageNumber { .. }, _) => url.clone(),
+            };
+            // Gate EVERY page URL — a next-url/redirect to an ungranted host is
+            // blocked here before any socket is opened.
+            ctx.ensure_network_url(&page_url)?;
+
+            let mut req = client.request(http_method.clone(), &page_url);
+            // next_url 模式下 next 链接通常已自带完整 query,再附加初始 query 会
+            // 产生重复参数(部分 API 报 400)—— 初始 query 只用于第一页。
+            // page_number 模式每页都打同一基础 URL,query 每页保留。
+            match &pagination {
+                Pagination::NextUrl { .. } if pages > 0 => {}
+                _ => req = req.query(&query),
+            }
+            if let Pagination::PageNumber { .. } = pagination {
+                if let Some(param) = &page_param {
+                    req = req.query(&[(param.as_str(), page_num.to_string())]);
+                }
+            }
+            if let Some(auth) = &auth {
+                req = auth.apply(req);
+            }
+            for (k, v) in &headers {
+                req = req.header(k, v);
+            }
+
+            let resp = req.send().await.map_err(|e| {
+                if e.is_redirect() {
+                    StepError::msg(
+                        "http.paginate: blocked redirect to ungranted host (network capability)",
+                    )
+                } else {
+                    StepError::msg(format!("http.paginate send: {}", e.without_url()))
+                }
+            })?;
+
+            // 非 2xx 即失败:错误页(429/5xx)的 body 取不出 items 会被误判成
+            // 「分页自然结束」,静默返回部分数据 —— 必须显式报错。
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(StepError::msg(format!(
+                    "http.paginate: page {} returned HTTP {status}",
+                    pages + 1
+                )));
+            }
+
+            // Grab the next-url Link header before consuming the body.
+            let link_next = resp
+                .headers()
+                .get(reqwest::header::LINK)
+                .and_then(|v| v.to_str().ok())
+                .and_then(link_header_next);
+
+            if let Some(len) = resp.content_length() {
+                if len > max_bytes {
+                    return Err(StepError::msg(format!(
+                        "http.paginate: page Content-Length {len} exceeds max_bytes {max_bytes}"
+                    )));
+                }
+            }
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| StepError::msg(format!("http.paginate body: {}", e.without_url())))?;
+            if text.len() as u64 > max_bytes {
+                return Err(StepError::msg(format!(
+                    "http.paginate: page body {} bytes exceeds max_bytes {max_bytes}",
+                    text.len()
+                )));
+            }
+            let body: Value = serde_json::from_str(&text)
+                .map_err(|e| StepError::msg(format!("http.paginate: page is not JSON: {e}")))?;
+
+            let page_batch = page_items(&body, &items_path);
+            let batch_len = page_batch.len();
+            items.extend(page_batch);
+            pages += 1;
+
+            // Decide whether another page exists.
+            match &pagination {
+                Pagination::NextUrl {
+                    next_path,
+                    use_link_header,
+                } => {
+                    let body_next = next_path
+                        .as_deref()
+                        .and_then(|ptr| body.pointer(ptr))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let header_next = if *use_link_header { link_next } else { None };
+                    next_url = body_next.or(header_next);
+                    if next_url.is_none() {
+                        break;
+                    }
+                }
+                Pagination::PageNumber { .. } => {
+                    // Stop on the first empty page; otherwise advance.
+                    if batch_len == 0 {
+                        break;
+                    }
+                    page_num += 1;
+                }
+            }
+        }
+
+        Ok(ActionResult::from(serde_json::json!({
+            "items": items,
+            "pages": pages,
+            "truncated": truncated,
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +1075,44 @@ mod tests {
         .with_resources(map);
         ctx.set_current_resource(current);
         ctx
+    }
+
+    #[test]
+    fn link_header_next_matches_exact_rel_only() {
+        // `rel=next-archive` 不是 next;带引号/不带引号/rel 值列表都要认。
+        assert_eq!(
+            link_header_next(r#"<https://a/2>; rel="next", <https://a/9>; rel="last""#).as_deref(),
+            Some("https://a/2")
+        );
+        assert_eq!(
+            link_header_next("<https://a/2>; rel=next").as_deref(),
+            Some("https://a/2")
+        );
+        assert_eq!(
+            link_header_next(r#"<https://a/2>; rel="prev next""#).as_deref(),
+            Some("https://a/2")
+        );
+        assert_eq!(
+            link_header_next(r#"<https://a/x>; rel="next-archive""#),
+            None
+        );
+        assert_eq!(link_header_next(r#"<https://a/x>; rel="prev""#), None);
+    }
+
+    #[test]
+    fn link_header_next_survives_commas_inside_urls() {
+        // URL 里合法出现的逗号不能被当成段界截断。
+        assert_eq!(
+            link_header_next(r#"<https://a/p?ids=1,2,3&page=2>; rel="next""#).as_deref(),
+            Some("https://a/p?ids=1,2,3&page=2")
+        );
+        assert_eq!(
+            link_header_next(
+                r#"<https://a/p?ids=1,2>; rel="prev", <https://a/p?ids=1,2&page=3>; rel="next""#
+            )
+            .as_deref(),
+            Some("https://a/p?ids=1,2&page=3")
+        );
     }
 
     #[test]

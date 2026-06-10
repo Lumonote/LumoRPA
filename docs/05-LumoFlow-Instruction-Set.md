@@ -92,7 +92,7 @@ Common gates:
 | --- | --- |
 | `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
 | `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
-| `network` | HTTP, browser, email, notification, FTP/S3, MCP network targets. |
+| `network` | HTTP, browser, email, notification, FTP/S3, PostgreSQL/MySQL, MCP network targets. |
 | `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
 | `mcp` | MCP tool calls. |
 | `desktop` | Optional `desktop.*` actions when compiled with the `desktop` feature. |
@@ -141,6 +141,8 @@ share a handle.
 | --- | --- | --- | --- |
 | `chromium.cdp` | `browser.*` | One Chrome session (tabs, cookies, pages) | `headless` (bool); `profile` (see below) |
 | `sqlite` | `db.sqlite_*` | One SQLite connection | `path` (the db file) |
+| `postgres` | `db.postgres_*` | One pooled PostgreSQL connection | — DSN/credentials come from the step (see below) |
+| `mysql` | `db.mysql_*` | One pooled MySQL connection | — DSN/credentials come from the step (see below) |
 | `http` | `http.*` | One pooled HTTP client (keep-alive) | `timeout_ms` (optional) |
 | `smtp` | `email.send` | One pooled SMTP transport | — host/credentials come from the step (see below) |
 | `ftp` | `ftp.*` | One authenticated FTP session | — host/credentials come from the step (see below) |
@@ -169,8 +171,10 @@ effect today).
   every step still checks `network` / `fs.read` / `fs.write` as before.
 - **Resource config is static YAML and is never template-rendered.** `{{ … }}` and
   `${{ vault.… }}` do **not** resolve inside a decl — never put secrets there.
-  Credential-bearing kinds (`smtp`, `ftp`) take their host and credentials from the
-  **first bound step's** inputs (which *are* vault-resolved), not from the decl.
+  Credential-bearing kinds (`smtp`, `ftp`, `postgres`, `mysql`) take their host and
+  credentials from the **first bound step's** inputs (which *are* vault-resolved),
+  not from the decl. (`postgres`/`mysql` take a `dsn` such as
+  `postgres://user:pass@host:5432/db`; its host is gated by `network`.)
 - **The browser profile directory is app-managed infrastructure** (under
   `$LUMO_HOME`, like `lumo.db` / `selector-stats.json`), so it is not a
   user-supplied path and is not subject to `fs.write` gating — exactly as Chrome's
@@ -213,7 +217,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
 | Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
 | Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |
-| Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch` |
+| Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.mysql_query`, `db.mysql_exec` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
 | Email | `email.send`, `email.fetch` |
 | Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation` |
@@ -221,7 +225,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Flow | `flow.call` |
 | FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
 | Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.uuid` |
-| HTTP | `http.request`, `http.download`, `http.upload` |
+| HTTP | `http.request`, `http.download`, `http.upload`, `http.oauth2_token`, `http.paginate` |
 | Image | `image.locate`, `image.compare`, `image.ocr` |
 | JSON | `json.get`, `json.set`, `json.merge`, `json.keys`, `json.values`, `json.delete` |
 | List | `list.length`, `list.append`, `list.sort`, `list.unique`, `list.range`, `list.contains`, `list.get`, `list.slice`, `list.reverse`, `list.pluck` |

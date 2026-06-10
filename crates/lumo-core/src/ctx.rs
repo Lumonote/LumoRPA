@@ -731,8 +731,12 @@ impl StepCtx {
     }
 
     pub fn ensure_network_url(&self, url: &str) -> Result<(), StepError> {
-        let host = extract_host(url)
-            .ok_or_else(|| StepError::msg(format!("network URL has no host: {url}")))?;
+        // 不回显原始 URL:DSN(postgres://user:pass@…)带凭据,host 解析失败的
+        // 畸形串若整条进错误信息,凭据会落进日志/运行记录。只给 scheme 提示。
+        let host = extract_host(url).ok_or_else(|| {
+            let scheme = url.split("://").next().unwrap_or("<unknown>");
+            StepError::msg(format!("network URL has no host (scheme: {scheme})"))
+        })?;
         if host_matches_grants(&host, &self.capabilities.network) {
             return Ok(());
         }

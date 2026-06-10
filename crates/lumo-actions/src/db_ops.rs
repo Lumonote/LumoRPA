@@ -28,6 +28,10 @@ pub fn register(r: &mut ActionRegistry) {
     // run end. Unbound steps keep opening a fresh connection per call (back-compat).
     r.register_teardown(Arc::new(SqliteTeardown));
     r.register_resource_factory(Arc::new(SqliteFactory));
+    // T3: PostgreSQL / MySQL —— DSN(含凭据)来自首个绑定步骤的输入(vault 解析后),
+    // 不在静态 decl 里;故工厂 `open` 仅校验、不连库,连接池由首个绑定步骤懒构建。
+    register_pg(r);
+    register_mysql(r);
 }
 
 fn bind_params(args: &[Value]) -> Result<Vec<rusqlite::types::Value>, StepError> {
@@ -477,6 +481,699 @@ impl Action for SqliteBatchAction {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  PostgreSQL / MySQL —— T3 网络型 db 资源(sqlx,运行期查询)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// 与上面的 sqlite 同一套 T3 范式,但连接标的是「网络」而非「文件」:
+//   * 标的不是 path 而是 DSN(`postgres://user:pass@host:5432/db` /
+//     `mysql://user:pass@host:3306/db`),DSN 含凭据,来自首个绑定步骤的输入
+//     (vault 解析后),**不在静态 decl 里** —— 故工厂 `open` 只校验、不连库
+//     (镜像 ftp/smtp 的「机密承载 kind」模型)。
+//   * 门禁走 `network`(非 fs):`ctx.ensure_network_url(&dsn)`,DSN 本身就是
+//     `scheme://host…` URL,`extract_host` 取得 host —— 与 transfer.rs gate
+//     `ftp://{host}`、email.rs gate 其 host 同理。在 open 与每次未绑定调用上都做。
+//   * 句柄是 sqlx 连接池(`PgPool`/`MySqlPool`,`Clone + Send + Sync`),不需像
+//     sqlite 那样套 `Mutex`;池在 `Drop` 时关闭,异步 teardown 里再 `close().await`
+//     做优雅收口(镜像 ftp 的异步 `close_run`)。
+//
+// 绑定:首个绑定步骤的 DSN 建共享池,后续绑定步骤复用(其自带 DSN 被忽略);
+// 未绑定步骤每次按自身 DSN 现连(与 sqlite 的 bound/unbound 二元性完全一致)。
+//
+// 占位符按用户原样透传:Postgres 用 `$1,$2,…`,MySQL 用 `?` —— 不改写。
+// 仅支持运行期 SQL 字符串(`sqlx::query`/`query` + 手动取列),不用 `query!` 宏,
+// 故构建期无需 DATABASE_URL。
+
+use sqlx::{Column, Row, TypeInfo, ValueRef as SqlxValueRef};
+
+const PG_KIND: &str = "postgres";
+const MYSQL_KIND: &str = "mysql";
+
+/// `postgres` 资源的连接池,键 `(run_id, resource name)`。`PgPool` 本身是
+/// `Clone + Send + Sync`(内部 `Arc`),无需 `Mutex`。
+static PG_POOLS: ResourceStore<sqlx::PgPool> = ResourceStore::new();
+/// `mysql` 资源的连接池,键 `(run_id, resource name)`。
+static MYSQL_POOLS: ResourceStore<sqlx::MySqlPool> = ResourceStore::new();
+
+fn register_pg(r: &mut ActionRegistry) {
+    r.register(PgQueryAction);
+    r.register(PgExecAction);
+    r.register_teardown(Arc::new(PgTeardown));
+    r.register_resource_factory(Arc::new(PgFactory));
+}
+
+fn register_mysql(r: &mut ActionRegistry) {
+    r.register(MysqlQueryAction);
+    r.register(MysqlExecAction);
+    r.register_teardown(Arc::new(MysqlTeardown));
+    r.register_resource_factory(Arc::new(MysqlFactory));
+}
+
+/// 该步骤绑定的 `postgres` 资源名,或 `None`(未绑定 / 绑定了非 postgres /
+/// 未声明的资源)—— 后者走每调用现连(back-compat)。镜像 `sqlite_slot`。
+fn pg_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == PG_KIND => Some(name),
+        _ => None,
+    }
+}
+
+/// 该步骤绑定的 `mysql` 资源名,或 `None`(同 `pg_slot`)。
+fn mysql_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == MYSQL_KIND => Some(name),
+        _ => None,
+    }
+}
+
+/// 开一次(并复用)`(run_id, slot)` 处的共享 PgPool;首个绑定步骤的 DSN 立池。
+/// 幂等:并发开池时第一名胜出,落败者池被 `get_or_put` drop(`Drop` 即关池)。
+async fn ensure_pg_pool(
+    run_id: &str,
+    slot: &str,
+    dsn: &str,
+) -> Result<Arc<sqlx::PgPool>, StepError> {
+    if let Some(p) = PG_POOLS.get(run_id, slot) {
+        return Ok(p);
+    }
+    let pool = sqlx::PgPool::connect(dsn)
+        .await
+        // 故意不回原始错误:DSN 含凭据,sqlx 错误可能回显连接串片段。
+        .map_err(|_| StepError::msg("postgres connect failed"))?;
+    Ok(PG_POOLS.get_or_put(run_id, slot, Arc::new(pool)))
+}
+
+/// 开一次(并复用)`(run_id, slot)` 处的共享 MySqlPool。语义同 `ensure_pg_pool`。
+async fn ensure_mysql_pool(
+    run_id: &str,
+    slot: &str,
+    dsn: &str,
+) -> Result<Arc<sqlx::MySqlPool>, StepError> {
+    if let Some(p) = MYSQL_POOLS.get(run_id, slot) {
+        return Ok(p);
+    }
+    let pool = sqlx::MySqlPool::connect(dsn)
+        .await
+        .map_err(|_| StepError::msg("mysql connect failed"))?;
+    Ok(MYSQL_POOLS.get_or_put(run_id, slot, Arc::new(pool)))
+}
+
+/// 关闭并丢弃 `run_id` 名下所有 postgres 池(`pool.close().await` 优雅收口,
+/// 镜像 ftp 的异步 teardown)。幂等 —— 未开池时空跑。也供测试使用。
+#[doc(hidden)]
+pub async fn close_run_pg_pools(run_id: &str) {
+    for pool in PG_POOLS.take_run(run_id) {
+        pool.close().await;
+    }
+}
+
+/// 关闭并丢弃 `run_id` 名下所有 mysql 池。语义同 `close_run_pg_pools`。
+#[doc(hidden)]
+pub async fn close_run_mysql_pools(run_id: &str) {
+    for pool in MYSQL_POOLS.take_run(run_id) {
+        pool.close().await;
+    }
+}
+
+/// 是否有 postgres 池在 `run_id` 名下打开(any slot)。供测试使用。
+#[doc(hidden)]
+pub fn pg_pool_open(run_id: &str) -> bool {
+    PG_POOLS.has_run(run_id)
+}
+
+/// 是否有 mysql 池在 `run_id` 名下打开(any slot)。供测试使用。
+#[doc(hidden)]
+pub fn mysql_pool_open(run_id: &str) -> bool {
+    MYSQL_POOLS.has_run(run_id)
+}
+
+struct PgTeardown;
+#[async_trait]
+impl RunTeardown for PgTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_pg_pools(run_id).await;
+    }
+}
+
+struct MysqlTeardown;
+#[async_trait]
+impl RunTeardown for MysqlTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_mysql_pools(run_id).await;
+    }
+}
+
+/// T3 工厂 `postgres`:DSN 含凭据、来自步骤输入而非 decl,故 `open` 仅校验
+/// (`Ok(())`),不连库 —— 镜像 ftp/smtp 工厂。池由首个绑定步骤经 `ensure_pg_pool`
+/// 懒建。
+struct PgFactory;
+#[async_trait]
+impl ResourceFactory for PgFactory {
+    fn kind(&self) -> &str {
+        PG_KIND
+    }
+    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        Ok(())
+    }
+}
+
+/// T3 工厂 `mysql`:同 `PgFactory` —— `open` 仅校验、不连库。
+struct MysqlFactory;
+#[async_trait]
+impl ResourceFactory for MysqlFactory {
+    fn kind(&self) -> &str {
+        MYSQL_KIND
+    }
+    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        Ok(())
+    }
+}
+
+// ─── 行 → JSON 转换(运行期、无宏)────────────────────────────────────────────
+//
+// sqlx 不直接给「任意列 → serde_json::Value」,只能按列类型逐个 `try_get` 解码。
+// 这里覆盖常见类型(bool/整型/浮点/字符串/json/时间族/NUMERIC/UUID),其余类型
+// 回退为该列的字符串文本 —— 既不丢行,又不因冷门类型整查询失败。NULL 列 → Null。
+// 注意 sqlx 的 `String` 解码有严格类型兼容检查(仅文本族列),时间/数值/UUID 列
+// 必须走显式分支,否则会静默变 Null —— 真取不出来时打 warn,绝不无声吞掉。
+//
+// 时间族输出:TIMESTAMPTZ → RFC3339;无时区的 TIMESTAMP/DATETIME/DATE/TIME →
+// chrono 默认文本(`2024-01-02 03:04:05`)。NUMERIC/DECIMAL → 字符串(保精度,
+// 金额列不经过 f64)。
+
+/// 解码失败兜底:带列名+类型名打 warn,返回 Null(可见,而非静默)。
+fn unsupported_column(driver: &str, name: &str, ty: &str) -> Value {
+    tracing::warn!(column = name, r#type = ty, "{driver} column type not decodable; returning null");
+    Value::Null
+}
+
+/// Postgres 行 → JSON 对象(列名 → JSON 值)。
+fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
+    let mut m = Map::new();
+    for (i, col) in row.columns().iter().enumerate() {
+        let name = col.name().to_string();
+        let ty = col.type_info().name().to_string();
+        let v = match row.try_get_raw(i) {
+            Ok(raw) if raw.is_null() => Value::Null,
+            Ok(_) => match ty.as_str() {
+                "BOOL" => row.try_get::<bool, _>(i).map(Value::Bool).unwrap_or(Value::Null),
+                "INT2" | "SMALLINT" => row
+                    .try_get::<i16, _>(i)
+                    .map(|n| Value::from(n as i64))
+                    .unwrap_or(Value::Null),
+                "INT4" | "INT" | "INTEGER" => row
+                    .try_get::<i32, _>(i)
+                    .map(|n| Value::from(n as i64))
+                    .unwrap_or(Value::Null),
+                "INT8" | "BIGINT" => row.try_get::<i64, _>(i).map(Value::from).unwrap_or(Value::Null),
+                "FLOAT4" | "REAL" => row
+                    .try_get::<f32, _>(i)
+                    .ok()
+                    .and_then(|f| serde_json::Number::from_f64(f as f64).map(Value::Number))
+                    .unwrap_or(Value::Null),
+                "FLOAT8" | "DOUBLE PRECISION" => row
+                    .try_get::<f64, _>(i)
+                    .ok()
+                    .and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
+                    .unwrap_or(Value::Null),
+                "JSON" | "JSONB" => row.try_get::<Value, _>(i).unwrap_or(Value::Null),
+                "TIMESTAMPTZ" => row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                    .map(|t| Value::String(t.to_rfc3339()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                "TIMESTAMP" => row
+                    .try_get::<chrono::NaiveDateTime, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                "DATE" => row
+                    .try_get::<chrono::NaiveDate, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                "TIME" => row
+                    .try_get::<chrono::NaiveTime, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                "NUMERIC" => row
+                    .try_get::<sqlx::types::BigDecimal, _>(i)
+                    .map(|d| Value::String(d.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                "UUID" => row
+                    .try_get::<sqlx::types::Uuid, _>(i)
+                    .map(|u| Value::String(u.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+                // TEXT/VARCHAR/BPCHAR/NAME… 文本族取字符串;其余类型 warn + Null。
+                _ => row
+                    .try_get::<String, _>(i)
+                    .map(Value::String)
+                    .unwrap_or_else(|_| unsupported_column("postgres", &name, &ty)),
+            },
+            Err(_) => Value::Null,
+        };
+        m.insert(name, v);
+    }
+    Value::Object(m)
+}
+
+/// MySQL 行 → JSON 对象(列名 → JSON 值)。
+fn mysql_row_to_json(row: &sqlx::mysql::MySqlRow) -> Value {
+    let mut m = Map::new();
+    for (i, col) in row.columns().iter().enumerate() {
+        let name = col.name().to_string();
+        let ty = col.type_info().name().to_string();
+        let v = match row.try_get_raw(i) {
+            Ok(raw) if raw.is_null() => Value::Null,
+            Ok(_) => match ty.as_str() {
+                "BOOLEAN" | "BOOL" => row.try_get::<bool, _>(i).map(Value::Bool).unwrap_or(Value::Null),
+                "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => row
+                    .try_get::<i64, _>(i)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+                "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED"
+                | "INT UNSIGNED" | "BIGINT UNSIGNED" | "YEAR" => row
+                    .try_get::<u64, _>(i)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+                "FLOAT" => row
+                    .try_get::<f32, _>(i)
+                    .ok()
+                    .and_then(|f| serde_json::Number::from_f64(f as f64).map(Value::Number))
+                    .unwrap_or(Value::Null),
+                "DOUBLE" => row
+                    .try_get::<f64, _>(i)
+                    .ok()
+                    .and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
+                    .unwrap_or(Value::Null),
+                "JSON" => row.try_get::<Value, _>(i).unwrap_or(Value::Null),
+                // MySQL TIMESTAMP 是 UTC 时刻,DATETIME 是无时区挂钟时间。
+                "TIMESTAMP" => row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                    .map(|t| Value::String(t.to_rfc3339()))
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+                "DATETIME" => row
+                    .try_get::<chrono::NaiveDateTime, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+                "DATE" => row
+                    .try_get::<chrono::NaiveDate, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+                "TIME" => row
+                    .try_get::<chrono::NaiveTime, _>(i)
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+                "DECIMAL" => row
+                    .try_get::<sqlx::types::BigDecimal, _>(i)
+                    .map(|d| Value::String(d.to_string()))
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+                // VARCHAR/CHAR/TEXT/ENUM… 文本族取字符串;其余类型 warn + Null。
+                _ => row
+                    .try_get::<String, _>(i)
+                    .map(Value::String)
+                    .unwrap_or_else(|_| unsupported_column("mysql", &name, &ty)),
+            },
+            Err(_) => Value::Null,
+        };
+        m.insert(name, v);
+    }
+    Value::Object(m)
+}
+
+/// 把一个 JSON 参数绑定到 Postgres 查询。覆盖 null/bool/i64/f64/string,
+/// 其余(数组/对象)按其 JSON 文本绑定为字符串。
+fn bind_pg<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    v: &'q Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match v {
+        Value::Null => q.bind(Option::<String>::None),
+        Value::Bool(b) => q.bind(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                q.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                q.bind(f)
+            } else {
+                q.bind(n.to_string())
+            }
+        }
+        Value::String(s) => q.bind(s.clone()),
+        other => q.bind(other.to_string()),
+    }
+}
+
+/// 把一个 JSON 参数绑定到 MySQL 查询。语义同 `bind_pg`。
+fn bind_mysql<'q>(
+    q: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    v: &'q Value,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match v {
+        Value::Null => q.bind(Option::<String>::None),
+        Value::Bool(b) => q.bind(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                q.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                q.bind(f)
+            } else {
+                q.bind(n.to_string())
+            }
+        }
+        Value::String(s) => q.bind(s.clone()),
+        other => q.bind(other.to_string()),
+    }
+}
+
+// ─── db.postgres_query / db.postgres_exec ────────────────────────────────────
+
+/// `postgres_*` 的输入:`dsn`(未绑定时必填)+ `sql` + 位置参数 `params`($1,$2…)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PgIn {
+    /// 连接串 `postgres://user:pass@host:5432/db`。绑定 `postgres` 资源时由首个
+    /// 绑定步骤的 dsn 建池,本字段在后续绑定步骤里被忽略;未绑定则本字段必填。
+    #[serde(default)]
+    dsn: Option<String>,
+    sql: String,
+    /// 位置参数,按 `$1,$2,…` 顺序绑定(占位符原样透传,不改写)。
+    #[serde(default)]
+    params: Vec<Value>,
+    /// 语句执行超时(毫秒,默认 60_000)。挂死的查询/锁等待不该无限阻塞整个 flow。
+    #[serde(default = "default_db_timeout_ms")]
+    timeout_ms: u64,
+    /// 仅 query 生效:返回行数上限(默认 1000,对齐 `db.sqlite_query`),超限时
+    /// 输出 `truncated: true` 并停止取行 —— 大表不全量进内存。
+    #[serde(default = "default_db_limit")]
+    limit: u64,
+}
+
+fn default_db_timeout_ms() -> u64 {
+    60_000
+}
+fn default_db_limit() -> u64 {
+    1000
+}
+
+/// 解析 `(slot, dsn)`:绑定步骤复用共享池(dsn 仅首个绑定步骤需要,这里取其自带
+/// dsn 仅用于首次建池,可空—— 复用路径不需要);未绑定步骤必须自带 dsn。
+fn resolve_pg(ctx: &StepCtx, step_dsn: Option<String>) -> (Option<String>, Option<String>) {
+    match pg_slot(ctx) {
+        Some(name) => (Some(name), step_dsn),
+        None => (None, step_dsn),
+    }
+}
+
+fn resolve_mysql(ctx: &StepCtx, step_dsn: Option<String>) -> (Option<String>, Option<String>) {
+    match mysql_slot(ctx) {
+        Some(name) => (Some(name), step_dsn),
+        None => (None, step_dsn),
+    }
+}
+
+/// 取本步骤可用的 PgPool:绑定步骤复用 `(run_id, slot)` 共享池(没有则用本步
+/// dsn 懒建);未绑定步骤建 `max_connections=1` 的单次池并返回 `ephemeral=true`
+/// —— 调用方用毕必须 `pool.close().await`:sqlx Pool 裸 drop 不做协议级断开
+/// (服务端记 unexpected EOF),且单次路径没必要留惰性回收的后台连接。
+async fn pg_pool_for(
+    ctx: &StepCtx,
+    action: &str,
+    step_dsn: Option<String>,
+) -> Result<(Arc<sqlx::PgPool>, bool), StepError> {
+    let (slot, step_dsn) = resolve_pg(ctx, step_dsn);
+    match slot {
+        Some(name) => {
+            if let Some(p) = PG_POOLS.get(ctx.run_id(), &name) {
+                return Ok((p, false));
+            }
+            let dsn = step_dsn
+                .ok_or_else(|| StepError::msg(format!("{action}: first bound step needs `dsn`")))?;
+            ctx.ensure_network_url(&dsn)?;
+            Ok((ensure_pg_pool(ctx.run_id(), &name, &dsn).await?, false))
+        }
+        None => {
+            let dsn = step_dsn.ok_or_else(|| {
+                StepError::msg(format!("{action}: `dsn` is required (or bind a `postgres` resource)"))
+            })?;
+            ctx.ensure_network_url(&dsn)?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&dsn)
+                .await
+                .map_err(|_| StepError::msg("postgres connect failed"))?;
+            Ok((Arc::new(pool), true))
+        }
+    }
+}
+
+/// MySQL 版 `pg_pool_for`,语义完全一致。
+async fn mysql_pool_for(
+    ctx: &StepCtx,
+    action: &str,
+    step_dsn: Option<String>,
+) -> Result<(Arc<sqlx::MySqlPool>, bool), StepError> {
+    let (slot, step_dsn) = resolve_mysql(ctx, step_dsn);
+    match slot {
+        Some(name) => {
+            if let Some(p) = MYSQL_POOLS.get(ctx.run_id(), &name) {
+                return Ok((p, false));
+            }
+            let dsn = step_dsn
+                .ok_or_else(|| StepError::msg(format!("{action}: first bound step needs `dsn`")))?;
+            ctx.ensure_network_url(&dsn)?;
+            Ok((ensure_mysql_pool(ctx.run_id(), &name, &dsn).await?, false))
+        }
+        None => {
+            let dsn = step_dsn.ok_or_else(|| {
+                StepError::msg(format!("{action}: `dsn` is required (or bind a `mysql` resource)"))
+            })?;
+            ctx.ensure_network_url(&dsn)?;
+            let pool = sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect(&dsn)
+                .await
+                .map_err(|_| StepError::msg("mysql connect failed"))?;
+            Ok((Arc::new(pool), true))
+        }
+    }
+}
+
+pub struct PgQueryAction;
+#[async_trait]
+impl Action for PgQueryAction {
+    fn id(&self) -> &'static str {
+        "db.postgres_query"
+    }
+    fn summary(&self) -> &'static str {
+        "Run a SELECT against PostgreSQL; rows returned as a JSON array"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PgIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let PgIn { dsn, sql, params, timeout_ms, limit } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.postgres_query invalid: {e}")))?;
+        let (pool, ephemeral) = pg_pool_for(ctx, "db.postgres_query", dsn).await?;
+        // 流式取行:到 limit 即停,大结果集不全量进内存;整段套 timeout。
+        let fetched = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            use futures::TryStreamExt;
+            let mut q = sqlx::query(&sql);
+            for p in &params {
+                q = bind_pg(q, p);
+            }
+            let mut stream = q.fetch(pool.as_ref());
+            let mut rows: Vec<Value> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if rows.len() as u64 >= limit {
+                    truncated = true;
+                    break;
+                }
+                rows.push(pg_row_to_json(&row));
+            }
+            Ok::<_, sqlx::Error>((rows, truncated))
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let (rows, truncated) = match fetched {
+            Err(_) => {
+                return Err(StepError::msg(format!(
+                    "db.postgres_query: timed out after {timeout_ms} ms"
+                )))
+            }
+            Ok(r) => r.map_err(|e| StepError::msg(format!("postgres query: {e}")))?,
+        };
+        Ok(ActionResult::from(serde_json::json!({
+            "rows": rows,
+            "count": rows.len(),
+            "truncated": truncated,
+        })))
+    }
+}
+
+pub struct PgExecAction;
+#[async_trait]
+impl Action for PgExecAction {
+    fn id(&self) -> &'static str {
+        "db.postgres_exec"
+    }
+    fn summary(&self) -> &'static str {
+        "Run an INSERT/UPDATE/DELETE/DDL against PostgreSQL"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PgIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let PgIn { dsn, sql, params, timeout_ms, limit: _ } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.postgres_exec invalid: {e}")))?;
+        let (pool, ephemeral) = pg_pool_for(ctx, "db.postgres_exec", dsn).await?;
+        let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            let mut q = sqlx::query(&sql);
+            for p in &params {
+                q = bind_pg(q, p);
+            }
+            q.execute(pool.as_ref()).await
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let res = match res {
+            Err(_) => {
+                return Err(StepError::msg(format!(
+                    "db.postgres_exec: timed out after {timeout_ms} ms"
+                )))
+            }
+            Ok(r) => r.map_err(|e| StepError::msg(format!("postgres exec: {e}")))?,
+        };
+        Ok(ActionResult::from(serde_json::json!({
+            "rows_affected": res.rows_affected(),
+        })))
+    }
+}
+
+// ─── db.mysql_query / db.mysql_exec ──────────────────────────────────────────
+
+/// `mysql_*` 的输入:`dsn` + `sql` + 位置参数 `params`(`?` 占位符)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MysqlIn {
+    /// 连接串 `mysql://user:pass@host:3306/db`。绑定语义同 `postgres`。
+    #[serde(default)]
+    dsn: Option<String>,
+    sql: String,
+    /// 位置参数,按 `?` 顺序绑定(占位符原样透传,不改写)。
+    #[serde(default)]
+    params: Vec<Value>,
+    /// 语句执行超时(毫秒,默认 60_000)。
+    #[serde(default = "default_db_timeout_ms")]
+    timeout_ms: u64,
+    /// 仅 query 生效:返回行数上限(默认 1000),超限时输出 `truncated: true`。
+    #[serde(default = "default_db_limit")]
+    limit: u64,
+}
+
+pub struct MysqlQueryAction;
+#[async_trait]
+impl Action for MysqlQueryAction {
+    fn id(&self) -> &'static str {
+        "db.mysql_query"
+    }
+    fn summary(&self) -> &'static str {
+        "Run a SELECT against MySQL; rows returned as a JSON array"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<MysqlIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let MysqlIn { dsn, sql, params, timeout_ms, limit } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.mysql_query invalid: {e}")))?;
+        let (pool, ephemeral) = mysql_pool_for(ctx, "db.mysql_query", dsn).await?;
+        let fetched = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            use futures::TryStreamExt;
+            let mut q = sqlx::query(&sql);
+            for p in &params {
+                q = bind_mysql(q, p);
+            }
+            let mut stream = q.fetch(pool.as_ref());
+            let mut rows: Vec<Value> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if rows.len() as u64 >= limit {
+                    truncated = true;
+                    break;
+                }
+                rows.push(mysql_row_to_json(&row));
+            }
+            Ok::<_, sqlx::Error>((rows, truncated))
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let (rows, truncated) = match fetched {
+            Err(_) => {
+                return Err(StepError::msg(format!(
+                    "db.mysql_query: timed out after {timeout_ms} ms"
+                )))
+            }
+            Ok(r) => r.map_err(|e| StepError::msg(format!("mysql query: {e}")))?,
+        };
+        Ok(ActionResult::from(serde_json::json!({
+            "rows": rows,
+            "count": rows.len(),
+            "truncated": truncated,
+        })))
+    }
+}
+
+pub struct MysqlExecAction;
+#[async_trait]
+impl Action for MysqlExecAction {
+    fn id(&self) -> &'static str {
+        "db.mysql_exec"
+    }
+    fn summary(&self) -> &'static str {
+        "Run an INSERT/UPDATE/DELETE/DDL against MySQL"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<MysqlIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let MysqlIn { dsn, sql, params, timeout_ms, limit: _ } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.mysql_exec invalid: {e}")))?;
+        let (pool, ephemeral) = mysql_pool_for(ctx, "db.mysql_exec", dsn).await?;
+        let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            let mut q = sqlx::query(&sql);
+            for p in &params {
+                q = bind_mysql(q, p);
+            }
+            q.execute(pool.as_ref()).await
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let res = match res {
+            Err(_) => {
+                return Err(StepError::msg(format!(
+                    "db.mysql_exec: timed out after {timeout_ms} ms"
+                )))
+            }
+            Ok(r) => r.map_err(|e| StepError::msg(format!("mysql exec: {e}")))?,
+        };
+        Ok(ActionResult::from(serde_json::json!({
+            "rows_affected": res.rows_affected(),
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,7 +1182,6 @@ mod tests {
     fn decl(yaml: &str) -> ResourceDecl {
         serde_yaml::from_str(yaml).expect("valid ResourceDecl yaml")
     }
-
     /// A ctx carrying `spec.resources` (name → YAML decl) and an optional
     /// current-step `resource:` binding — the inputs the T3 slot resolution reads.
     fn ctx_with(resources: &[(&str, &str)], current: Option<&str>) -> StepCtx {
@@ -539,5 +1235,156 @@ mod tests {
     fn sqlite_factory_kind_matches() {
         assert_eq!(SqliteFactory.kind(), SQLITE_KIND);
         assert_eq!(SQLITE_KIND, "sqlite");
+    }
+
+    // ─── PostgreSQL / MySQL T3 单测 ──────────────────────────────────────────
+
+    /// 带 network 授权的 ctx,用于验证 DSN→host 提取 + 能力门禁。
+    fn ctx_with_network(
+        resources: &[(&str, &str)],
+        current: Option<&str>,
+        network: &[&str],
+    ) -> StepCtx {
+        let map: BTreeMap<String, ResourceDecl> = resources
+            .iter()
+            .map(|(name, yaml)| (name.to_string(), decl(yaml)))
+            .collect();
+        let caps = lumo_dsl::Capabilities {
+            network: network.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let ctx = StepCtx::new(
+            "run-db".into(),
+            "flow-db".into(),
+            ActionRegistry::new(),
+            None,
+            Value::Null,
+            caps,
+            Vec::new(),
+        )
+        .with_resources(map);
+        ctx.set_current_resource(current);
+        ctx
+    }
+
+    #[test]
+    fn pg_and_mysql_factory_kinds_match() {
+        assert_eq!(PgFactory.kind(), PG_KIND);
+        assert_eq!(PG_KIND, "postgres");
+        assert_eq!(MysqlFactory.kind(), MYSQL_KIND);
+        assert_eq!(MYSQL_KIND, "mysql");
+    }
+
+    #[test]
+    fn pg_slot_selects_only_postgres_kind_bindings() {
+        let resources = &[
+            ("pg", "kind: postgres\n"),
+            ("my", "kind: mysql\n"),
+            ("lite", "kind: sqlite\npath: /tmp/x.db\n"),
+        ];
+        // Bound to a postgres resource ⇒ its name is the slot (shared pool).
+        assert_eq!(
+            pg_slot(&ctx_with(resources, Some("pg"))).as_deref(),
+            Some("pg")
+        );
+        // Unbound / wrong-kind / undeclared ⇒ None ⇒ per-call connect (back-compat).
+        assert_eq!(pg_slot(&ctx_with(resources, None)), None);
+        assert_eq!(pg_slot(&ctx_with(resources, Some("my"))), None);
+        assert_eq!(pg_slot(&ctx_with(resources, Some("lite"))), None);
+        assert_eq!(pg_slot(&ctx_with(resources, Some("ghost"))), None);
+    }
+
+    #[test]
+    fn mysql_slot_selects_only_mysql_kind_bindings() {
+        let resources = &[("pg", "kind: postgres\n"), ("my", "kind: mysql\n")];
+        assert_eq!(
+            mysql_slot(&ctx_with(resources, Some("my"))).as_deref(),
+            Some("my")
+        );
+        assert_eq!(mysql_slot(&ctx_with(resources, None)), None);
+        assert_eq!(mysql_slot(&ctx_with(resources, Some("pg"))), None);
+        assert_eq!(mysql_slot(&ctx_with(resources, Some("ghost"))), None);
+    }
+
+    #[test]
+    fn resolve_pg_and_mysql_carry_slot_and_dsn() {
+        let resources = &[("pg", "kind: postgres\n"), ("my", "kind: mysql\n")];
+        // Bound ⇒ Some(name); the step's own dsn is carried for first-bound pool build.
+        let (slot, dsn) = resolve_pg(
+            &ctx_with(resources, Some("pg")),
+            Some("postgres://u:p@db.internal:5432/app".into()),
+        );
+        assert_eq!(slot.as_deref(), Some("pg"));
+        assert_eq!(dsn.as_deref(), Some("postgres://u:p@db.internal:5432/app"));
+        // Unbound ⇒ None slot, dsn from the step.
+        let (slot, dsn) = resolve_mysql(
+            &ctx_with(resources, None),
+            Some("mysql://u:p@db.internal:3306/app".into()),
+        );
+        assert!(slot.is_none());
+        assert_eq!(dsn.as_deref(), Some("mysql://u:p@db.internal:3306/app"));
+    }
+
+    #[test]
+    fn dsn_host_is_gated_by_network_capability() {
+        // The same `ensure_network_url(&dsn)` gate the action runs before connecting:
+        // a DSN whose host is granted passes; an ungranted host is rejected — proving
+        // host extraction from a `postgres://`/`mysql://` URL and capability denial.
+        let resources = &[("pg", "kind: postgres\n")];
+        let ctx = ctx_with_network(resources, Some("pg"), &["db.allowed.internal"]);
+        // Granted host ⇒ Ok (port + creds + db path stripped by extract_host).
+        ctx.ensure_network_url("postgres://user:secret@db.allowed.internal:5432/app")
+            .expect("granted host must pass the network gate");
+        ctx.ensure_network_url("mysql://user:secret@db.allowed.internal:3306/app")
+            .expect("granted host must pass the network gate");
+        // Ungranted host ⇒ capability denied (never reaches a connect attempt).
+        let err = ctx
+            .ensure_network_url("postgres://user:secret@evil.example.com:5432/app")
+            .expect_err("an ungranted host must be rejected");
+        assert!(
+            matches!(err, StepError::CapabilityDenied { .. }),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn pg_param_binding_maps_json_scalars() {
+        // null/bool/i64/f64/string must each bind without panicking; the bound query
+        // is consumed by the runtime API (no server needed to exercise the mapping).
+        let params = vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::from(42i64),
+            Value::from(1.5f64),
+            Value::String("hi".into()),
+            serde_json::json!(["arr"]), // falls through to JSON-text bind
+        ];
+        let mut q = sqlx::query("SELECT $1, $2, $3, $4, $5, $6");
+        for p in &params {
+            q = bind_pg(q, p);
+        }
+        // Reaching here (and dropping `q`) means every variant bound cleanly.
+        drop(q);
+
+        let mut mq = sqlx::query("SELECT ?, ?, ?, ?, ?, ?");
+        for p in &params {
+            mq = bind_mysql(mq, p);
+        }
+        drop(mq);
+    }
+
+    #[tokio::test]
+    async fn pg_and_mysql_teardown_idempotent_for_a_run_that_opened_nothing() {
+        // End-of-run teardown is idempotent: with no pools opened, `take_run` yields
+        // nothing so the close loop runs zero times. This is the path a run cancelled
+        // before any pg/mysql open — or a double-teardown — takes.
+        assert!(!pg_pool_open("ghost-run"));
+        assert!(!mysql_pool_open("ghost-run"));
+        close_run_pg_pools("ghost-run").await; // clean no-op
+        close_run_pg_pools("ghost-run").await; // idempotent
+        close_run_mysql_pools("ghost-run").await;
+        close_run_mysql_pools("ghost-run").await;
+        assert!(!pg_pool_open("ghost-run"));
+        assert!(!mysql_pool_open("ghost-run"));
     }
 }

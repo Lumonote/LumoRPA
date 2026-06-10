@@ -25,6 +25,7 @@ sha2.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
+sqlx.workspace = true
 
 reqwest.workspace = true
 chromiumoxide.workspace = true
