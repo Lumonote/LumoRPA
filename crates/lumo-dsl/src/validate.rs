@@ -110,6 +110,15 @@ pub enum ValidationError {
         value: String,
         known: String,
     },
+
+    #[error(
+        "flow `{flow}` step `{id}` uses `{action}` outside of a loop (it must be nested in the `do:` of control.while / control.for / control.for_each; control.parallel branches are separate scopes)"
+    )]
+    BreakOutsideLoop {
+        flow: String,
+        id: String,
+        action: String,
+    },
 }
 
 /// A small set of action ids that may carry `do/else/catch/finally` children.
@@ -120,6 +129,7 @@ pub fn is_control_action(id: &str) -> bool {
         "control.if"
             | "control.for"
             | "control.for_each"
+            | "control.while"
             | "control.try"
             | "control.parallel"
             | "excel.for_each_row"
@@ -152,10 +162,12 @@ pub fn validate(flow: &Flow) -> Result<(), ValidationError> {
         flow_ai_enabled,
         has_llm_cap,
         &resources,
+        false,
     )?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     flow: &str,
     steps: &[Step],
@@ -163,6 +175,7 @@ fn walk(
     flow_ai_enabled: bool,
     has_llm_cap: bool,
     resources: &HashSet<&str>,
+    in_loop: bool,
 ) -> Result<(), ValidationError> {
     for s in steps {
         if !seen.insert(s.id.clone()) {
@@ -203,6 +216,7 @@ fn walk(
             s.action.as_str(),
             "control.for"
                 | "control.for_each"
+                | "control.while"
                 | "control.try"
                 | "excel.for_each_row"
                 | "browser.for_each"
@@ -270,8 +284,58 @@ fn walk(
                 });
             }
         }
-        for child in s.children() {
-            walk(flow, child, seen, flow_ai_enabled, has_llm_cap, resources)?;
+        // 指令集 P1:break / continue 的循环祖先链静态检查——必须出现在某个
+        // 循环容器 `do:` 块的祖先链内,否则运行期信号会逃逸出循环作用域。
+        if matches!(s.action.as_str(), "control.break" | "control.continue") && !in_loop {
+            return Err(ValidationError::BreakOutsideLoop {
+                flow: flow.into(),
+                id: s.id.clone(),
+                action: s.action.clone(),
+            });
+        }
+        // 只有运行期真正消化 break / continue 信号的循环容器才算循环祖先:
+        // control.while / control.for / control.for_each。excel.for_each_row /
+        // browser.for_each 虽带 do 块,但不经 VM 的循环 runner、不消化信号,
+        // 保守起见不算(信号会穿透它们继续向上找真正的循环容器)。
+        let is_loop_container = matches!(
+            s.action.as_str(),
+            "control.while" | "control.for" | "control.for_each"
+        );
+        // control.parallel 的 do / branches 都是新作用域:每个分支独立执行,
+        // break / continue 不跨分支,祖先链在分支边界清零。
+        let is_parallel = s.action == "control.parallel";
+        let child_in_loop = if is_parallel {
+            false
+        } else {
+            in_loop || is_loop_container
+        };
+        if let Some(d) = &s.do_ {
+            walk(
+                flow,
+                d,
+                seen,
+                flow_ai_enabled,
+                has_llm_cap,
+                resources,
+                child_in_loop,
+            )?;
+        }
+        // if 的 else、try 的 catch / finally 与所在循环同作用域,继承祖先链。
+        for block in [&s.else_, &s.catch_, &s.finally_].into_iter().flatten() {
+            walk(
+                flow,
+                block,
+                seen,
+                flow_ai_enabled,
+                has_llm_cap,
+                resources,
+                in_loop,
+            )?;
+        }
+        if let Some(bs) = &s.branches {
+            for b in bs {
+                walk(flow, b, seen, flow_ai_enabled, has_llm_cap, resources, false)?;
+            }
         }
     }
     Ok(())
@@ -563,6 +627,172 @@ spec:
             ValidationError::UnknownRetryBackoff { id, .. } => assert_eq!(id, "inner"),
             other => panic!("expected UnknownRetryBackoff, got: {other}"),
         }
+    }
+
+    // ─── 指令集 P1:break / continue 循环祖先链 ─────────────────────────────
+
+    #[test]
+    fn break_outside_loop_is_rejected() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: out
+      action: control.break
+"#;
+        let flow = parse_str(y).expect("parses");
+        let err = validate(&flow).expect_err("top-level break must be rejected");
+        assert!(
+            matches!(err, ValidationError::BreakOutsideLoop { .. }),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("control.break"), "got: {err}");
+    }
+
+    #[test]
+    fn continue_outside_loop_is_rejected() {
+        // if 的 do 块不是循环作用域:祖先链里没有循环容器仍然要拦。
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: gate
+      action: control.if
+      with: { cond: "true" }
+      do:
+        - id: skip
+          action: control.continue
+"#;
+        let flow = parse_str(y).expect("parses");
+        let err = validate(&flow).expect_err("continue without a loop ancestor must be rejected");
+        match err {
+            ValidationError::BreakOutsideLoop { id, action, .. } => {
+                assert_eq!(id, "skip");
+                assert_eq!(action, "control.continue");
+            }
+            other => panic!("expected BreakOutsideLoop, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn break_inside_while_do_is_accepted() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: loop
+      action: control.while
+      with: { cond: "vars.go" }
+      do:
+        - id: out
+          action: control.break
+"#;
+        let flow = parse_str(y).expect("parses");
+        validate(&flow).expect("break inside a while body must validate");
+    }
+
+    #[test]
+    fn break_inside_try_catch_within_loop_is_accepted() {
+        // try 的 do / catch 与所在循环同作用域,祖先链要继承。
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: loop
+      action: control.for
+      with: { to: 3 }
+      do:
+        - id: guard
+          action: control.try
+          with: {}
+          do:
+            - { id: noop, action: control.log, with: { message: x } }
+          catch:
+            - id: out
+              action: control.break
+"#;
+        let flow = parse_str(y).expect("parses");
+        validate(&flow).expect("break in a catch block inside a loop must validate");
+    }
+
+    #[test]
+    fn break_in_parallel_branch_without_inner_loop_is_rejected() {
+        // parallel 分支是新作用域:即使 parallel 本身嵌在 for 里,分支内没有
+        // 自己的循环祖先就必须拦下。
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: outer
+      action: control.for
+      with: { to: 2 }
+      do:
+        - id: par
+          action: control.parallel
+          branches:
+            - - id: out
+                action: control.break
+"#;
+        let flow = parse_str(y).expect("parses");
+        let err = validate(&flow)
+            .expect_err("break in a parallel branch without an in-branch loop must be rejected");
+        match err {
+            ValidationError::BreakOutsideLoop { id, .. } => assert_eq!(id, "out"),
+            other => panic!("expected BreakOutsideLoop, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn break_inside_loop_within_parallel_branch_is_accepted() {
+        // 分支内自带循环容器 → break 在分支内被消化,合法。
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: par
+      action: control.parallel
+      branches:
+        - - id: loop
+            action: control.for_each
+            with: { in: [1, 2] }
+            do:
+              - id: out
+                action: control.break
+"#;
+        let flow = parse_str(y).expect("parses");
+        validate(&flow).expect("break inside a loop within a parallel branch must validate");
+    }
+
+    #[test]
+    fn while_requires_do_block() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: loop
+      action: control.while
+      with: { cond: "true" }
+"#;
+        let flow = parse_str(y).expect("parses");
+        let err = validate(&flow).expect_err("while without do: must be rejected");
+        assert!(
+            matches!(err, ValidationError::MissingDoBlock { .. }),
+            "got: {err}"
+        );
     }
 
     #[test]

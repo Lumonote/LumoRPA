@@ -32,6 +32,16 @@ pub enum ExecError {
     /// P1-1: a step exceeded the configured per-step timeout.
     #[error("step `{step}` timed out after {ms}ms")]
     Timeout { step: String, ms: u64 },
+    /// 指令集 P1:`control.break` 发出的循环中断信号。以 `Err` 形式向上 unwind,
+    /// 由最近的循环容器(while / for / for_each)消化:终止该循环。穿过
+    /// `control.try` 时不得被 catch 捕获;逃逸出循环作用域(parallel 分支边界 /
+    /// flow 顶层)即按下面的错误信息作为运行期兜底报错。
+    #[error("`control.break` used outside of a loop (step `{step}`)")]
+    Break { step: String },
+    /// 指令集 P1:`control.continue` 发出的跳轮信号。语义同 [`ExecError::Break`],
+    /// 但循环容器消化后跳到下一轮而非终止循环。
+    #[error("`control.continue` used outside of a loop (step `{step}`)")]
+    Continue { step: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

@@ -202,6 +202,32 @@ browser and a shared SQLite connection.
 `do`, `catch`, and `finally`. `control.parallel` accepts either `branches` or
 `do`, where `branches` is a list of step sequences.
 
+`control.while` repeats its `do` block while `cond` (evaluated each round with
+the same F-14 evaluator as `control.if`) stays truthy. The binding `index`
+exposes the round number (from 0). `max_iterations` (default 1000) is a
+runaway-loop guard: hitting it with `cond` still true fails the step.
+
+```yaml
+- id: poll
+  action: control.while
+  with: { cond: "!vars.ready", max_iterations: 60 }
+  do:
+    - { id: probe, action: http.request, with: { url: "https://api.example.com/status" }, bind: st }
+    - id: gate
+      action: control.if
+      with: { cond: "st.status == 200" }
+      do:
+        - { id: ok, action: control.set_var, with: { name: ready, value: true } }
+    - { id: wait, action: control.sleep, with: { ms: 1000 } }
+```
+
+`control.break` exits the nearest enclosing loop (`while`/`for`/`for_each`)
+and `control.continue` skips to its next iteration; both pass through
+`control.try` uncaught (`finally` still runs). They must appear inside a loop
+ancestor's `do:` chain — `control.parallel` branches are separate scopes, so a
+break/continue inside a branch needs a loop within that same branch (validated
+statically, with a runtime error as backstop).
+
 ## Action Families
 
 Use `cargo run -p lumo-cli -- actions` to print the registry and
@@ -214,7 +240,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Archive | `archive.zip`, `archive.unzip` |
 | Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
 | Clipboard | `clipboard.get`, `clipboard.set` |
-| Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.try`, `control.parallel`, `control.fail` |
+| Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.while`, `control.break`, `control.continue`, `control.try`, `control.parallel`, `control.fail` |
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
 | Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
 | Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |

@@ -15,6 +15,9 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(IfAction);
     r.register(ForAction);
     r.register(ForEachAction);
+    r.register(WhileAction);
+    r.register(BreakAction);
+    r.register(ContinueAction);
     r.register(TryAction);
     r.register(ParallelAction);
     r.register(FailAction);
@@ -250,6 +253,97 @@ impl Action for ForEachAction {
         let _cfg: ForEachIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("for_each input invalid: {e}")))?;
         Ok(ActionResult::null())
+    }
+}
+
+// ─── control.while ──────────────────────────────────────────────────────────
+// 指令集 P1:条件循环。与其余 control.* 一样,VM 在分发点短路接管(vm.rs 的
+// run_while 自己求值 cond 并驱动 do: 块),这里只是注册表里的占位标记,
+// 让 schema / 文档 / `actions --show` 能看到它。
+
+pub struct WhileAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct WhileIn {
+    /// 循环条件,每轮求值(与 control.if 同一求值器)。
+    cond: Value,
+    /// 防呆死循环上限,默认 1000;到达上限且 cond 仍为真则报错。
+    #[serde(default = "default_max_iterations")]
+    max_iterations: u64,
+}
+fn default_max_iterations() -> u64 {
+    1000
+}
+
+#[async_trait]
+impl Action for WhileAction {
+    fn id(&self) -> &'static str {
+        "control.while"
+    }
+    fn summary(&self) -> &'static str {
+        "Conditional loop: repeat do: while cond holds (use do:)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WhileIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        Ok(ActionResult::null())
+    }
+}
+
+// ─── control.break / control.continue ──────────────────────────────────────
+// 指令集 P1:循环控制信号。VM 在分发点把它们转成 ExecError::Break / Continue
+// 向上 unwind,由最近的循环容器(while / for / for_each)消化——所以正常执行
+// 路径永远到不了这里的 execute。直接经注册表调用(无循环上下文)时按
+// "循环外使用" 报错,与 validate 的静态检查口径一致。
+
+pub struct BreakAction;
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BreakIn {}
+
+#[async_trait]
+impl Action for BreakAction {
+    fn id(&self) -> &'static str {
+        "control.break"
+    }
+    fn summary(&self) -> &'static str {
+        "Exit the nearest enclosing loop (while/for/for_each)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<BreakIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        Err(StepError::msg(
+            "`control.break` used outside of a loop (must run inside control.while/for/for_each)",
+        ))
+    }
+}
+
+pub struct ContinueAction;
+#[derive(Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ContinueIn {}
+
+#[async_trait]
+impl Action for ContinueAction {
+    fn id(&self) -> &'static str {
+        "control.continue"
+    }
+    fn summary(&self) -> &'static str {
+        "Skip to the next iteration of the nearest enclosing loop"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ContinueIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        Err(StepError::msg(
+            "`control.continue` used outside of a loop (must run inside control.while/for/for_each)",
+        ))
     }
 }
 

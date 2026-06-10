@@ -505,8 +505,25 @@ async fn execute_step(
         "control.if" => return run_if(ctx, step, idx, path, parent_path, depth).await,
         "control.for" => return run_for(ctx, step, idx, path, parent_path, depth).await,
         "control.for_each" => return run_for_each(ctx, step, idx, path, parent_path, depth).await,
+        "control.while" => return run_while(ctx, step, idx, path, parent_path, depth).await,
         "control.try" => return run_try(ctx, step, idx, path, parent_path, depth).await,
         "control.parallel" => return run_parallel(ctx, step, idx, path, parent_path, depth).await,
+        // 指令集 P1:break / continue 是循环控制信号,以 `Err` 向上 unwind,由最近
+        // 的循环容器(while / for / for_each)消化。与 Paused 一样不落 step 行——
+        // 它不是一次"执行"而是一次跳转;可观测痕迹是循环容器行的 iterations。
+        // `when:` 在进入本 match 前已求值,因此 `when + control.break` 天然支持
+        // 条件跳出。循环外使用由 lumo-dsl validate 静态拦截,这里的信号若一路
+        // 逃逸到 flow 顶层,会以 "used outside of a loop" 作为运行期兜底错误。
+        "control.break" => {
+            return Err(ExecError::Break {
+                step: step.id.clone(),
+            })
+        }
+        "control.continue" => {
+            return Err(ExecError::Continue {
+                step: step.id.clone(),
+            })
+        }
         _ => {}
     }
 
@@ -981,7 +998,9 @@ async fn run_if(
     // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) inside
     // the taken branch unwinds the run — rethrow without recording this `if` as
     // a `failed` step.
-    if matches!(&result, Err(e) if is_control_signal(e)) {
+    // 指令集 P1:break / continue 信号同理向上穿透 if 容器(交给最近的循环容器
+    // 消化),不把这个 if 记成 failed。
+    if matches!(&result, Err(e) if is_control_signal(e) || is_loop_signal(e)) {
         return result;
     }
     let finished_at = Utc::now();
@@ -1047,8 +1066,21 @@ async fn run_for(
         result = run_block_boxed(ctx, body, Some(format!("{path}[{}]", iters)), depth + 1).await;
         ctx.clear_binding(&bind);
         ctx.clear_binding("index");
-        if result.is_err() {
-            break;
+        // 指令集 P1:break / continue 信号在最近的循环容器处消化——break 终止
+        // 整个循环,continue 结束本轮、照常推进游标与轮次;二者都不算循环失败。
+        match &result {
+            Err(ExecError::Break { .. }) => {
+                result = Ok(());
+                break;
+            }
+            Err(ExecError::Continue { .. }) => {
+                result = Ok(());
+                i += stp;
+                iters += 1;
+                continue;
+            }
+            Err(_) => break,
+            Ok(()) => {}
         }
         i += stp;
         iters += 1;
@@ -1132,8 +1164,20 @@ async fn run_for_each(
         ctx.clear_binding(&bind);
         ctx.clear_binding("row");
         ctx.clear_binding("index");
-        if result.is_err() {
-            break;
+        // 指令集 P1:break / continue 信号在最近的循环容器处消化(语义同
+        // run_for)——break 终止迭代,continue 进入下一个元素。
+        match &result {
+            Err(ExecError::Break { .. }) => {
+                result = Ok(());
+                break;
+            }
+            Err(ExecError::Continue { .. }) => {
+                result = Ok(());
+                iters += 1;
+                continue;
+            }
+            Err(_) => break,
+            Ok(()) => {}
         }
         iters += 1;
     }
@@ -1141,6 +1185,107 @@ async fn run_for_each(
     // the loop body unwinds the run — rethrow without recording the loop as a
     // `failed` step (the offending leaf already persisted its own row, or a pause
     // is intentionally left un-persisted).
+    if matches!(&result, Err(e) if is_control_signal(e)) {
+        return result;
+    }
+    let output = serde_json::json!({ "iterations": iters });
+    ctx.record_step_output(&step.id, &output);
+    let finished_at = Utc::now();
+    persist_step(
+        ctx,
+        StepPersist {
+            step_id: &step.id,
+            path: &path,
+            parent_path: parent_path.as_deref(),
+            depth,
+            idx,
+            state: if result.is_ok() { "ok" } else { "failed" },
+            attempt: 1,
+            input_hash: &input_hash,
+            output: Some(&output),
+            error: result.as_ref().err().map(ToString::to_string),
+            started_at,
+            finished_at,
+        },
+    )
+    .await;
+    result
+}
+
+async fn run_while(
+    ctx: &mut StepCtx,
+    step: &Step,
+    idx: i64,
+    path: String,
+    parent_path: Option<String>,
+    depth: i64,
+) -> Result<(), ExecError> {
+    let started_at = Utc::now();
+    let rendered = render_value_inline(ctx, &step.with)?;
+    let input_hash = Sha256::digest(rendered.to_string().as_bytes()).to_vec();
+    // 指令集 P1:cond 与 control.if 走同一求值器(F-14)——raw 字符串进表达式
+    // 求值器(`{{ }}` 模板模式保留),非字符串字面量按真值判断。与 run_if 不同
+    // 的是 cond 每轮都要基于最新上下文重新求值,所以这里只取 raw,渲染在轮内做。
+    if step.with.get("cond").is_none() {
+        return Err(ExecError::Other(anyhow::anyhow!(
+            "control.while requires `cond`"
+        )));
+    }
+    let raw_cond = step.with.get("cond").and_then(|c| c.as_str());
+    // 防呆死循环:默认 1000 轮上限;到达上限且 cond 仍为真即报错。
+    let max_iterations = rendered
+        .get("max_iterations")
+        .and_then(Value::as_u64)
+        .unwrap_or(1000);
+    let body = step
+        .do_
+        .as_ref()
+        .ok_or_else(|| ExecError::Other(anyhow::anyhow!("control.while requires `do:` block")))?;
+
+    let mut iters = 0u64;
+    let mut result = Ok(());
+    loop {
+        let truthy = match raw_cond {
+            Some(s) => lumo_dsl::eval_predicate(s, &ctx.template_ctx())?,
+            None => {
+                // 非字符串 cond(如 YAML 字面量 bool/数字):每轮重渲染再取真值。
+                let re = render_value_inline(ctx, &step.with)?;
+                is_truthy(re.get("cond").unwrap_or(&Value::Null))
+            }
+        };
+        if !truthy {
+            break;
+        }
+        if iters >= max_iterations {
+            result = Err(ExecError::Other(anyhow::anyhow!(
+                "control.while `{}` hit max_iterations={max_iterations} with cond still true — \
+                 疑似死循环:请修正退出条件,或显式调大 `max_iterations`",
+                step.id
+            )));
+            break;
+        }
+        // 循环绑定:`index` 为轮次(从 0 开始),与 for / for_each 对齐。
+        ctx.push_binding("index", Value::from(iters as i64));
+        result = run_block_boxed(ctx, body, Some(format!("{path}[{iters}]")), depth + 1).await;
+        ctx.clear_binding("index");
+        // 指令集 P1:break / continue 信号在最近的循环容器处消化。
+        match &result {
+            Err(ExecError::Break { .. }) => {
+                result = Ok(());
+                break;
+            }
+            Err(ExecError::Continue { .. }) => {
+                result = Ok(());
+                iters += 1;
+                continue;
+            }
+            Err(_) => break,
+            Ok(()) => {}
+        }
+        iters += 1;
+    }
+    // P1-1 / F-20:硬中断(cancel / timeout / 断点暂停)向上 unwind,不把循环
+    // 记成 failed(与 run_for / run_for_each 同约定)。
     if matches!(&result, Err(e) if is_control_signal(e)) {
         return result;
     }
@@ -1195,6 +1340,15 @@ async fn run_try(
         // intentionally left un-persisted), so we also skip recording this `try`
         // as a step — matching how the pause unwinds through `execute_step`.
         Err(e) if is_control_signal(&e) => return Err(e),
+        // 指令集 P1:break / continue 同样不可被 catch 捕获——但它是正常控制流
+        // 而非硬中断,finally(清理语义)仍要执行,然后继续上抛给最近的循环
+        // 容器消化。finally 自身失败时以 `?` 让 finally 的错误优先上抛。
+        Err(e) if is_loop_signal(&e) => {
+            if let Some(f) = &step.finally_ {
+                run_block_boxed(ctx, f, Some(format!("{path}/finally")), depth + 1).await?;
+            }
+            return Err(e);
+        }
         Err(e) => Some(e.to_string()),
     };
     let mut final_result = Ok(());
@@ -1337,6 +1491,19 @@ async fn run_parallel(
 
     // First failure wins; everything else still completes.
     let first_err = results.into_iter().find_map(|r| r.err());
+    // 指令集 P1:parallel 分支是独立作用域——分支内逃逸出来的 break / continue
+    // 不跨分支、也不能交给 parallel 外层的循环消化(否则一个分支会"替"外层
+    // 循环做决定)。validate 已静态拦截,这里做运行期兜底:降级为普通错误,
+    // 让 parallel 按 failed 记账并向上传播。
+    let first_err = first_err.map(|e| {
+        if is_loop_signal(&e) {
+            ExecError::Other(anyhow::anyhow!(
+                "{e}; control.parallel 分支是独立作用域,break/continue 不能跨出分支"
+            ))
+        } else {
+            e
+        }
+    });
     // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) in any
     // branch unwinds the run — rethrow without recording the parallel block as a
     // normal `failed` step (the offending leaf already persisted its own row, or
@@ -1390,6 +1557,15 @@ fn is_control_signal(e: &ExecError) -> bool {
         e,
         ExecError::Cancelled | ExecError::Timeout { .. } | ExecError::Paused
     )
+}
+
+/// 指令集 P1:是否为循环控制信号(`control.break` / `control.continue`)。
+/// 与硬中断([`is_control_signal`])一样不可被 `control.try` 捕获、不把途经的
+/// 容器记成 failed;但语义不同——它向上 unwind 到**最近的循环容器**
+/// (while / for / for_each)即被消化,不再外溢。逃逸出循环作用域
+/// (parallel 分支边界 / flow 顶层)则按运行期错误兜底处理。
+fn is_loop_signal(e: &ExecError) -> bool {
+    matches!(e, ExecError::Break { .. } | ExecError::Continue { .. })
 }
 
 // ─── persistence ────────────────────────────────────────────────────────────
