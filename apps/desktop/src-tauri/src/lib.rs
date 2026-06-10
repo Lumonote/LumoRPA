@@ -3,7 +3,7 @@ use lumo_ai::{
     provider::{ChatMessage, ChatRequest, Role},
     AiRouter, ChatAction,
 };
-use lumo_core::{ActionRegistry, FlowVm, RunOptions};
+use lumo_core::{ActionRegistry, CancelToken, FlowVm, RunOptions};
 use lumo_dsl::{Flow, IoDecl, Step};
 use lumo_recorder::{
     desktop::DesktopRecorder, events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent,
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
@@ -34,7 +34,15 @@ type AppHandle = tauri::AppHandle<Wry>;
 #[derive(Default)]
 struct DesktopState {
     recorder: Mutex<RecorderSlot>,
+    /// P0-1：运行中 flow 的取消句柄表，键为引擎落库的 run_id。每次运行由
+    /// `execute_flow` 自注册/自清理，`cancel_run` 只查表触发 —— 与
+    /// `RecorderSlot` 一样靠 Mutex 串行化并发访问。
+    cancels: CancelMap,
 }
+
+/// P0-1：跨命令共享的取消句柄表。包一层 Arc 是因为 `execute_flow` 在测试里
+/// 脱离 tauri `State` 直接驱动（见 `cancel_timeout_tests`），需要可独立持有。
+type CancelMap = Arc<Mutex<HashMap<String, CancelToken>>>;
 
 #[derive(Default)]
 struct RecorderSlot {
@@ -1013,6 +1021,7 @@ fn lint_flow(app: AppHandle, path: String) -> Result<Vec<lumo_dsl::LintIssue>, S
 #[tauri::command]
 async fn run_flow(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     path: String,
     inputs_json: String,
     no_store: bool,
@@ -1028,6 +1037,7 @@ async fn run_flow(
         inputs,
         no_store,
         DebugOpts::default(),
+        &state.cancels,
     )
     .await
 }
@@ -1041,6 +1051,7 @@ async fn run_flow(
 #[tauri::command]
 async fn run_step(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     path: String,
     step_id: String,
     inputs_json: String,
@@ -1063,6 +1074,7 @@ async fn run_step(
         inputs,
         no_store,
         DebugOpts::default(),
+        &state.cancels,
     )
     .await
 }
@@ -1079,6 +1091,7 @@ async fn run_step(
 #[tauri::command]
 async fn debug_flow(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     path: String,
     inputs_json: String,
     breakpoints: Vec<String>,
@@ -1100,8 +1113,43 @@ async fn debug_flow(
             step_mode: step,
             resume_from,
         },
+        &state.cancels,
     )
     .await
+}
+
+/// P0-1：`cancel_run` 的返回。`ok=false` 表示该 run 不存在或已结束 —— 取消
+/// 与运行结束天然存在竞态，前端只需提示"已无可取消的运行"，不必当错误处理。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunResult {
+    ok: bool,
+}
+
+/// P0-1：取消一个进行中的 run。幂等：运行中重复调用仍返回 ok=true（token
+/// 的 cancel 本身幂等）；run 不存在 / 已结束返回 ok=false 而非报错。
+#[tauri::command]
+fn cancel_run(state: State<'_, DesktopState>, run_id: String) -> CancelRunResult {
+    CancelRunResult {
+        ok: cancel_run_inner(&state.cancels, &run_id),
+    }
+}
+
+/// `cancel_run` 的内核，测试脱离 tauri `State` 直接驱动。句柄留在表里由
+/// run 自己清理（见 `execute_flow`），触发后立刻摘除会让"运行中重复取消"
+/// 误报 ok=false。
+fn cancel_run_inner(cancels: &CancelMap, run_id: &str) -> bool {
+    match cancels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(run_id)
+    {
+        Some(token) => {
+            token.cancel();
+            true
+        }
+        None => false,
+    }
 }
 
 #[tauri::command]
@@ -1655,6 +1703,7 @@ pub fn run() {
             run_flow,
             run_step,
             debug_flow,
+            cancel_run,
             list_runs,
             show_run,
             run_cost,
@@ -2369,6 +2418,7 @@ async fn execute_flow(
     inputs: Value,
     no_store: bool,
     debug: DebugOpts,
+    cancels: &CancelMap,
 ) -> Result<RunResponse, String> {
     let registry = build_action_registry(home, flow_path);
     let repo = if no_store {
@@ -2376,9 +2426,24 @@ async fn execute_flow(
     } else {
         Some(Repo::open(home.join("lumo.db")).map_err(|e| e.to_string())?)
     };
+    // P0-1：run_id 由宿主预生成并喂给 VM 落库——取消表必须在 run 启动前建键，
+    // 这样 cancel_run / 运行历史 / 取消表三方共用同一个 id。
+    let run_id = ulid::Ulid::new().to_string();
+    let cancel = CancelToken::new();
+    cancels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run_id.clone(), cancel.clone());
     // F-20: breakpoint / single-step / resume are inert by default (empty set,
     // false, None), so this is identical to a plain run unless debugging.
+    // P0-1 / X-07：取消 + 步级超时 + artifacts 落盘从此默认接线 —— 引擎能力
+    // 早已就位，桌面宿主此前从未传入。artifacts 固定写 `$LUMO_HOME/artifacts`，
+    // 与 read_artifact_blob 的 LUMO_HOME 越界防护对齐。
     let vm = FlowVm::new(registry, repo.clone())
+        .with_run_id(Some(run_id.clone()))
+        .with_cancel(cancel)
+        .with_step_timeout(step_timeout())
+        .with_artifacts_dir(Some(home.join("artifacts")))
         .with_breakpoints(debug.breakpoints)
         .with_step_mode(debug.step_mode)
         .with_resume_from(debug.resume_from);
@@ -2391,7 +2456,7 @@ async fn execute_flow(
         Some(provider) => vm.with_ai_provider(provider),
         None => vm,
     };
-    let report = vm
+    let result = vm
         .run(
             &flow,
             RunOptions {
@@ -2399,8 +2464,14 @@ async fn execute_flow(
                 trigger_kind: "desktop".into(),
             },
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+    // 成功 / 失败 / 暂停一律摘掉句柄：表不随历史增长，结束后的重复 cancel
+    // 自然落到 ok=false（幂等），必须在 `?` 早退之前执行。
+    cancels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&run_id);
+    let report = result.map_err(|e| e.to_string())?;
 
     let run = repo
         .as_ref()
@@ -2419,6 +2490,19 @@ async fn execute_flow(
         run,
         steps,
     })
+}
+
+/// P0-1：步级超时，防止一个卡死的步骤把 Studio 的运行面板永久挂住。
+/// 默认 10 分钟；`LUMO_STEP_TIMEOUT_MS` 可覆盖，解析失败或填 0 一律回退
+/// 默认（0 会让所有步骤瞬间超时，按配置错误处理）。
+fn step_timeout() -> std::time::Duration {
+    const DEFAULT_MS: u64 = 600_000;
+    let ms = std::env::var("LUMO_STEP_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_MS);
+    std::time::Duration::from_millis(ms)
 }
 
 fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
@@ -3414,7 +3498,7 @@ mod debug_flow_tests {
     //! surface `paused_at`, persist per-step `vars_json` (F-19), and resume the
     //! paused run to advance — plus the serde `camelCase` DTO contract the
     //! frontend depends on (`pausedAt`, `varsJson`).
-    use super::{execute_flow, DebugOpts, RunResponse};
+    use super::{execute_flow, CancelMap, DebugOpts, RunResponse};
     use std::collections::HashSet;
     use std::path::Path;
 
@@ -3435,9 +3519,18 @@ spec:
 
     async fn run_debug(home: &Path, debug: DebugOpts) -> RunResponse {
         let flow = lumo_dsl::parse_str(FLOW).expect("parse flow");
-        execute_flow(home, None, flow, serde_json::json!({}), false, debug)
-            .await
-            .expect("execute_flow ok")
+        let cancels = CancelMap::default();
+        execute_flow(
+            home,
+            None,
+            flow,
+            serde_json::json!({}),
+            false,
+            debug,
+            &cancels,
+        )
+        .await
+        .expect("execute_flow ok")
     }
 
     #[tokio::test]
@@ -3574,5 +3667,146 @@ spec:
             "stepping off the last step completes the run"
         );
         assert_eq!(r4.report.paused_at, None);
+    }
+}
+
+#[cfg(test)]
+mod cancel_timeout_tests {
+    //! P0-1 / P1-1 桌面接线：`execute_flow` 现在为每次运行注册 CancelToken
+    //! （键 = 落库 run_id）并默认挂步级超时。仿照 `debug_flow_tests` 直接驱动
+    //! 私有 `execute_flow` + temp `LUMO_HOME`，覆盖 webview 命中的完整链路：
+    //! 注册 → 触发取消 / 超时 → run 落库状态 → 句柄表自清理 → 幂等语义。
+    use super::{cancel_run_inner, execute_flow, CancelMap, DebugOpts};
+    use std::time::Duration;
+
+    /// `LUMO_STEP_TIMEOUT_MS` 是进程级环境变量，cargo test 默认多线程并行，
+    /// 两个用例必须串行持锁，否则超时覆盖会污染对方的取消/默认语义。锁要
+    /// 跨 await 持有，故用 tokio 的异步 Mutex（std 版会触发 await_holding_lock）。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 单步长睡：取消 / 超时都要能打断一个仍在 await 的动作，而不是等它跑完。
+    const SLEEP_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: cancel-it }
+spec:
+  steps:
+    - { id: slow, action: control.sleep, with: { ms: 30000 } }
+"#;
+
+    async fn spawn_sleep_flow(
+        home: std::path::PathBuf,
+        cancels: CancelMap,
+    ) -> Result<super::RunResponse, String> {
+        let flow = lumo_dsl::parse_str(SLEEP_FLOW).expect("parse flow");
+        execute_flow(
+            &home,
+            None,
+            flow,
+            serde_json::json!({}),
+            false,
+            DebugOpts::default(),
+            &cancels,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn cancel_run_interrupts_inflight_step_and_clears_token_table() {
+        let _env = ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cancels = CancelMap::default();
+
+        let task = tokio::spawn(spawn_sleep_flow(home.clone(), cancels.clone()));
+
+        // run_id 由宿主在 run 启动前注册进取消表 —— 轮询表拿到真实键，
+        // 这正是前端 cancel 按钮可依赖的同一份数据源。
+        let mut run_id = None;
+        for _ in 0..250 {
+            if let Some(id) = cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .next()
+                .cloned()
+            {
+                run_id = Some(id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let run_id = run_id.expect("run registered its cancel token");
+
+        assert!(
+            !cancel_run_inner(&cancels, "no-such-run"),
+            "不存在的 run 必须返回 ok=false 而非报错"
+        );
+        assert!(
+            cancel_run_inner(&cancels, &run_id),
+            "运行中的 run 取消应返回 ok=true"
+        );
+        assert!(
+            cancel_run_inner(&cancels, &run_id),
+            "运行结束前的重复取消保持幂等 ok=true"
+        );
+
+        let result = task.await.expect("task join");
+        let err = match result {
+            Ok(_) => panic!("被取消的 run 不应成功返回"),
+            Err(e) => e,
+        };
+        assert!(err.contains("cancelled"), "错误应表明取消，got: {err}");
+
+        // run 落库为 cancelled，句柄表已被 execute_flow 清理，再取消 → false。
+        let repo = lumo_storage::Repo::open(home.join("lumo.db")).unwrap();
+        let run = repo.get_run(&run_id).unwrap().expect("run row persisted");
+        assert_eq!(run.state, "cancelled");
+        assert!(
+            cancels.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "运行结束后 token 表必须清空"
+        );
+        assert!(
+            !cancel_run_inner(&cancels, &run_id),
+            "已结束的 run 重复取消返回 ok=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_timeout_env_override_marks_step_timeout() {
+        let _env = ENV_LOCK.lock().await;
+        std::env::set_var("LUMO_STEP_TIMEOUT_MS", "80");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cancels = CancelMap::default();
+
+        let result = spawn_sleep_flow(home.clone(), cancels.clone()).await;
+        // 先恢复环境再断言：断言失败也不能把覆盖值泄漏给后续用例。
+        std::env::remove_var("LUMO_STEP_TIMEOUT_MS");
+
+        let err = match result {
+            Ok(_) => panic!("80ms 超时下 30s 的步骤不应成功"),
+            Err(e) => e,
+        };
+        assert!(err.contains("timed out"), "错误应表明超时，got: {err}");
+
+        let repo = lumo_storage::Repo::open(home.join("lumo.db")).unwrap();
+        let run = repo
+            .list_runs(10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("run row persisted");
+        assert_eq!(run.state, "failed", "超时的 run 落库为 failed");
+        let steps = repo.list_steps(&run.id).unwrap();
+        assert!(
+            steps.iter().any(|s| s.state == "timeout"),
+            "超时步骤应标记 state=timeout，got: {:?}",
+            steps.iter().map(|s| s.state.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            cancels.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "超时失败的 run 也要清理 token 表"
+        );
     }
 }

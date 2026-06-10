@@ -92,6 +92,14 @@ pub struct FlowVm {
     /// F-20: single-step mode — pause before every executing step. Combined with
     /// `resume_from`, "continue/step" a paused run to the next pause point.
     step_mode: bool,
+    /// P0-1（桌面接线）：宿主预生成的 run_id。取消表必须在 run 启动前就按
+    /// 最终落库的 run_id 建键，否则 `cancel_run` 无键可查。`None` ⇒ 引擎自行
+    /// 生成 ULID（原行为）。注意 FlowVm 是一次性按 run 构建的，复用同一实例
+    /// 跑两次会撞 run_id —— 宿主侧每次运行都新建 VM。
+    run_id_override: Option<String>,
+    /// X-07（时光回溯）：artifacts 落盘根目录。设置后 `StepCtx::attach_artifact`
+    /// 才真正写盘 + 落库；不设保持 no-op，无头冒烟不会产生垃圾文件。
+    artifacts_dir: Option<std::path::PathBuf>,
 }
 
 impl FlowVm {
@@ -108,7 +116,21 @@ impl FlowVm {
             resume_from: None,
             breakpoints: std::collections::HashSet::new(),
             step_mode: false,
+            run_id_override: None,
+            artifacts_dir: None,
         }
+    }
+
+    /// P0-1：宿主预生成 run_id（语义见字段注释）。`None` 保持引擎自生成。
+    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id_override = run_id;
+        self
+    }
+
+    /// X-07：设置 artifacts 落盘根目录（语义见字段注释）。`None` 保持 no-op。
+    pub fn with_artifacts_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.artifacts_dir = dir;
+        self
     }
 
     /// Attach an AI hook provider so step-level / flow-level `ai:` blocks
@@ -234,7 +256,10 @@ impl FlowVm {
     }
 
     pub async fn run(&self, flow: &Flow, opts: RunOptions) -> Result<RunReport, ExecError> {
-        let run_id = Ulid::new().to_string();
+        let run_id = self
+            .run_id_override
+            .clone()
+            .unwrap_or_else(|| Ulid::new().to_string());
         let started = Instant::now();
         let now = Utc::now();
 
@@ -286,6 +311,11 @@ impl FlowVm {
         .with_resume_memo(self.load_resume_memo())
         .with_debug(self.build_debug_controller())
         .with_resources(flow.spec.resources.clone());
+        // X-07：仅在宿主显式开启时给 ctx 接上 artifacts 目录——StepCtx 的
+        // builder 收 PathBuf 而非 Option，这里用 if-let 保持未开启路径零开销。
+        if let Some(dir) = &self.artifacts_dir {
+            ctx = ctx.with_artifacts_dir(dir.clone());
+        }
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
