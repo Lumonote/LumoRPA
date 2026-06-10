@@ -177,6 +177,211 @@ async fn fetch_is_denied_without_a_network_grant() {
     );
 }
 
+#[tokio::test]
+async fn fetch_attachment_dir_fs_write_gated_before_network() {
+    // 附件落盘目录的 fs.write 门控先于 network 门控:有网络授权但没有 fs.write
+    // 授权时,失败必须是 fs.write 的能力拒绝,而不是连接错误。
+    let err = run_with(
+        "email.fetch",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "save_attachments_to": "/srv/mail-attachments"
+        }),
+        net("imap.example.com"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(
+        err.contains("fs.write"),
+        "attachment dir must be gated on fs.write, got: {err}"
+    );
+    assert!(
+        !err.contains("connect") && !err.contains("handshake"),
+        "gate must fire before the IMAP connect, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn fetch_rejects_zero_max_bytes() {
+    let err = run(
+        "email.fetch",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "max_bytes_per_message": 0
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("max_bytes_per_message"),
+        "zero max_bytes must be rejected, got: {err}"
+    );
+}
+
+// ─── email.mark validation + gating ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn mark_accepts_single_uid_and_is_denied_without_network() {
+    // 单个 uid(非列表)是合法形状:反序列化通过后,卡在 network 门控,
+    // 证明 untagged UidSpec 两种写法都能进到门控这一步。
+    let err = run(
+        "email.mark",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": 42,
+            "set": "seen"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        !err.contains("connect") && !err.contains("handshake"),
+        "gate must fire before the IMAP connect, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mark_rejects_empty_uid_list() {
+    let err = run(
+        "email.mark",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": [],
+            "set": "seen"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("at least one message"),
+        "empty uid list must be rejected, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mark_rejects_unknown_set_value() {
+    let err = run(
+        "email.mark",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": [1],
+            "set": "starred"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("input invalid"), "got: {err}");
+}
+
+#[tokio::test]
+async fn mark_rejects_expunge_without_deleted() {
+    // expunge 只配 set: deleted,其他组合是笔误,在触网之前显式拒绝。
+    let err = run(
+        "email.mark",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": [1, 2],
+            "set": "seen",
+            "expunge": true
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("expunge") && err.contains("deleted"),
+        "expunge+seen must be rejected explicitly, got: {err}"
+    );
+}
+
+// ─── email.move validation + gating ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn move_is_denied_without_a_network_grant() {
+    let err = run(
+        "email.move",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": [7],
+            "to_mailbox": "Archive"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        !err.contains("connect") && !err.contains("handshake"),
+        "gate must fire before the IMAP connect, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn move_rejects_same_source_and_target_mailbox() {
+    let err = run(
+        "email.move",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "mailbox": "INBOX",
+            "uid": [7],
+            "to_mailbox": "INBOX"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("must differ"),
+        "same-mailbox move must be rejected, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn move_rejects_empty_target_mailbox() {
+    let err = run(
+        "email.move",
+        json!({
+            "host": "imap.example.com",
+            "port": 993,
+            "username": "u",
+            "password": "p",
+            "uid": [7],
+            "to_mailbox": "  "
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("to_mailbox"),
+        "empty target must be rejected, got: {err}"
+    );
+}
+
 // ─── e2e sketches (require live servers; run with `--ignored`) ───────────────────
 
 #[ignore = "requires a live SMTP server; set LUMO_SMTP_* env + a network grant"]

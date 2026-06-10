@@ -82,6 +82,14 @@ indicatif       = "0.17"
 colored         = "2"
 comfy-table     = "7"
 
+# email MIME 解析:mail-parser(Stalwart,纯 Rust,无 C 依赖,信创/交叉友好)。
+# email.fetch 取回 BODY[] 原始字节后,用它解析 multipart 正文(text/html)与附件,
+# 默认特性为空,显式开 full_encoding(经 encoding_rs,本仓已有)覆盖 GBK/GB18030
+# 等中文字符集。注意:其传递依赖 hashify 自 0.2.7 起 edition 2024(需 rustc
+# ≥1.85 > 本仓 MSRV 1.83),Cargo.lock 已钉 hashify =0.2.6(edition 2021);
+# 不要对 hashify 盲目 cargo update。
+mail-parser     = { version = "0.11", features = ["full_encoding"] }
+
 # http / browser / excel
 reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 axum            = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }

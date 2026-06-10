@@ -56,6 +56,9 @@ lettre = { version = "=0.11.19", default-features = false, features = [
     "rustls-native-certs",
 ] }
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+# email.fetch 正文/附件:mail-parser 解析 IMAP 取回的 RFC822 字节(multipart、
+# 常见中文字符集)。纯 Rust,无 C 依赖(信创红线),版本注释见 workspace Cargo.toml。
+mail-parser.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
 futures-util = "0.3"

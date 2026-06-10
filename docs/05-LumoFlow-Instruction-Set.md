@@ -91,7 +91,7 @@ Common gates:
 | Capability | Used by |
 | --- | --- |
 | `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
-| `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
+| `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `email.fetch` attachment saving (`save_attachments_to`). |
 | `network` | HTTP, browser, email, notification, FTP/S3, PostgreSQL/MySQL, MCP network targets. |
 | `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
 | `mcp` | MCP tool calls. |
@@ -150,7 +150,8 @@ share a handle.
 A bound step omits the per-call field it would otherwise pass: a `sqlite`-bound
 `db.sqlite_*` step omits `db:` (the decl `path` wins); a `chromium.cdp`-bound
 `browser.open` omits launch options (`headless`/`profile` come from the decl).
-(`email.fetch`/IMAP and `s3.*` are not resource-backed and behave as before.)
+(The IMAP actions `email.fetch`/`email.mark`/`email.move` and `s3.*` are not
+resource-backed and behave as before.)
 
 ### Profiles
 
@@ -219,7 +220,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |
 | Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.mysql_query`, `db.mysql_exec` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
-| Email | `email.send`, `email.fetch` |
+| Email | `email.send`, `email.fetch`, `email.mark`, `email.move` |
 | Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation` |
 | File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append` |
 | Flow | `flow.call` |
