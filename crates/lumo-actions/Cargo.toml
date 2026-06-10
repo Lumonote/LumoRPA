@@ -94,6 +94,17 @@ imageproc = { version = "0.25", default-features = false }
 rdev = { version = "0.5", optional = true }
 umya-spreadsheet = { workspace = true }
 
+# xml.* 指令族(SOAP/政企对接/电子发票):
+# - xml.parse / xml.build 用 quick-xml 流式解析与转义(版本注释见 workspace Cargo.toml,
+#   不解析 DTD/外部实体,XXE 不可能)。
+# - xml.xpath 用 sxd-document + sxd-xpath(XPath 1.0,纯 Rust,依赖仅 peresil/typed-arena,
+#   无 C 依赖;edition 2018,在 rustc 1.83 可编译——两 crate 自 2020 起 API 冻结但功能完整,
+#   谓词/轴/函数库齐全,远优于自实现路径子集)。若未来维护性恶化,降级方案是自实现
+#   `/a/b[2]/@id` 简化子集,见 xml_ops.rs 头注。
+quick-xml.workspace = true
+sxd-document = "0.3"
+sxd-xpath = "0.4"
+
 [features]
 # 桌面输入动作族 desktop.*(rdev)。默认关闭 —— 信创/headless 交叉编译不受影响,
 # 文本输入走剪贴板粘贴(arboard,Unicode/中文安全)。

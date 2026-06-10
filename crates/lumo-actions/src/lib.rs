@@ -33,6 +33,7 @@ pub mod system_ops;
 pub mod table_ops;
 pub mod transfer;
 pub mod vision;
+pub mod xml_ops;
 
 use lumo_core::ActionRegistry;
 
@@ -70,4 +71,6 @@ pub fn register_all(registry: &mut ActionRegistry) {
     table_ops::register(registry);
     transfer::register(registry);
     docx::register(registry);
+    // 指令集缺口 P0:XML 族(SOAP/政企对接/电子发票)。纯数据变换,不进 capability gate。
+    xml_ops::register(registry);
 }

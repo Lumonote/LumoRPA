@@ -238,6 +238,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Skill | `skill.invoke` |
 | String | `string.upper`, `string.lower`, `string.trim`, `string.length`, `string.split`, `string.join`, `string.replace`, `string.contains`, `string.starts_with`, `string.ends_with`, `string.substring`, `string.repeat`, `string.pad_left`, `string.pad_right`, `string.format`, `string.encode_convert` |
 | System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list` |
+| XML | `xml.parse`, `xml.build`, `xml.xpath` |
 <!-- ACTIONS_END -->
 
 The optional `desktop` feature adds `desktop.move`, `desktop.click`,
@@ -248,6 +249,27 @@ ModelScope OCR preset configured in `ocr_model` (for example
 `modelscope/ZhipuAI/GLM-OCR`, `modelscope/PaddlePaddle/PaddleOCR-VL-1.6`, or
 `modelscope/deepseek-ai/DeepSeek-OCR-2`). The desktop Models page lists the
 supported OCR presets and can download them into the local model cache.
+
+### XML conventions (`xml.parse` / `xml.build` / `xml.xpath`)
+
+`xml.parse` and `xml.build` are inverse mappings sharing one convention:
+attributes become `@attr` keys, text content becomes `#text`, repeated
+sibling elements of the same name collapse into an array, CDATA merges into
+text verbatim, namespace prefixes are kept verbatim in key names
+(`soap:Body` is the literal key, `xmlns:*` declarations are ordinary `@`
+attributes), leaf elements with no attributes fold to a plain string and
+empty elements to `null`. The root element is wrapped in a single-key
+object. Round-trip holds as `parse(build(parse(x))) == parse(x)`.
+
+Parsing never resolves DTDs or external entities (quick-xml only expands
+the five predefined entities and numeric character references), so XXE is
+impossible by construction; inputs are capped by `max_bytes`
+(default 10 MiB). `xml.build` accepts `declaration` (default `true`) and
+`indent` (default `false`, compact). `xml.xpath` evaluates full XPath 1.0
+(sxd-xpath, pure Rust) and returns `matches` + `count`; element matches are
+serialized XML fragments (without re-emitting `xmlns` declarations), and
+documents with namespaces require a `namespaces` prefix→URI map (or use
+`local-name()` in the expression).
 
 ## Validation Checklist
 

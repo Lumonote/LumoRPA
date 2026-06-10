@@ -90,6 +90,12 @@ comfy-table     = "7"
 # 不要对 hashify 盲目 cargo update。
 mail-parser     = { version = "0.11", features = ["full_encoding"] }
 
+# xml.* 指令族:quick-xml 流式解析/转义(纯 Rust,无 C 依赖,信创红线)。
+# 0.37 已是本仓传递依赖(Cargo.lock 0.37.5),不引入新版本树;edition 2021,
+# MSRV 远低于本仓 1.83。quick-xml 只替换五个预定义实体与数字字符引用,自定义/
+# 外部实体与 DTD 一律不展开 —— XXE 在解析层面不可能发生。
+quick-xml       = "0.37"
+
 # http / browser / excel
 reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 axum            = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
