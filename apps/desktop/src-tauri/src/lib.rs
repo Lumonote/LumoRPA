@@ -2570,6 +2570,7 @@ struct DebugOpts {
     resume_from: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_flow(
     home: &Path,
     flow_path: Option<&Path>,
