@@ -274,6 +274,15 @@ preserved, so a whole URL can be encoded without breaking it). `util.url_decode`
 reverses percent encoding; `+` is left as-is (treating `+` as a space is form
 encoding, not URL decoding).
 
+### Screenshot / PDF artifacts
+
+`browser.screenshot`, `desktop.screenshot`, and `browser.print_pdf` additionally
+archive their output as a **run-level artifact** and include an `artifact_id`
+field in the step output (the id referencing the run's artifacts store, for
+replay/observability). When the host runs without an artifacts directory (e.g.
+the CLI's `--no-store` path), archiving is a harmless no-op and `artifact_id`
+is `null` — artifact archiving never fails the action itself.
+
 The optional `desktop` feature adds `desktop.move`, `desktop.click`,
 `desktop.scroll`, `desktop.key`, `desktop.type`, plus native screen capture and
 window management: `desktop.screenshot` (full-screen or `region` capture of a
