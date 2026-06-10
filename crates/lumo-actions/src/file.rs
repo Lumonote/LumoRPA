@@ -24,6 +24,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(DeleteAction);
     r.register(MetadataAction);
     r.register(AppendAction);
+    r.register(WaitAction);
 }
 
 pub struct ReadAction;
@@ -548,6 +549,141 @@ impl Action for AppendAction {
                 .map_err(|e| StepError::msg(format!("file.append write {}: {e}", path.display())))?;
         }
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
+    }
+}
+
+pub struct WaitAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WaitIn {
+    path: PathBuf,
+    /// 总超时(毫秒),超过即报错。默认 60_000。
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+    /// 轮询间隔(毫秒)。默认 500。
+    #[serde(default = "default_wait_poll_ms")]
+    poll_ms: u64,
+    /// 稳定窗口(毫秒):文件存在且 size 在该时长内不变才算就绪。这是等下载场景
+    /// 的关键 —— 浏览器先落 `.crdownload`/部分写入,size 持续变化时不应提前返回。
+    /// 设为 0 表示文件一出现立即返回。默认 1000。
+    #[serde(default = "default_wait_stable_ms")]
+    stable_ms: u64,
+    /// 为 true 时要求文件是**调用之后**新出现/新替换的:调用时记录起始存在性与
+    /// mtime,若文件当时已存在,则其 mtime 必须发生变化才视为候选。默认 false。
+    #[serde(default)]
+    must_exist_new: bool,
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    60_000
+}
+fn default_wait_poll_ms() -> u64 {
+    500
+}
+fn default_wait_stable_ms() -> u64 {
+    1_000
+}
+
+#[async_trait]
+impl Action for WaitAction {
+    fn id(&self) -> &'static str {
+        "file.wait"
+    }
+    fn summary(&self) -> &'static str {
+        "Wait until a file exists and its size is stable (download-completion friendly)"
+    }
+    fn schema(&self) -> &'static Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WaitIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let WaitIn {
+            path,
+            timeout_ms,
+            poll_ms,
+            stable_ms,
+            must_exist_new,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("file.wait input invalid: {e}")))?;
+        // 只探测 metadata,不写盘,因此仅需 fs.read 能力。
+        ctx.ensure_fs_read(&path)?;
+
+        // 取舍说明:这里用 tokio::time 轮询而非 notify 文件系统事件(虽然 workspace
+        // 已有 notify 依赖)。RPA 等下载场景下,轮询 + size 稳定窗口已经足够,且在
+        // macOS/Windows/Linux 上行为完全一致;notify 的事件语义跨平台差异大(改名、
+        // 截断、临时文件落盘的事件序列各不相同),反而难以可靠判定"写完了"。
+        let started = tokio::time::Instant::now();
+        let poll = std::time::Duration::from_millis(poll_ms.max(1));
+        let stable = std::time::Duration::from_millis(stable_ms);
+
+        // must_exist_new:记录调用时刻的存在性与 mtime,作为"新文件"的判定基线。
+        let initial_mtime: Option<SystemTime> = match tokio::fs::metadata(&path).await {
+            Ok(m) => Some(m.modified().map_err(|e| {
+                StepError::msg(format!("file.wait mtime {}: {e}", path.display()))
+            })?),
+            Err(_) => None,
+        };
+
+        // size 稳定性追踪:记录最近一次观测到的 size 以及它首次出现的时刻。
+        let mut last_size: Option<u64> = None;
+        let mut size_since = started;
+        // 最后一次观测到的状态,超时报错时给出明确原因。每轮探测都会先赋值再读。
+        let mut last_state;
+
+        loop {
+            match tokio::fs::metadata(&path).await {
+                Ok(meta) => {
+                    // must_exist_new:调用前就存在且 mtime 没变 → 还是旧文件,不算。
+                    let is_new = !must_exist_new
+                        || match initial_mtime {
+                            None => true, // 调用时不存在,现在出现的必然是新文件
+                            Some(m0) => meta.modified().ok().is_some_and(|m| m != m0),
+                        };
+                    if is_new {
+                        let size = meta.len();
+                        let now = tokio::time::Instant::now();
+                        if last_size != Some(size) {
+                            // size 变化(或首次观测):重置稳定窗口起点。
+                            last_size = Some(size);
+                            size_since = now;
+                        }
+                        if now.duration_since(size_since) >= stable {
+                            let waited_ms = started.elapsed().as_millis() as u64;
+                            return Ok(ActionResult::from(serde_json::json!({
+                                "path": path,
+                                "size": size,
+                                "waited_ms": waited_ms,
+                            })));
+                        }
+                        last_state = "still_changing";
+                    } else {
+                        last_state = "exists_but_not_new";
+                    }
+                }
+                Err(_) => {
+                    // 文件消失/尚未出现:清空稳定性追踪,重新计窗。
+                    last_size = None;
+                    last_state = "not_found";
+                }
+            }
+            let elapsed = started.elapsed();
+            if elapsed.as_millis() as u64 >= timeout_ms {
+                return Err(StepError::msg(format!(
+                    "file.wait timeout after {}ms waiting for {} (last state: {})",
+                    elapsed.as_millis(),
+                    path.display(),
+                    match last_state {
+                        "not_found" => "file does not exist".to_string(),
+                        "still_changing" => format!(
+                            "file exists but size still changing within stable_ms={stable_ms}"
+                        ),
+                        _ => "file pre-existed and was not replaced (must_exist_new=true)"
+                            .to_string(),
+                    }
+                )));
+            }
+            tokio::time::sleep(poll).await;
+        }
     }
 }
 

@@ -43,6 +43,7 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(AutofitColumnsAction);
     r.register(SetCommentAction);
     r.register(SetDataValidationAction);
+    r.register(LookupAction);
 }
 
 pub struct ReadRowsAction;
@@ -1765,6 +1766,228 @@ impl Action for SetDataValidationAction {
             "file": file,
             "range": range,
         })))
+    }
+}
+
+pub struct LookupAction;
+
+/// 列定位:`2`(1-based 序号)/ `"B"`(列字母)/ `"姓名"`(表头名)。
+/// 字符串的解析顺序:①纯数字 → 1-based 序号;②与表头行单元格精确匹配 → 表头名;
+/// ③1~3 个 ASCII 字母 → 列字母;④否则报错。表头名优先于列字母,因为像 `"Name"`
+/// 这样的表头同时也是合法字母串(列 #264777),按表头解释才符合直觉。
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum ColumnRef {
+    /// 1-based 列序号。
+    Index(u64),
+    /// 列字母(`A`/`AB`)或表头名。
+    Name(String),
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LookupIn {
+    file: PathBuf,
+    /// 工作表名;留空取第一个工作表。
+    #[serde(default)]
+    sheet: Option<String>,
+    /// 在哪一列里找 `key_value`(序号/字母/表头名,见 `ColumnRef`)。
+    key_column: ColumnRef,
+    /// 要查找的键值。匹配为同类型精确比较,见动作实现里的类型说明。
+    key_value: Value,
+    /// 命中后取哪一列的值(序号/字母/表头名)。
+    value_column: ColumnRef,
+    /// 表头所在行(1-based),默认 1。表头名定位时从该行读表头;数据扫描从
+    /// `header_row + 1` 行开始。设为 0 表示无表头(从第 1 行扫起,此时不能用表头名)。
+    #[serde(default = "default_header_row")]
+    header_row: u32,
+    /// false(默认)只取第一个命中;true 返回全部命中(数组)。
+    #[serde(default)]
+    all_matches: bool,
+    /// 单值模式未命中时返回它(`found: false`)而不报错;不给且未命中 → 报错。
+    /// `all_matches: true` 时未命中返回空数组,不报错,本字段不参与。
+    #[serde(default)]
+    default: Option<Value>,
+}
+
+fn default_header_row() -> u32 {
+    1
+}
+
+/// 键值与单元格的匹配策略:**同类型精确比较**。
+/// * 字符串 ↔ 字符串单元格:逐字符相等;
+/// * 数字 ↔ 数字单元格:按 f64 数值比较(`1`、`1.0` 视为相等);
+/// * 布尔 ↔ 布尔单元格:相等比较;
+/// * 跨类型一律不匹配 —— Excel 里数字 `1` 与文本 `"1"` 是不同的单元格类型,
+///   静默互转极易掩盖脏数据;需要跨类型匹配时由调用方先把键转成目标类型。
+fn lookup_matches(key: &Value, cell: &Data) -> bool {
+    match (key, cell) {
+        (Value::String(k), Data::String(c)) => k == c,
+        (Value::Number(k), Data::Float(c)) => k.as_f64() == Some(*c),
+        (Value::Number(k), Data::Int(c)) => k.as_f64() == Some(*c as f64),
+        (Value::Number(k), Data::DateTime(c)) => k.as_f64() == Some(c.as_f64()),
+        (Value::Bool(k), Data::Bool(c)) => k == c,
+        _ => false,
+    }
+}
+
+/// 把 `ColumnRef` 解析成 0-based 绝对列号。`headers` 是表头行单元格文本
+/// (`header_row >= 1` 时才有),`(列号, 文本)` 对。
+fn resolve_lookup_column(
+    which: &str,
+    col: &ColumnRef,
+    headers: &[(usize, String)],
+    header_row: u32,
+) -> Result<usize, String> {
+    match col {
+        ColumnRef::Index(n) => {
+            if *n == 0 {
+                return Err(format!("excel.lookup {which} index is 1-based, got 0"));
+            }
+            Ok((*n - 1) as usize)
+        }
+        ColumnRef::Name(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Err(format!("excel.lookup {which} must not be empty"));
+            }
+            // ① 纯数字字符串按 1-based 序号。
+            if t.bytes().all(|b| b.is_ascii_digit()) {
+                let n: usize = t
+                    .parse()
+                    .map_err(|_| format!("excel.lookup {which} `{t}` overflows"))?;
+                if n == 0 {
+                    return Err(format!("excel.lookup {which} index is 1-based, got 0"));
+                }
+                return Ok(n - 1);
+            }
+            // ② 表头名精确匹配(优先于字母,见 ColumnRef 文档)。
+            if let Some((c, _)) = headers.iter().find(|(_, h)| h == t) {
+                return Ok(*c);
+            }
+            // ③ 1~3 个 ASCII 字母按列字母(XLSX 最大列 XFD 即 3 个字母)。
+            if t.len() <= 3 && t.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return parse_col(t);
+            }
+            Err(format!(
+                "excel.lookup {which} `{t}` not found in header row {header_row} and not a valid column letter/index"
+            ))
+        }
+    }
+}
+
+#[async_trait]
+impl Action for LookupAction {
+    fn id(&self) -> &'static str {
+        "excel.lookup"
+    }
+    fn summary(&self) -> &'static str {
+        "VLOOKUP-style search: find key_value in key_column, return value_column from matching row(s)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<LookupIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let LookupIn {
+            file,
+            sheet,
+            key_column,
+            key_value,
+            value_column,
+            header_row,
+            all_matches,
+            default,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("excel.lookup input invalid: {e}")))?;
+        // 只读不写,仅需 fs.read(与 read_rows/read_range 一致,走 calamine)。
+        ctx.ensure_fs_read(&file)?;
+
+        let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+            let mut wb = open_workbook_auto(&file).map_err(|e| e.to_string())?;
+            let sheet_name = match sheet {
+                Some(s) => s,
+                None => wb
+                    .sheet_names()
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "workbook has no sheets".to_string())?,
+            };
+            let range = wb.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
+
+            // 表头行单元格文本(header_row >= 1 时),供表头名定位。
+            let mut headers: Vec<(usize, String)> = Vec::new();
+            if header_row >= 1 {
+                if let (Some(start), Some(end)) = (range.start(), range.end()) {
+                    let hr = header_row - 1; // 0-based 绝对行号
+                    for c in start.1..=end.1 {
+                        if let Some(cell) = range.get_value((hr, c)) {
+                            let text = match cell {
+                                Data::String(s) => s.clone(),
+                                Data::Empty => continue,
+                                other => other.to_string(),
+                            };
+                            headers.push((c as usize, text));
+                        }
+                    }
+                }
+            }
+
+            let key_col =
+                resolve_lookup_column("key_column", &key_column, &headers, header_row)?;
+            let val_col =
+                resolve_lookup_column("value_column", &value_column, &headers, header_row)?;
+
+            // 数据扫描从 header_row + 1 行(1-based)开始;header_row = 0 → 从第 1 行。
+            let mut values: Vec<Value> = Vec::new();
+            let mut row_numbers: Vec<u64> = Vec::new();
+            if let Some(end) = range.end() {
+                for r in header_row..=end.0 {
+                    let hit = range
+                        .get_value((r, key_col as u32))
+                        .is_some_and(|cell| lookup_matches(&key_value, cell));
+                    if hit {
+                        let v = range
+                            .get_value((r, val_col as u32))
+                            .map(cell_to_json)
+                            .unwrap_or(Value::Null);
+                        values.push(v);
+                        row_numbers.push(u64::from(r) + 1); // 1-based 工作表行号
+                        if !all_matches {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let found = !values.is_empty();
+            if all_matches {
+                // all_matches 模式:未命中返回空数组即可,这本身就是合法答案,
+                // 不报错、不使用 default。
+                return Ok(serde_json::json!({
+                    "found": found,
+                    "values": values,
+                    "row_numbers": row_numbers,
+                }));
+            }
+            if found {
+                return Ok(serde_json::json!({
+                    "found": true,
+                    "value": values[0],
+                    "row_number": row_numbers[0],
+                }));
+            }
+            match default {
+                Some(d) => Ok(serde_json::json!({ "found": false, "value": d })),
+                None => Err(format!(
+                    "excel.lookup: key {key_value} not found in sheet `{sheet_name}` (no `default` given)"
+                )),
+            }
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
+        .map_err(StepError::msg)?;
+        Ok(ActionResult::from(out))
     }
 }
 

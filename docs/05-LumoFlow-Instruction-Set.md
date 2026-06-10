@@ -221,8 +221,8 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.mysql_query`, `db.mysql_exec` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
 | Email | `email.send`, `email.fetch`, `email.mark`, `email.move` |
-| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation` |
-| File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append` |
+| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `excel.lookup` |
+| File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append`, `file.wait` |
 | Flow | `flow.call` |
 | FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
 | Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.uuid` |
