@@ -1373,8 +1373,17 @@ async fn run_try(
         Err(e) => Some(e.to_string()),
     };
     let mut final_result = Ok(());
-    if let Some(err) = &caught {
+    // P1:`error` 是 try 作用域变量 —— 注入前保存旧值,try 结束后还原(嵌套
+    // try 各还原各的),不再永久污染 vars 命名空间。模板路径保持 `vars.error`
+    // 不变(随发行版的 examples/control-flow 即用此路径),catch 与 finally
+    // 块内都可见。`Some(prev)` 表示注入过,需要还原;`None` 表示没 caught,
+    // 从未注入。
+    let prev_error = caught.as_ref().map(|err| {
+        let prev = ctx.remove_var("error");
         ctx.set_var("error", Value::String(err.clone()));
+        prev
+    });
+    if let Some(err) = &caught {
         if let Some(c) = &step.catch_ {
             final_result = run_block_boxed(ctx, c, Some(format!("{path}/catch")), depth + 1).await;
         } else {
@@ -1384,9 +1393,12 @@ async fn run_try(
                 if let Err(e) =
                     run_block_boxed(ctx, f, Some(format!("{path}/finally")), depth + 1).await
                 {
-                    error = e.to_string();
+                    // P1:finally 失败不得覆盖根因 —— do 块的原始错误是调用方
+                    // 排障的主线索,finally(清理)的错误追加在后,两者都可见。
+                    error = format!("{error}; finally failed: {e}");
                 }
             }
+            restore_error_var(ctx, prev_error);
             let output = serde_json::json!({ "caught": caught });
             persist_control_result(
                 ctx,
@@ -1412,6 +1424,7 @@ async fn run_try(
             final_result = finally_result;
         }
     }
+    restore_error_var(ctx, prev_error);
     let output = serde_json::json!({ "caught": caught });
     ctx.record_step_output(&step.id, &output);
     let state = if final_result.is_err() {
@@ -1680,6 +1693,20 @@ async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+/// P1:还原 `control.try` 注入的 try 作用域 `error` 变量。`prev` 的三态:
+/// `None` = 本次没 caught、从未注入,什么都不动;`Some(Some(v))` = 注入前
+/// 已有同名变量(嵌套 try 的外层 error),还原旧值;`Some(None)` = 注入前
+/// 不存在,直接移除 —— try 结束后 vars 命名空间与进入前逐键一致。
+fn restore_error_var(ctx: &StepCtx, prev: Option<Option<Value>>) {
+    match prev {
+        None => {}
+        Some(Some(v)) => ctx.set_var("error", v),
+        Some(None) => {
+            ctx.remove_var("error");
+        }
+    }
+}
 
 /// B1 (F-14): evaluate a `control.if` condition. A raw-string `cond` goes
 /// through the expression evaluator (operators + identifier paths, with `{{ }}`

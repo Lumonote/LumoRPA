@@ -585,6 +585,15 @@ impl StepCtx {
         Arc::make_mut(&mut g.vars).insert(key.to_string(), value);
     }
 
+    /// 移除一个 vars 变量并返回旧值(无则 `None`)。P1:供 `control.try` 把
+    /// `error` 做成 try 作用域 —— 进 catch/finally 前保存旧值、结束后还原,
+    /// 不再永久污染 vars 命名空间(嵌套 try 各还原各的)。
+    pub fn remove_var(&self, key: &str) -> Option<Value> {
+        let mut g = self.inner.lock();
+        g.tpl_cache = None; // vars 变更 ⇒ 失效,下次渲染必须看到新值
+        Arc::make_mut(&mut g.vars).remove(key)
+    }
+
     pub fn vars_snapshot(&self) -> Value {
         Value::Object((*self.inner.lock().vars).clone())
     }
