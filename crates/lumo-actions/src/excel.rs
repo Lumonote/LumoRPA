@@ -191,6 +191,7 @@ impl Action for WriteRowAction {
         ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
 
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<usize, String> {
             let mut sheets = load_sheets(&file)?;
             let mut col_headers: Vec<String> = headers.clone().unwrap_or_default();
@@ -254,6 +255,10 @@ impl Action for WriteRowAction {
                         write_cell(ws, r as u32, c as u16, v).map_err(|e| e.to_string())?;
                     }
                 }
+            }
+            // P0-2:save 前检查点 —— 判死后文件不得写回。
+            if interrupt.is_interrupted() {
+                return Err("excel write-back interrupted (file untouched)".into());
             }
             wb.save(&file).map_err(|e| e.to_string())?;
             Ok(existing_rows.len())
@@ -394,6 +399,7 @@ impl Action for WriteCellAction {
 
         let file_for_task = file.clone();
         let sheet_for_task = sheet.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let mut sheets = load_sheets(&file_for_task)?;
             let rows = sheets.entry(sheet_for_task.clone()).or_default();
@@ -404,7 +410,7 @@ impl Action for WriteCellAction {
                 rows[row].push(Value::Null);
             }
             rows[row][col] = value;
-            save_sheets(&file_for_task, &sheets)
+            save_sheets(&file_for_task, &sheets, &interrupt)
         })
         .await
         .map_err(|e| StepError::msg(format!("excel join: {e}")))?
@@ -526,6 +532,7 @@ impl Action for WriteRangeAction {
 
         let file_for_task = file.clone();
         let sheet_for_task = sheet.clone();
+        let interrupt = ctx.step_interrupt();
         let written = tokio::task::spawn_blocking(move || -> Result<usize, String> {
             let mut sheets = load_sheets(&file_for_task)?;
             let rows = sheets.entry(sheet_for_task).or_default();
@@ -544,7 +551,7 @@ impl Action for WriteRangeAction {
                     cells += 1;
                 }
             }
-            save_sheets(&file_for_task, &sheets)?;
+            save_sheets(&file_for_task, &sheets, &interrupt)?;
             Ok(cells)
         })
         .await
@@ -603,6 +610,7 @@ impl Action for FindReplaceAction {
         }
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         let replaced = tokio::task::spawn_blocking(move || -> Result<u64, String> {
             let mut sheets = load_sheets(&file_for_task)?;
             let mut count = 0u64;
@@ -630,7 +638,7 @@ impl Action for FindReplaceAction {
                     }
                 }
             }
-            save_sheets(&file_for_task, &sheets)?;
+            save_sheets(&file_for_task, &sheets, &interrupt)?;
             Ok(count)
         })
         .await
@@ -690,6 +698,7 @@ impl Action for SetFormulaAction {
         // `write_formula` rather than `write_string` by `write_cell`.
         let file_for_task = file.clone();
         let sheet_for_task = sheet.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let mut sheets = load_sheets(&file_for_task)?;
             let rows = sheets.entry(sheet_for_task).or_default();
@@ -700,7 +709,7 @@ impl Action for SetFormulaAction {
                 rows[row].push(Value::Null);
             }
             rows[row][col] = Value::String(format!("{FORMULA_SENTINEL}{formula}"));
-            save_sheets(&file_for_task, &sheets)
+            save_sheets(&file_for_task, &sheets, &interrupt)
         })
         .await
         .map_err(|e| StepError::msg(format!("excel join: {e}")))?
@@ -720,7 +729,14 @@ impl Action for SetFormulaAction {
 
 /// 以 umya 读取工作簿,定位 `sheet`(None 取第一个),施加 `mutate`,再写回 `file`。
 /// 全程同步、阻塞,供 `spawn_blocking` 调用;错误以 `String` 返回。
-fn umya_mutate<F>(file: &PathBuf, sheet: Option<String>, mutate: F) -> Result<(), String>
+/// P0-2:写回前检查 `interrupt` —— 步骤被引擎判超时/取消后,孤儿阻塞任务到此
+/// 必须止步,文件不得落盘(读取与 mutate 都在内存里,白做即可,落盘才是闸口)。
+fn umya_mutate<F>(
+    file: &PathBuf,
+    sheet: Option<String>,
+    interrupt: &lumo_core::StepInterrupt,
+    mutate: F,
+) -> Result<(), String>
 where
     F: FnOnce(&mut umya_spreadsheet::Worksheet) -> Result<(), String>,
 {
@@ -736,6 +752,9 @@ where
                 .ok_or_else(|| "workbook has no sheets".to_string())?,
         };
         mutate(ws)?;
+    }
+    if interrupt.is_interrupted() {
+        return Err("excel write-back interrupted (file untouched)".into());
     }
     umya_spreadsheet::writer::xlsx::write(&book, file)
         .map_err(|e| format!("excel umya write `{}`: {e:?}", file.display()))?;
@@ -927,8 +946,9 @@ impl Action for SetStyleAction {
         };
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 for r in r0..=r1 {
                     for c in c0..=c1 {
                         let coord = format!("{}{}", col_to_letters(c), r + 1);
@@ -1029,8 +1049,9 @@ impl Action for MergeCellsAction {
 
         let file_for_task = file.clone();
         let range_for_task = range.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 ws.add_merge_cells(range_for_task);
                 if let Some(v) = value {
                     let text = match v {
@@ -1094,8 +1115,9 @@ impl Action for SetColumnWidthAction {
         let (c0, c1) = parse_col_range(&columns).map_err(StepError::msg)?;
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 for c in c0..=c1 {
                     let letters = col_to_letters(c);
                     ws.get_column_dimension_mut(&letters).set_width(width);
@@ -1154,8 +1176,9 @@ impl Action for SetRowHeightAction {
         let (r0, r1) = parse_row_range(&rows).map_err(StepError::msg)?;
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 for r in r0..=r1 {
                     ws.get_row_dimension_mut(&r).set_height(height);
                 }
@@ -1213,8 +1236,9 @@ impl Action for FreezePanesAction {
         let anchor = top_left_cell.trim().to_string();
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 let mut pane = umya_spreadsheet::Pane::default();
                 pane.set_state(umya_spreadsheet::PaneStateValues::Frozen);
                 pane.set_vertical_split(col as f64);
@@ -1341,8 +1365,9 @@ impl Action for AddChartAction {
         let series_count = series.len();
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 let sheet_name = ws.get_name().to_string();
                 let qualified: Vec<String> = series
                     .iter()
@@ -1450,8 +1475,9 @@ impl Action for SetConditionalFormatAction {
         let sqref = range.trim().to_string();
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 let mut formula = umya_spreadsheet::Formula::default();
                 formula.set_string_value(formula1);
 
@@ -1521,8 +1547,9 @@ impl Action for AutofitColumnsAction {
         let (c0, c1) = parse_col_range(&columns).map_err(StepError::msg)?;
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 for c in c0..=c1 {
                     let letters = col_to_letters(c);
                     ws.get_column_dimension_mut(&letters).set_auto_width(true);
@@ -1587,8 +1614,9 @@ impl Action for SetCommentAction {
         let cell_ref = cell.trim().to_string();
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 let mut comment = umya_spreadsheet::Comment::default();
                 comment.new_comment(&*cell_ref);
                 comment.set_text_string(text);
@@ -1733,8 +1761,9 @@ impl Action for SetDataValidationAction {
         let sqref = range.trim().to_string();
 
         let file_for_task = file.clone();
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
-            umya_mutate(&file_for_task, sheet, |ws| {
+            umya_mutate(&file_for_task, sheet, &interrupt, |ws| {
                 let mut dv = umya_spreadsheet::DataValidation::default();
                 dv.set_type(dv_type);
                 if let Some(op) = dv_op {
@@ -2014,7 +2043,11 @@ fn load_sheets(file: &PathBuf) -> Result<BTreeMap<String, Vec<Vec<Value>>>, Stri
     Ok(sheets)
 }
 
-fn save_sheets(file: &PathBuf, sheets: &BTreeMap<String, Vec<Vec<Value>>>) -> Result<(), String> {
+fn save_sheets(
+    file: &PathBuf,
+    sheets: &BTreeMap<String, Vec<Vec<Value>>>,
+    interrupt: &lumo_core::StepInterrupt,
+) -> Result<(), String> {
     let mut wb = Workbook::new();
     for (sheet_name, rows) in sheets {
         let ws = wb.add_worksheet();
@@ -2024,6 +2057,10 @@ fn save_sheets(file: &PathBuf, sheets: &BTreeMap<String, Vec<Vec<Value>>>) -> Re
                 write_cell(ws, r as u32, c as u16, v).map_err(|e| e.to_string())?;
             }
         }
+    }
+    // P0-2:save 是副作用唯一落地点 —— 步骤判死后孤儿任务到此止步,文件不动。
+    if interrupt.is_interrupted() {
+        return Err("excel write-back interrupted (file untouched)".into());
     }
     wb.save(file).map_err(|e| e.to_string())
 }

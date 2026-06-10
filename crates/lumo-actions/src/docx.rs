@@ -170,9 +170,12 @@ impl Action for ReplacePlaceholdersAction {
 
         let tpl = template.clone();
         let dst = out.clone();
-        let replaced = tokio::task::spawn_blocking(move || replace_placeholders(&tpl, &dst, &values))
-            .await
-            .map_err(|e| StepError::msg(format!("docx.replace_placeholders join: {e}")))??;
+        // P0-2:中断句柄进闭包,`replace_placeholders` 在条目边界与落盘前设检查点。
+        let interrupt = ctx.step_interrupt();
+        let replaced =
+            tokio::task::spawn_blocking(move || replace_placeholders(&tpl, &dst, &values, &interrupt))
+                .await
+                .map_err(|e| StepError::msg(format!("docx.replace_placeholders join: {e}")))??;
         Ok(ActionResult::from(serde_json::json!({
             "out": out,
             "replaced": replaced,
@@ -182,10 +185,13 @@ impl Action for ReplacePlaceholdersAction {
 
 /// 逐条目把 `word/document.xml` 里的 `{{key}}` 替换为转义后的值,其余 zip 条目原样
 /// 转写到 `dst`。返回实际命中替换的占位符 token 数(命中即累加 1,无论出现几次)。
+/// P0-2:重打包全在内存 buffer 里,末尾 `fs::write` 是唯一副作用 —— 条目边界
+/// 与落盘前各设检查点,步骤判死后孤儿阻塞任务提前退出,输出文件不动。
 fn replace_placeholders(
     template: &std::path::Path,
     dst: &std::path::Path,
     values: &Map<String, Value>,
+    interrupt: &lumo_core::StepInterrupt,
 ) -> Result<usize, StepError> {
     let bytes = std::fs::read(template)
         .map_err(|e| StepError::msg(format!("read {}: {e}", template.display())))?;
@@ -197,6 +203,11 @@ fn replace_placeholders(
     {
         let mut writer = zip::ZipWriter::new(Cursor::new(&mut out_buf));
         for i in 0..zip.len() {
+            if interrupt.is_interrupted() {
+                return Err(StepError::msg(
+                    "docx.replace_placeholders interrupted (output untouched)",
+                ));
+            }
             let mut entry = zip
                 .by_index(i)
                 .map_err(|e| StepError::msg(format!("docx entry {i}: {e}")))?;
@@ -239,6 +250,11 @@ fn replace_placeholders(
 
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    if interrupt.is_interrupted() {
+        return Err(StepError::msg(
+            "docx.replace_placeholders interrupted (output untouched)",
+        ));
     }
     std::fs::write(dst, &out_buf)
         .map_err(|e| StepError::msg(format!("save {}: {e}", dst.display())))?;

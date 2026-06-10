@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, CancelToken, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx, StepInterrupt};
 use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -95,13 +95,14 @@ fn collect_entries(
 }
 
 /// Synchronous compress step (runs in `spawn_blocking`). Returns `(entries, bytes)`.
-/// Cooperatively cancellable: when `cancel` is set, the per-entry loop bails out
-/// with a clear error so the blocking thread stops promptly instead of running
-/// to completion after the VM has already been cancelled.
+/// Cooperatively cancellable: the per-entry loop bails out with a clear error so
+/// the blocking thread stops promptly instead of running to completion after the
+/// VM has already cancelled the run **or timed out this step** (P0-2:句柄从
+/// `CancelToken` 升级为 `StepInterrupt`,运行级取消 + 步级超时合一)。
 fn write_zip(
     dest: &Path,
     entries: Vec<(PathBuf, String)>,
-    cancel: Option<&CancelToken>,
+    interrupt: &StepInterrupt,
 ) -> Result<(u64, u64), StepError> {
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
@@ -119,7 +120,7 @@ fn write_zip(
     let mut count: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     for (abs, name) in entries {
-        if cancel.is_some_and(CancelToken::is_cancelled) {
+        if interrupt.is_interrupted() {
             return Err(StepError::msg("archive.zip cancelled"));
         }
         zw.start_file(name.clone(), opts)
@@ -179,9 +180,9 @@ impl Action for ZipAction {
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_write(&dest_path)?;
 
-        let cancel = ctx.cancel_token();
+        let cancel = ctx.step_interrupt();
         let (count, bytes) =
-            tokio::task::spawn_blocking(move || write_zip(&dest_path, entries, cancel.as_ref()))
+            tokio::task::spawn_blocking(move || write_zip(&dest_path, entries, &cancel))
                 .await
                 .map_err(|e| StepError::msg(format!("archive.zip task: {e}")))??;
 
@@ -240,13 +241,14 @@ fn safe_join(dest: &Path, entry_name: &str) -> Result<PathBuf, StepError> {
 
 /// Synchronous extract step (runs in `spawn_blocking`). Returns the file count.
 /// Aborts (and removes the partial file) once uncompressed bytes exceed `max_total`.
-/// Cooperatively cancellable: checks `cancel` before each entry so the blocking
-/// thread stops promptly on VM cancel instead of extracting the whole archive.
+/// Cooperatively cancellable: checks `interrupt` before each entry so the blocking
+/// thread stops promptly on VM cancel **or step timeout** instead of extracting
+/// the whole archive (P0-2:句柄从 `CancelToken` 升级为 `StepInterrupt`)。
 fn extract_zip(
     src: &Path,
     dest: &Path,
     max_total: u64,
-    cancel: Option<&CancelToken>,
+    interrupt: &StepInterrupt,
 ) -> Result<u64, StepError> {
     let file = std::fs::File::open(src)
         .map_err(|e| StepError::msg(format!("archive.unzip open {}: {e}", src.display())))?;
@@ -256,7 +258,7 @@ fn extract_zip(
     let mut count: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     for i in 0..zr.len() {
-        if cancel.is_some_and(CancelToken::is_cancelled) {
+        if interrupt.is_interrupted() {
             return Err(StepError::msg("archive.unzip cancelled"));
         }
         let mut entry = zr
@@ -360,9 +362,9 @@ impl Action for UnzipAction {
         }
 
         let dp = dest_path.clone();
-        let cancel = ctx.cancel_token();
+        let cancel = ctx.step_interrupt();
         let count = tokio::task::spawn_blocking(move || {
-            extract_zip(&src_path, &dp, max_total, cancel.as_ref())
+            extract_zip(&src_path, &dp, max_total, &cancel)
         })
         .await
         .map_err(|e| StepError::msg(format!("archive.unzip task: {e}")))??;

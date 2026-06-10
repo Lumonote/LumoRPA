@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, ResourceFactory, RunTeardown, StepCtx};
+use lumo_core::{
+    Action, ActionRegistry, ActionResult, ResourceFactory, RunTeardown, StepCtx, StepInterrupt,
+};
 use lumo_dsl::ResourceDecl;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -80,6 +82,7 @@ fn run_query(
     sql: &str,
     binds: Vec<rusqlite::types::Value>,
     limit: usize,
+    interrupt: &StepInterrupt,
 ) -> Result<Vec<Value>, StepError> {
     let mut stmt = conn
         .prepare(sql)
@@ -97,6 +100,11 @@ fn run_query(
         .map_err(|e| StepError::msg(format!("query: {e}")))?;
     let mut out = Vec::new();
     for _ in 0..limit {
+        // P0-2:每行一个检查点 —— 步骤被判超时/取消后,孤儿阻塞任务在此提前
+        // 退出并释放连接锁,不再卡住后续步骤(bound 路径共享同一把 Mutex)。
+        if interrupt.is_interrupted() {
+            return Err(StepError::msg("db.sqlite_query interrupted"));
+        }
         match iter.next() {
             Some(Ok(v)) => out.push(v),
             Some(Err(e)) => return Err(StepError::msg(format!("row: {e}"))),
@@ -111,17 +119,27 @@ fn run_query(
 fn run_batch(
     conn: &mut Connection,
     prepared: Vec<(String, Vec<rusqlite::types::Value>)>,
+    interrupt: &StepInterrupt,
 ) -> Result<Vec<usize>, StepError> {
     let tx = conn
         .transaction()
         .map_err(|e| StepError::msg(format!("begin tx: {e}")))?;
     let mut counts = Vec::with_capacity(prepared.len());
     for (i, (sql, binds)) in prepared.into_iter().enumerate() {
+        // P0-2:语句边界检查点 —— Err 提前 return ⇒ `tx` drop ⇒ 自动 ROLLBACK。
+        if interrupt.is_interrupted() {
+            return Err(StepError::msg("db.sqlite_batch interrupted (rolled back)"));
+        }
         let n = tx
             .execute(&sql, params_from_iter(binds))
             // Err 提前 return ⇒ `tx` drop ⇒ 自动 ROLLBACK,整批不落盘。
             .map_err(|e| StepError::msg(format!("statement {i}: {e}")))?;
         counts.push(n);
+    }
+    // P0-2:commit 是副作用落地的唯一闸口,必查 —— 引擎已把这次 attempt 记成
+    // timeout,这里再 commit 就意味着"状态说没写、库里却写了",重跑即重复写入。
+    if interrupt.is_interrupted() {
+        return Err(StepError::msg("db.sqlite_batch interrupted (rolled back)"));
     }
     tx.commit()
         .map_err(|e| StepError::msg(format!("commit: {e}")))?;
@@ -302,6 +320,9 @@ impl Action for SqliteQueryAction {
         let (slot, path) = resolve_target(ctx, db)?;
         ctx.ensure_fs_read(&path)?;
         let binds = bind_params(&args)?;
+        // P0-2:把步级中断句柄带进阻塞闭包(只读路径也要 —— bound 连接共享
+        // Mutex,长查询卡锁会饿死后续步骤)。
+        let interrupt = ctx.step_interrupt();
         let rows = match slot {
             // Bound: reuse the run's shared connection. Keep the query read-only
             // on the RW handle (`query_only` under the lock) so a query can't write.
@@ -312,7 +333,7 @@ impl Action for SqliteQueryAction {
                     guard
                         .execute_batch("PRAGMA query_only = ON;")
                         .map_err(|e| StepError::msg(format!("query_only: {e}")))?;
-                    run_query(&guard, &sql, binds, limit)
+                    run_query(&guard, &sql, binds, limit, &interrupt)
                 })
                 .await
                 .map_err(|e| StepError::msg(format!("sqlite task: {e}")))??
@@ -321,7 +342,7 @@ impl Action for SqliteQueryAction {
             None => tokio::task::spawn_blocking(move || -> Result<Vec<Value>, StepError> {
                 let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .map_err(|e| StepError::msg(format!("open {}: {e}", path.display())))?;
-                run_query(&conn, &sql, binds, limit)
+                run_query(&conn, &sql, binds, limit, &interrupt)
             })
             .await
             .map_err(|e| StepError::msg(format!("sqlite task: {e}")))??,
@@ -364,12 +385,18 @@ impl Action for SqliteExecAction {
         let (slot, path) = resolve_target(ctx, db)?;
         ctx.ensure_fs_write(&path)?;
         let binds = bind_params(&args)?;
+        // P0-2:单条写没有事务包裹,执行即落盘 —— 执行前是唯一能拦住副作用的
+        // 检查点(拿到锁之后再查一次:排队等锁期间步骤可能已被判死)。
+        let interrupt = ctx.step_interrupt();
         let n = match slot {
             // Bound: reuse the run's shared connection (writes ⇒ query_only OFF).
             Some(name) => {
                 let conn = ensure_conn(ctx.run_id(), &name, path).await?;
                 tokio::task::spawn_blocking(move || -> Result<usize, StepError> {
                     let guard = conn.lock();
+                    if interrupt.is_interrupted() {
+                        return Err(StepError::msg("db.sqlite_exec interrupted"));
+                    }
                     guard
                         .execute_batch("PRAGMA query_only = OFF;")
                         .map_err(|e| StepError::msg(format!("query_only: {e}")))?;
@@ -384,6 +411,9 @@ impl Action for SqliteExecAction {
             None => tokio::task::spawn_blocking(move || -> Result<usize, StepError> {
                 let conn = Connection::open(&path)
                     .map_err(|e| StepError::msg(format!("open {}: {e}", path.display())))?;
+                if interrupt.is_interrupted() {
+                    return Err(StepError::msg("db.sqlite_exec interrupted"));
+                }
                 conn.execute(&sql, params_from_iter(binds))
                     .map_err(|e| StepError::msg(format!("exec: {e}")))
             })
@@ -449,6 +479,8 @@ impl Action for SqliteBatchAction {
         for s in statements {
             prepared.push((s.sql, bind_params(&s.args)?));
         }
+        // P0-2:中断句柄进闭包;`run_batch` 在语句边界与 commit 前各设检查点。
+        let interrupt = ctx.step_interrupt();
         let affected = match slot {
             // Bound: reuse the run's shared connection (writes ⇒ query_only OFF).
             Some(name) => {
@@ -458,7 +490,7 @@ impl Action for SqliteBatchAction {
                     guard
                         .execute_batch("PRAGMA query_only = OFF;")
                         .map_err(|e| StepError::msg(format!("query_only: {e}")))?;
-                    run_batch(&mut guard, prepared)
+                    run_batch(&mut guard, prepared, &interrupt)
                 })
                 .await
                 .map_err(|e| StepError::msg(format!("sqlite task: {e}")))??
@@ -467,7 +499,7 @@ impl Action for SqliteBatchAction {
             None => tokio::task::spawn_blocking(move || -> Result<Vec<usize>, StepError> {
                 let mut conn = Connection::open(&path)
                     .map_err(|e| StepError::msg(format!("open {}: {e}", path.display())))?;
-                run_batch(&mut conn, prepared)
+                run_batch(&mut conn, prepared, &interrupt)
             })
             .await
             .map_err(|e| StepError::msg(format!("sqlite task: {e}")))??,

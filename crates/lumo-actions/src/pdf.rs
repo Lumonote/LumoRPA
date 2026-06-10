@@ -182,7 +182,9 @@ impl Action for WriteAction {
         }
 
         let path_for_blocking = path.clone();
-        tokio::task::spawn_blocking(move || write_pdf(&path_for_blocking, &body, size))
+        // P0-2:中断句柄进闭包,`write_pdf` 在落盘前设检查点。
+        let interrupt = ctx.step_interrupt();
+        tokio::task::spawn_blocking(move || write_pdf(&path_for_blocking, &body, size, &interrupt))
             .await
             .map_err(|e| StepError::msg(format!("pdf.write join: {e}")))??;
 
@@ -192,7 +194,14 @@ impl Action for WriteAction {
 
 /// 用 lopdf 组装单页文本 PDF 并保存。每行一个 `Td` 下移（行距 = 1.2×字号），
 /// 用内置 Courier（Type1，无需嵌入字体文件）。
-fn write_pdf(path: &std::path::Path, lines: &[String], font_size: f32) -> Result<(), StepError> {
+/// P0-2:组装全在内存,`doc.save` 是唯一副作用 —— 落盘前检查 `interrupt`,
+/// 步骤判死后孤儿阻塞任务到此止步,文件不动。
+fn write_pdf(
+    path: &std::path::Path,
+    lines: &[String],
+    font_size: f32,
+    interrupt: &lumo_core::StepInterrupt,
+) -> Result<(), StepError> {
     use lopdf::content::{Content, Operation};
     use lopdf::{dictionary, Document, Object, Stream};
 
@@ -257,6 +266,9 @@ fn write_pdf(path: &std::path::Path, lines: &[String], font_size: f32) -> Result
     });
     doc.trailer.set("Root", catalog_id);
     doc.compress();
+    if interrupt.is_interrupted() {
+        return Err(StepError::msg("pdf.write interrupted (file untouched)"));
+    }
     doc.save(path)
         .map_err(|e| StepError::msg(format!("save pdf {}: {e}", path.display())))?;
     Ok(())
