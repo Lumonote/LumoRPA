@@ -3,7 +3,10 @@ use lumo_ai::{
     provider::{ChatMessage, ChatRequest, Role},
     AiRouter, ChatAction,
 };
-use lumo_core::{ActionRegistry, CancelToken, FlowVm, RunOptions};
+use lumo_core::{
+    ActionRegistry, CancelToken, FlowVm, HumanPromptKind, HumanPromptRequest, HumanPrompter,
+    HumanResponse, RunOptions, StepError,
+};
 use lumo_dsl::{Flow, IoDecl, Step};
 use lumo_recorder::{
     desktop::DesktopRecorder, events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent,
@@ -38,11 +41,19 @@ struct DesktopState {
     /// `execute_flow` 自注册/自清理，`cancel_run` 只查表触发 —— 与
     /// `RecorderSlot` 一样靠 Mutex 串行化并发访问。
     cancels: CancelMap,
+    /// P1（人机交互）：等待前端回执的 human prompt 表，键为 prompt_id。
+    /// `TauriPrompter::prompt` 注册 oneshot 发送端并 emit `human-prompt`
+    /// 事件，`human_respond` 命令摘出发送端投递回执；等待方先行退出
+    /// （超时/取消，RAII 自清理）后，迟到的回执自然落到 ok=false。
+    prompts: PromptMap,
 }
 
 /// P0-1：跨命令共享的取消句柄表。包一层 Arc 是因为 `execute_flow` 在测试里
 /// 脱离 tauri `State` 直接驱动（见 `cancel_timeout_tests`），需要可独立持有。
 type CancelMap = Arc<Mutex<HashMap<String, CancelToken>>>;
+
+/// P1（人机交互）：跨命令共享的 human prompt 回执表（语义见 `DesktopState`）。
+type PromptMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>>;
 
 #[derive(Default)]
 struct RecorderSlot {
@@ -1038,6 +1049,7 @@ async fn run_flow(
         no_store,
         DebugOpts::default(),
         &state.cancels,
+        Some(desktop_prompter(&app, &state)),
     )
     .await
 }
@@ -1075,6 +1087,7 @@ async fn run_step(
         no_store,
         DebugOpts::default(),
         &state.cancels,
+        Some(desktop_prompter(&app, &state)),
     )
     .await
 }
@@ -1114,8 +1127,18 @@ async fn debug_flow(
             resume_from,
         },
         &state.cancels,
+        Some(desktop_prompter(&app, &state)),
     )
     .await
+}
+
+/// P1（人机交互）：为一次运行构造桌面宿主的 prompter（事件 + 回执表均挂在
+/// 共享 `DesktopState` 上，`human_respond` 命令与之同源）。
+fn desktop_prompter(app: &AppHandle, state: &State<'_, DesktopState>) -> Arc<dyn HumanPrompter> {
+    Arc::new(TauriPrompter {
+        app: app.clone(),
+        prompts: state.prompts.clone(),
+    })
 }
 
 /// P0-1：`cancel_run` 的返回。`ok=false` 表示该 run 不存在或已结束 —— 取消
@@ -1149,6 +1172,140 @@ fn cancel_run_inner(cancels: &CancelMap, run_id: &str) -> bool {
             true
         }
         None => false,
+    }
+}
+
+// ─── P1（人机交互）：human-prompt 事件 + human_respond 回执 ─────────────────
+
+/// emit 给前端的 `human-prompt` 事件载荷。前端 `listen("human-prompt", …)`
+/// 弹窗收集回答后调 `human_respond(promptId, value)` 投递回执；`value` 形状：
+/// input → string，confirm/approve → bool，approve 也可给
+/// `{approved, by?, comment?}` 携带审批人与备注。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HumanPromptEvent {
+    prompt_id: String,
+    /// "input" | "confirm" | "approve"
+    kind: String,
+    message: String,
+    default: Option<Value>,
+    timeout_ms: u64,
+    run_id: String,
+    step_path: String,
+}
+
+/// 桌面宿主的 [`HumanPrompter`]：emit `human-prompt` 事件，经 oneshot 等
+/// `human_respond` 回执。等待 future 被动作侧 drop（超时/取消）时 RAII guard
+/// 把表项摘除，迟到的回执自然落空（ok=false）。
+struct TauriPrompter {
+    app: AppHandle,
+    prompts: PromptMap,
+}
+
+/// RAII：无论正常回执、超时还是取消，都保证 prompt 表项被摘除，表不随
+/// 历史增长（与 `cancels` 表同一治理思路）。
+struct PromptCleanup {
+    prompts: PromptMap,
+    id: String,
+}
+
+impl Drop for PromptCleanup {
+    fn drop(&mut self) {
+        self.prompts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// 前端回执 → 引擎 `HumanResponse`。裸值（string/bool）直通；对象形状取
+/// `value`/`approved`/`confirmed` 之一作为值，`by`/`comment` 原样透传。
+fn decode_human_response(value: Value) -> HumanResponse {
+    if let Value::Object(map) = &value {
+        let inner = map
+            .get("value")
+            .or_else(|| map.get("approved"))
+            .or_else(|| map.get("confirmed"));
+        if let Some(inner) = inner {
+            return HumanResponse {
+                value: inner.clone(),
+                by: map.get("by").and_then(Value::as_str).map(str::to_string),
+                comment: map
+                    .get("comment")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+        }
+    }
+    HumanResponse {
+        value,
+        by: None,
+        comment: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl HumanPrompter for TauriPrompter {
+    async fn prompt(&self, req: HumanPromptRequest) -> Result<HumanResponse, StepError> {
+        let prompt_id = ulid::Ulid::new().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
+        self.prompts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(prompt_id.clone(), tx);
+        let _cleanup = PromptCleanup {
+            prompts: self.prompts.clone(),
+            id: prompt_id.clone(),
+        };
+        let kind = match req.kind {
+            HumanPromptKind::Input => "input",
+            HumanPromptKind::Confirm => "confirm",
+            HumanPromptKind::Approve => "approve",
+        };
+        self.app
+            .emit(
+                "human-prompt",
+                &HumanPromptEvent {
+                    prompt_id,
+                    kind: kind.into(),
+                    message: req.message,
+                    default: req.default,
+                    timeout_ms: req.timeout_ms,
+                    run_id: req.run_id,
+                    step_path: req.step_path,
+                },
+            )
+            .map_err(|e| StepError::msg(format!("emit human-prompt: {e}")))?;
+        let value = rx
+            .await
+            .map_err(|_| StepError::msg("human prompt channel closed without a response"))?;
+        Ok(decode_human_response(value))
+    }
+}
+
+/// P1（人机交互）：`human_respond` 的返回。ok=false 表示 prompt 不存在或已
+/// 结束（超时/取消先到）—— 回执与等待结束天然存在竞态，前端提示"该提示已
+/// 失效"即可，不必当错误处理（与 `cancel_run` 同一语义）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HumanRespondResult {
+    ok: bool,
+}
+
+/// P1（人机交互）：前端对一条 `human-prompt` 事件的回执入口。
+#[tauri::command]
+fn human_respond(
+    state: State<'_, DesktopState>,
+    prompt_id: String,
+    value: Value,
+) -> HumanRespondResult {
+    let sender = state
+        .prompts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&prompt_id);
+    HumanRespondResult {
+        ok: sender.is_some_and(|tx| tx.send(value).is_ok()),
     }
 }
 
@@ -1704,6 +1861,7 @@ pub fn run() {
             run_step,
             debug_flow,
             cancel_run,
+            human_respond,
             list_runs,
             show_run,
             run_cost,
@@ -2420,6 +2578,7 @@ async fn execute_flow(
     no_store: bool,
     debug: DebugOpts,
     cancels: &CancelMap,
+    prompter: Option<Arc<dyn HumanPrompter>>,
 ) -> Result<RunResponse, String> {
     let registry = build_action_registry(home, flow_path);
     let repo = if no_store {
@@ -2447,7 +2606,10 @@ async fn execute_flow(
         .with_artifacts_dir(Some(home.join("artifacts")))
         .with_breakpoints(debug.breakpoints)
         .with_step_mode(debug.step_mode)
-        .with_resume_from(debug.resume_from);
+        .with_resume_from(debug.resume_from)
+        // P1（人机交互）：桌面宿主的 human-prompt 事件通道（测试路径传 None，
+        // human.* 步骤届时显式报"宿主不支持人机交互"）。
+        .with_human_prompter(prompter);
     // P0-1: attach AI hooks (heal / extract_visual / decide / diagnose) when the
     // flow enables AI and providers are configured; otherwise the VM stays
     // deterministic. Mirrors the CLI's `attach_ai_hooks`.
@@ -3356,6 +3518,7 @@ spec:
             false,
             debug,
             &cancels,
+            None,
         )
         .await
         .expect("execute_flow ok")
@@ -3535,6 +3698,7 @@ spec:
             false,
             DebugOpts::default(),
             &cancels,
+            None,
         )
         .await
     }

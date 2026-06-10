@@ -25,6 +25,7 @@ lumo-recorder.workspace = true
 lumo-skills.workspace = true
 lumo-storage.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 base64 = "0.22"
 chrono.workspace = true
 serde.workspace = true
