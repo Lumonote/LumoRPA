@@ -2,7 +2,9 @@
 //!
 //! Shell execution is opt-in via `LUMO_ALLOW_SHELL=1` since giving a flow an
 //! arbitrary process spawn is a meaningful escalation of trust. Sleep / env /
-//! platform are pure-info and require no opt-in.
+//! platform are pure-info and require no opt-in. Process control
+//! (`system.process_kill` / `system.app_start`) is the same tier of trust
+//! escalation and is opt-in via `LUMO_ALLOW_PROCESS=1`.
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
@@ -19,6 +21,8 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(SleepAction);
     r.register(PlatformAction);
     r.register(ProcessListAction);
+    r.register(ProcessKillAction);
+    r.register(AppStartAction);
 }
 
 pub struct ShellAction;
@@ -236,4 +240,173 @@ fn collect_processes(name_filter: Option<&str>, limit: usize) -> Vec<Value> {
         }
     }
     out
+}
+
+// ─── system.process_kill / system.app_start ──────────────────────────────────
+// 进程控制域:杀任意进程 / 拉起任意外部应用,与 system.shell 同级的信任升级,
+// 同样走环境变量显式 opt-in。闸门独立于 LUMO_ALLOW_SHELL:授权「能跑 shell」
+// 与授权「能杀进程 / 启应用」是两个不同的运维决策,互不隐含。
+
+/// `system.process_kill` / `system.app_start` 共用的 opt-in 闸(默认拒绝)。
+fn ensure_process_allowed(action: &str) -> Result<(), StepError> {
+    if std::env::var("LUMO_ALLOW_PROCESS").ok().as_deref() != Some("1") {
+        return Err(StepError::msg(format!(
+            "{action} is disabled: set LUMO_ALLOW_PROCESS=1 to allow"
+        )));
+    }
+    Ok(())
+}
+
+pub struct ProcessKillAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProcessKillIn {
+    pid: u32,
+    /// 强杀:Unix 发 SIGKILL(缺省 SIGTERM,进程可优雅收尾);Windows 没有
+    /// 优雅终止信号,force 与否都是 TerminateProcess(见 kill_process 注释)。
+    #[serde(default)]
+    force: bool,
+}
+
+#[async_trait]
+impl Action for ProcessKillAction {
+    fn id(&self) -> &'static str {
+        "system.process_kill"
+    }
+    fn summary(&self) -> &'static str {
+        "Terminate a process by pid — SIGTERM, or SIGKILL with `force` (requires LUMO_ALLOW_PROCESS=1)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ProcessKillIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let ProcessKillIn { pid, force } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("system.process_kill invalid: {e}")))?;
+        ensure_process_allowed("system.process_kill")?;
+        // 防呆:拒杀自身 —— 杀掉宿主进程等于让 run 自毁,永远不是 flow 的本意
+        // (多半是表达式算错了 pid)。pid 0 同拒:Unix kill(0) 打的是整个进程组,
+        // 同样殃及自身。
+        if pid == std::process::id() {
+            return Err(StepError::msg(format!(
+                "system.process_kill: refusing to kill own process (pid {pid})"
+            )));
+        }
+        if pid == 0 {
+            return Err(StepError::msg(
+                "system.process_kill: refusing pid 0 (the whole process group on Unix)",
+            ));
+        }
+        // sysinfo 的进程表刷新是阻塞 syscall,与 process_list 同款挪到阻塞线程池。
+        let signal = tokio::task::spawn_blocking(move || kill_process(pid, force))
+            .await
+            .map_err(|e| StepError::msg(format!("system.process_kill join: {e}")))?
+            .map_err(StepError::msg)?;
+        Ok(ActionResult::from(serde_json::json!({
+            "pid": pid,
+            // 实际送达的信号:"term"(可优雅处理)或 "kill"(强杀 / Windows 唯一路径)。
+            "signal": signal,
+        })))
+    }
+}
+
+/// 按 pid 定位并终止进程(纯 Rust `sysinfo` 路径,无 C 依赖)。pid 不存在是
+/// 显式错误,绝不沉默成功 —— 「以为杀掉了其实没这进程」会让后续步骤建立在
+/// 假前提上。返回实际送达的信号名。
+fn kill_process(pid: u32, force: bool) -> Result<&'static str, String> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let target = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    let proc = sys
+        .process(target)
+        .ok_or_else(|| format!("system.process_kill: no such process: pid {pid}"))?;
+    // Unix:force ⇒ SIGKILL,否则 SIGTERM;Windows 的 kill_with 不支持 Term
+    // (返回 None),回落到 kill()(TerminateProcess)—— 平台差异收在这一处。
+    let (signal, sent) = if force {
+        ("kill", proc.kill())
+    } else {
+        match proc.kill_with(sysinfo::Signal::Term) {
+            Some(sent) => ("term", sent),
+            None => ("kill", proc.kill()),
+        }
+    };
+    if !sent {
+        return Err(format!(
+            "system.process_kill: failed to signal pid {pid} (insufficient permission?)"
+        ));
+    }
+    Ok(signal)
+}
+
+pub struct AppStartAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AppStartIn {
+    /// 可执行文件路径或名字(按 PATH 解析);macOS 上以 `.app` 结尾时走
+    /// `open -a` 语义(LaunchServices 拉起 bundle)。
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[async_trait]
+impl Action for AppStartAction {
+    fn id(&self) -> &'static str {
+        "system.app_start"
+    }
+    fn summary(&self) -> &'static str {
+        "Start an external application detached and return its pid (requires LUMO_ALLOW_PROCESS=1)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AppStartIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let AppStartIn { program, args, cwd } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("system.app_start invalid: {e}")))?;
+        ensure_process_allowed("system.app_start")?;
+        if program.trim().is_empty() {
+            return Err(StepError::msg("system.app_start: program must not be empty"));
+        }
+        // macOS 的 .app 是 bundle 目录,不能直接 exec —— 转 `open -a <bundle>
+        // [--args …]`。代价:返回的 pid 是 `open` 启动器的(LaunchServices 异步
+        // 拉起目标 app,真实 pid 拿不到);需要精确 pid 时请直接给 bundle 内的
+        // 可执行文件路径。其余平台(及 macOS 普通可执行文件)一律直接 spawn。
+        let (prog, argv, launcher) = if cfg!(target_os = "macos") && program.ends_with(".app") {
+            let mut v = vec!["-a".to_string(), program.clone()];
+            if !args.is_empty() {
+                v.push("--args".into());
+                v.extend(args.iter().cloned());
+            }
+            ("open".to_string(), v, "open")
+        } else {
+            (program.clone(), args.clone(), "direct")
+        };
+        let mut cmd = tokio::process::Command::new(&prog);
+        cmd.args(&argv);
+        if let Some(d) = &cwd {
+            cmd.current_dir(d);
+        }
+        // detached 语义:不接管子进程 stdio(置 null,防其阻塞/写爆宿主终端),
+        // 不等退出。kill_on_drop 默认 false,Child 丢弃后子进程照常运行,tokio
+        // 会在后台收尸,Unix 上不留僵尸。
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = cmd
+            .spawn()
+            .map_err(|e| StepError::msg(format!("system.app_start spawn `{program}`: {e}")))?;
+        // 未 wait 过的 Child 一定有 pid;0 兜底只为不 panic。
+        let pid = child.id().unwrap_or(0);
+        drop(child);
+        Ok(ActionResult::from(serde_json::json!({
+            "pid": pid,
+            // "direct" = 直接 spawn 的就是目标进程;"open" = macOS .app 路径,
+            // pid 属于 open 启动器。
+            "launcher": launcher,
+        })))
+    }
 }

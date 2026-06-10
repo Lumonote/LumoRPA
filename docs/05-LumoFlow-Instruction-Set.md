@@ -263,7 +263,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Regex | `regex.match`, `regex.find_all`, `regex.replace`, `regex.captures` |
 | Skill | `skill.invoke` |
 | String | `string.upper`, `string.lower`, `string.trim`, `string.length`, `string.split`, `string.join`, `string.replace`, `string.contains`, `string.starts_with`, `string.ends_with`, `string.substring`, `string.repeat`, `string.pad_left`, `string.pad_right`, `string.format`, `string.encode_convert` |
-| System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list` |
+| System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list`, `system.process_kill`, `system.app_start` |
 | XML | `xml.parse`, `xml.build`, `xml.xpath` |
 <!-- ACTIONS_END -->
 
@@ -289,6 +289,22 @@ An `http` resource decl may also declare `proxy` (see the resource table)
 so every bound step routes through it; mTLS stays per-step only, because
 the certificate paths must pass the step's `fs.read` capability gate, which
 lives on the step context rather than in the declaration.
+
+### Process control
+
+`system.process_kill` terminates a process by `pid` — graceful by default
+(SIGTERM on Unix; `force: true` sends SIGKILL; Windows has no graceful
+termination signal, so both paths use TerminateProcess). It refuses to kill
+the Lumo process itself (and pid 0), and killing a non-existent pid is an
+explicit error, never a silent success. `system.app_start` launches an
+external application detached (`program` + `args`, optional `cwd`), returning
+the child `pid` without waiting for exit; on macOS a `program` ending in
+`.app` is launched via `open -a` (the returned pid is the launcher's — pass
+the bundle's inner executable path when the exact pid matters). Both are
+implemented for macOS / Windows / Linux and gated behind
+`LUMO_ALLOW_PROCESS=1` — the same opt-in tier as `system.shell`'s
+`LUMO_ALLOW_SHELL=1`, but a separate switch: allowing shell does not imply
+allowing process control, and vice versa.
 
 ### Screenshot / PDF artifacts
 
