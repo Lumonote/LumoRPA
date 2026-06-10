@@ -139,7 +139,7 @@ share a handle.
 
 | `kind` | Used by | Reused handle | Config (in the decl) |
 | --- | --- | --- | --- |
-| `chromium.cdp` | `browser.*` | One Chrome session (tabs, cookies, pages) | `headless` (bool); `profile` (see below) |
+| `chromium.cdp` | `browser.*` | One Chrome session (tabs, cookies, pages) | `headless` (bool); `proxy` (string, passed to Chrome as `--proxy-server`); `user_agent` (string, overrides the browser UA via `--user-agent`); `profile` (see below) |
 | `sqlite` | `db.sqlite_*` | One SQLite connection | `path` (the db file) |
 | `postgres` | `db.postgres_*` | One pooled PostgreSQL connection | — DSN/credentials come from the step (see below) |
 | `mysql` | `db.mysql_*` | One pooled MySQL connection | — DSN/credentials come from the step (see below) |

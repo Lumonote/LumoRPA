@@ -109,6 +109,15 @@ struct Session {
 struct LaunchOpts {
     headless: bool,
     profile: Option<String>,
+    /// 可选代理(如 `http://127.0.0.1:8080` / `socks5://…`),透传为 Chrome
+    /// `--proxy-server=<url>` 启动参数。仅在启动路径生效:已在跑的会话不会
+    /// 被改写(与 `headless` 同语义)。
+    proxy: Option<String>,
+    /// 可选 User-Agent 覆写,透传为 Chrome `--user-agent=<string>` 启动参数。
+    /// 选启动参数而非 per-page 的 CDP `Network.setUserAgentOverride`:对会话
+    /// 内所有页面 / 新 tab 一致生效,无需逐页重打,也是 chromiumoxide 下最稳
+    /// 的路径(无 CDP 时序问题)。
+    user_agent: Option<String>,
 }
 
 impl Default for LaunchOpts {
@@ -116,6 +125,8 @@ impl Default for LaunchOpts {
         Self {
             headless: true,
             profile: None,
+            proxy: None,
+            user_agent: None,
         }
     }
 }
@@ -259,6 +270,14 @@ fn build_browser_config(opts: &LaunchOpts) -> Result<BrowserConfig, StepError> {
             .arg("--disable-blink-features=AutomationControlled")
             .arg("--no-default-browser-check");
     }
+    // 代理 / UA 覆写与 profile 正交:任一来源(步骤 `with:` 或 resource decl)
+    // 给了就生效;缺省时不加任何参数,与既有启动逐字节一致(back-compat)。
+    if let Some(proxy) = &opts.proxy {
+        builder = builder.arg(format!("--proxy-server={proxy}"));
+    }
+    if let Some(ua) = &opts.user_agent {
+        builder = builder.arg(format!("--user-agent={ua}"));
+    }
     builder
         .build()
         .map_err(|e| StepError::msg(format!("chrome cfg: {e}")))
@@ -364,15 +383,25 @@ fn browser_slot(ctx: &StepCtx) -> String {
 /// Build [`LaunchOpts`] from a `chromium.cdp` resource declaration: `headless`
 /// from the flattened kind-specific `config` (default `true`, matching the
 /// per-step `with.headless` default) and `profile` from the resource sub-field.
+/// `proxy` / `user_agent`(同样在 `config` 里)照搬 `headless` 的读取模式,
+/// 让 decl 路径与 `browser.launch` 的 `with:` 路径能力对齐。
 fn launch_opts_from_decl(decl: &ResourceDecl) -> LaunchOpts {
     let headless = decl
         .config
         .get("headless")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let cfg_str = |key: &str| {
+        decl.config
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
     LaunchOpts {
         headless,
         profile: decl.profile.clone(),
+        proxy: cfg_str("proxy"),
+        user_agent: cfg_str("user_agent"),
     }
 }
 
@@ -504,6 +533,15 @@ pub struct LaunchAction;
 struct LaunchIn {
     #[serde(default = "default_true")]
     headless: bool,
+    /// 可选代理 URL(如 `http://127.0.0.1:8080`、`socks5://…`),作为 Chrome
+    /// `--proxy-server` 启动参数。仅在本步真正启动浏览器时生效 —— 已在跑的
+    /// 会话不会被改写(与 `headless` 同语义)。
+    #[serde(default)]
+    proxy: Option<String>,
+    /// 可选 User-Agent 覆写(Chrome `--user-agent` 启动参数),同上,仅启动
+    /// 路径生效。
+    #[serde(default)]
+    user_agent: Option<String>,
 }
 fn default_true() -> bool {
     true
@@ -522,12 +560,18 @@ impl Action for LaunchAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let LaunchIn { headless } = serde_json::from_value(input).unwrap_or_default();
+        let LaunchIn {
+            headless,
+            proxy,
+            user_agent,
+        } = serde_json::from_value(input).unwrap_or_default();
         let (slot, opts) = resolve_open_target(
             ctx,
             LaunchOpts {
                 headless,
                 profile: None,
+                proxy,
+                user_agent,
             },
         );
         let _ = ensure_session(ctx.run_id(), &slot, &opts).await?;
@@ -577,6 +621,12 @@ struct OpenIn {
     url: String,
     #[serde(default = "default_true")]
     headless: bool,
+    /// 可选代理 / UA 覆写,语义与 `browser.launch` 相同:仅当本步触发浏览器
+    /// 启动时生效,已在跑的会话不受影响。
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    user_agent: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
     #[serde(default)]
@@ -661,6 +711,8 @@ impl Action for OpenAction {
         let OpenIn {
             url,
             headless,
+            proxy,
+            user_agent,
             timeout_ms,
             wait_for,
         } = serde_json::from_value(input)
@@ -671,6 +723,8 @@ impl Action for OpenAction {
             LaunchOpts {
                 headless,
                 profile: None,
+                proxy,
+                user_agent,
             },
         );
         let s = ensure_session(ctx.run_id(), &slot, &opts).await?;
@@ -3233,6 +3287,20 @@ mod tests {
     }
 
     #[test]
+    fn launch_opts_from_decl_reads_proxy_and_user_agent() {
+        // proxy / user_agent 照搬 headless 的 config 读取模式(decl 路径透传)。
+        let o = launch_opts_from_decl(&decl(
+            "kind: chromium.cdp\nproxy: \"http://127.0.0.1:8080\"\nuser_agent: \"UA/1.0\"\n",
+        ));
+        assert_eq!(o.proxy.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(o.user_agent.as_deref(), Some("UA/1.0"));
+        // 缺省 ⇒ None ⇒ 不加任何启动参数(与既有启动行为逐字节一致)。
+        let d = launch_opts_from_decl(&decl("kind: chromium.cdp\n"));
+        assert_eq!(d.proxy, None);
+        assert_eq!(d.user_agent, None);
+    }
+
+    #[test]
     fn profile_user_data_dir_sanitizes_to_one_safe_component_under_the_root() {
         // A normal name is the leaf; the parent is the browser-profiles root.
         let p = profile_user_data_dir("stealth-default");
@@ -3267,7 +3335,7 @@ mod tests {
         // No profile ⇒ ephemeral: no persistent user-data-dir (pre-T3 behavior).
         let ephemeral = build_browser_config(&LaunchOpts {
             headless: true,
-            profile: None,
+            ..LaunchOpts::default()
         })
         .expect("config builds");
         assert!(
@@ -3281,6 +3349,7 @@ mod tests {
         let persistent = build_browser_config(&LaunchOpts {
             headless: true,
             profile: Some("t3-profile".into()),
+            ..LaunchOpts::default()
         })
         .expect("config builds");
         let dir = persistent
@@ -3298,7 +3367,7 @@ mod tests {
             &ctx_with(resources, Some("browser")),
             LaunchOpts {
                 headless: true,
-                profile: None,
+                ..LaunchOpts::default()
             },
         );
         assert_eq!(slot, "browser");
@@ -3309,7 +3378,7 @@ mod tests {
             &ctx_with(resources, None),
             LaunchOpts {
                 headless: false,
-                profile: None,
+                ..LaunchOpts::default()
             },
         );
         assert_eq!(slot, DEFAULT_SLOT);
