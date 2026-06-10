@@ -45,7 +45,9 @@ encoding_rs = "0.8"
 
 # F-3 email 动作:SMTP(lettre)+ IMAP(async-imap)。统一走 rustls + ring,避开
 # openssl/native-tls 的 C 依赖,满足信创/跨平台交叉编译。lettre 0.11.22 起 MSRV
-# 升到 1.85 > 本仓 1.83,锁定 0.11.19。
+# 升到 1.85 > 本仓 1.83,锁定 0.11.19。其传递依赖 psm(经 chumsky→stacker)自
+# 0.1.30 起 build-dep ar_archive_writer 0.5(edition 2024,需 rustc ≥1.85),
+# Cargo.lock 已钉 psm =0.1.26;不要对 psm 盲目 cargo update(同 hashify 先例)。
 lettre = { version = "=0.11.19", default-features = false, features = [
     "builder",
     "smtp-transport",
@@ -92,6 +94,13 @@ imageproc = { version = "0.25", default-features = false }
 # 桌面输入必须调用 OS 级 C API(macOS CGEvent / Linux XTest / Windows SendInput),
 # 无纯 Rust 替代,故不进信创核心默认构建;实际桌面端(Tauri/CLI)按需开启。
 rdev = { version = "0.5", optional = true }
+# 指令集缺口 P0:原生截屏 + 窗口枚举/几何(desktop.screenshot / window.*)。xcap 一库
+# 覆盖 macOS(CoreGraphics)/ Windows(GDI)/ Linux(X11 + Wayland portal)三平台。
+# 钉 =0.5.1:xcap 自 0.6.0 起改 edition 2024(需 rustc ≥1.85 > 本仓 MSRV 1.83),
+# 0.5.1 是最后的 edition 2021 版 —— 不要盲目 cargo update(同 mail-parser/hashify
+# 钉版先例)。Linux 侧传递 pipewire/xcb 等 C 依赖,与 rdev 同理只活在默认关闭的
+# desktop feature 内,不触信创纯 Rust 红线。
+xcap = { version = "=0.5.1", optional = true }
 umya-spreadsheet = { workspace = true }
 
 # xml.* 指令族(SOAP/政企对接/电子发票):
@@ -107,8 +116,17 @@ sxd-xpath = "0.4"
 
 [features]
 # 桌面输入动作族 desktop.*(rdev)。默认关闭 —— 信创/headless 交叉编译不受影响,
-# 文本输入走剪贴板粘贴(arboard,Unicode/中文安全)。
-desktop = ["dep:rdev"]
+# 文本输入走剪贴板粘贴(arboard,Unicode/中文安全)。同特性还启用原生截屏
+# desktop.screenshot 与窗口管理 window.*(xcap;Windows 激活/改几何走 windows-sys)。
+desktop = ["dep:rdev", "dep:xcap", "dep:windows-sys"]
+
+# window.activate / window.bounds set 的 Windows 实现(SetForegroundWindow /
+# MoveWindow)。windows-sys 仅是 Win32 符号声明(官方,不编译 C),其余平台不参与。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

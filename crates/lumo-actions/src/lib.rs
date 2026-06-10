@@ -10,6 +10,8 @@ pub mod date_ops;
 pub mod db_ops;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+#[cfg(feature = "desktop")]
+pub mod desktop_screen;
 pub mod docx;
 pub mod email;
 pub mod excel;
@@ -53,6 +55,10 @@ pub fn register_all(registry: &mut ActionRegistry) {
     // 桌面端 `--features desktop` 开启(rdev,需 OS 级输入 C API)。
     #[cfg(feature = "desktop")]
     desktop::register(registry);
+    // 指令集缺口 P0:原生截屏 + 窗口管理(desktop.screenshot / window.*,xcap)。
+    // 与输入模拟同走 desktop feature,补齐纯桌面的图像驱动闭环与窗口前置。
+    #[cfg(feature = "desktop")]
+    desktop_screen::register(registry);
 
     // 第二批：通用数据/系统/AI 周边指令
     string_ops::register(registry);

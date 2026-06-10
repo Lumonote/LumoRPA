@@ -224,6 +224,11 @@ const DESKTOP_CLOSED: &[&str] = &[
     "desktop.scroll",
     "desktop.key",
     "desktop.type",
+    // 指令集缺口 P0:原生截屏 + 窗口管理(同 feature,同闭集约束)。
+    "desktop.screenshot",
+    "window.list",
+    "window.activate",
+    "window.bounds",
 ];
 #[cfg(not(feature = "desktop"))]
 const DESKTOP_CLOSED: &[&str] = &[];

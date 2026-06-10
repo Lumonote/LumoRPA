@@ -83,7 +83,7 @@ spec:
     network: ["example.com"]
     llm: ["*"]
     mcp: ["local-tools"]
-    desktop: ["mouse", "keyboard"]
+    desktop: ["mouse", "keyboard", "screen", "window"]
 ```
 
 Common gates:
@@ -95,7 +95,7 @@ Common gates:
 | `network` | HTTP, browser, email, notification, FTP/S3, PostgreSQL/MySQL, MCP network targets. |
 | `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
 | `mcp` | MCP tool calls. |
-| `desktop` | Optional `desktop.*` actions when compiled with the `desktop` feature. |
+| `desktop` | Optional `desktop.*` / `window.*` actions when compiled with the `desktop` feature. Categories: `mouse` (move/click/scroll), `keyboard` (key/type), `screen` (`desktop.screenshot`), `window` (`window.list` / `window.activate` / `window.bounds`). The screenshot destination path is additionally gated by `fs.write`. |
 
 ## Resources
 
@@ -242,7 +242,29 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 <!-- ACTIONS_END -->
 
 The optional `desktop` feature adds `desktop.move`, `desktop.click`,
-`desktop.scroll`, `desktop.key`, and `desktop.type`.
+`desktop.scroll`, `desktop.key`, `desktop.type`, plus native screen capture and
+window management: `desktop.screenshot` (full-screen or `region` capture of a
+`display` to a PNG `path` — the path is gated by `fs.write`, output
+`{path, width, height}`), `window.list` (visible windows with
+`{id, title, app, x, y, width, height, minimized}`), `window.activate` (bring a
+window to the foreground by `id` or `title_contains`; multiple matches use the
+first and report `matched`), and `window.bounds` (read a window's geometry,
+optionally moving/resizing it via `set: {x, y, width, height}`).
+
+Window-management platform support:
+
+| Capability | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| `desktop.screenshot` | ✅ CoreGraphics | ✅ GDI | ✅ X11 / Wayland portal |
+| `window.list` | ✅ | ✅ | ✅ X11 (limited on Wayland) |
+| `window.activate` | ✅ osascript (Accessibility grant) | ✅ SetForegroundWindow | ⚠️ requires `wmctrl` (X11 only) |
+| `window.bounds` read | ✅ | ✅ | ✅ X11 |
+| `window.bounds` `set` | ✅ osascript (Accessibility grant) | ✅ MoveWindow | ⚠️ requires `wmctrl` (X11 only) |
+
+Platforms that cannot perform an operation fail with an explicit
+"not supported on this platform" error instead of silently succeeding. On
+macOS, screen capture and window titles need the Screen Recording permission;
+`window.activate` / `window.bounds set` need the Accessibility permission.
 
 `image.ocr` can use either the active cloud OCR/vision model or a local
 ModelScope OCR preset configured in `ocr_model` (for example

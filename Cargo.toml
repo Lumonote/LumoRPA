@@ -90,6 +90,16 @@ comfy-table     = "7"
 # 不要对 hashify 盲目 cargo update。
 mail-parser     = { version = "0.11", features = ["full_encoding"] }
 
+# MSRV 1.83 钉版(只动 Cargo.lock,同 hashify 先例):以下传递依赖的新版已转
+# edition 2024(需 rustc ≥1.85 > 本仓 1.83),已钉住末个 edition 2021 版本,
+# 不要盲目 cargo update ——
+#   psm =0.1.26(lettre→chumsky→stacker;0.1.30 起 build-dep ar_archive_writer 0.5)
+#   base64ct =1.6.0 / home =0.5.11 / idna_adapter =1.2.1(各自新版起 edition 2024)
+#   proc-macro-crate =3.2.0(xcap→zbus 宏所需;3.3+ 经 toml_edit 0.25 拉 edition 2024 树)
+# 注:apps/desktop/src-tauri(tauri 2.11)子树经 toml 1.x 强拉 edition 2024 的
+# indexmap 2.14→hashbrown 0.17,无法钉回 —— 该 GUI 成员本就不受信创 MSRV 约束;
+# 核心 crates 子图(含 lumo-actions --features desktop)保持 rustc 1.83 可编译。
+
 # xml.* 指令族:quick-xml 流式解析/转义(纯 Rust,无 C 依赖,信创红线)。
 # 0.37 已是本仓传递依赖(Cargo.lock 0.37.5),不引入新版本树;edition 2021,
 # MSRV 远低于本仓 1.83。quick-xml 只替换五个预定义实体与数字字符引用,自定义/
