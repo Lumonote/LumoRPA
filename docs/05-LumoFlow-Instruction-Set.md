@@ -253,6 +253,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
 | Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.url_encode`, `util.url_decode`, `util.uuid` |
 | HTTP | `http.request`, `http.download`, `http.upload`, `http.oauth2_token`, `http.paginate` |
+| Human | `human.input`, `human.confirm`, `human.approve` |
 | Image | `image.locate`, `image.compare`, `image.ocr` |
 | JSON | `json.get`, `json.set`, `json.merge`, `json.keys`, `json.values`, `json.delete` |
 | List | `list.length`, `list.append`, `list.sort`, `list.unique`, `list.range`, `list.contains`, `list.get`, `list.slice`, `list.reverse`, `list.pluck` |
@@ -289,6 +290,45 @@ An `http` resource decl may also declare `proxy` (see the resource table)
 so every bound step routes through it; mTLS stays per-step only, because
 the certificate paths must pass the step's `fs.read` capability gate, which
 lives on the step context rather than in the declaration.
+
+### Human-in-the-loop (`human.input` / `human.confirm` / `human.approve`)
+
+`human.input` asks the operator for a line of text and returns `{value}`;
+`human.confirm` asks a yes/no question and returns `{confirmed}`;
+`human.approve` optionally sends an approval notification first (its `notify`
+field takes the exact `notify.send` input shape and passes through the same
+`network` capability gate), then waits for the host's verdict and returns
+`{approved, by, comment}`. All three wait on a host-injected prompt channel —
+the engine itself has no UI.
+
+Waiting semantics:
+
+- Each action takes `timeout_ms` (default 3,600,000 = 1 hour). On timeout,
+  `human.input` / `human.confirm` fall back to their optional `default`;
+  without a `default` — and always for `human.approve`, which never
+  auto-approves — the step fails with a timeout error (`retry.on: [timeout]`
+  applies as usual).
+- The host's global per-step timeout (`LUMO_STEP_TIMEOUT_MS`; the desktop
+  host defaults it to 10 minutes) is still enforced by the VM on top of
+  `timeout_ms`, so the effective wait ceiling is the smaller of the two. A
+  wait killed by the *global* ceiling is a hard step timeout (the `default`
+  fallback does not run) — raise `LUMO_STEP_TIMEOUT_MS` when approvals may
+  take longer than the global step budget.
+- Cancelling the run interrupts the wait immediately.
+- Hosts without an interactive channel fail the step immediately with
+  "host does not support human interaction" — a prompt never hangs silently.
+
+Host support matrix:
+
+| Host | Channel | Notes |
+| --- | --- | --- |
+| CLI (`lumo run`) | stderr prompt + stdin line | requires a TTY; piped/CI stdin fails the step immediately. Empty answer takes `default` when present; confirm/approve parse y/yes/n/no. |
+| Desktop (Studio) | `human-prompt` event + `human_respond` command | frontend listens for `human-prompt` `{promptId, kind, message, default, timeoutMs, runId, stepPath}` and answers with `human_respond(promptId, value)`, where `value` is a string (input), bool (confirm/approve), or `{approved, by?, comment?}` (approve). |
+| `lumo serve` / MCP / sub-flows (`skill.invoke`, `flow.call`) | not supported | the step errors immediately; webhook-based approve callbacks are a planned follow-up. |
+
+`human.*` needs no capability grant of its own (it touches nothing outside
+the host UI); only the `notify` part of `human.approve` is gated, by the
+`network` capability, exactly like `notify.send`.
 
 ### Process control
 

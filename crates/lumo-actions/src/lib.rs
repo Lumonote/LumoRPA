@@ -20,6 +20,7 @@ pub mod excel;
 pub mod file;
 pub mod hash_ops;
 pub mod http;
+pub mod human;
 pub mod image_match;
 pub mod json_ops;
 pub mod list_ops;
@@ -78,6 +79,9 @@ pub fn register_all(registry: &mut ActionRegistry) {
     system_ops::register(registry);
     db_ops::register(registry);
     notify::register(registry);
+    // P1（人机交互）：human.input / confirm / approve。无 capability 门禁
+    // （不动宿主 UI 之外的世界）；approve 的 notify 部分沿用 notify 自身门禁。
+    human::register(registry);
     email::register(registry);
     clipboard::register(registry);
     table_ops::register(registry);

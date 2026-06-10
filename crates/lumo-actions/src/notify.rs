@@ -212,26 +212,37 @@ impl Action for SendAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let SendIn {
-            provider,
-            url,
-            text,
-            payload,
-            title,
-            msgtype,
-            secret,
-            timeout_ms,
-        } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("notify.send input invalid: {e}")))?;
-        ctx.ensure_network_url(&url)?;
-        if text.is_none() && payload.is_none() {
-            return Err(StepError::msg("notify.send requires `text` or `payload`"));
-        }
-        deliver(
-            ctx, &provider, &url, text, payload, title, &msgtype, secret, timeout_ms,
-        )
-        .await
+        send_value(ctx, "notify.send", input).await
     }
+}
+
+/// `notify.send` 的发送内核，供 `human.approve` 的 `notify` 字段复用：输入与
+/// `notify.send` 同形（provider/url/text/payload/...），走同一网络门禁与投递
+/// 路径。`label` 用于错误信息归属（`notify.send` / `human.approve.notify`）。
+pub(crate) async fn send_value(
+    ctx: &StepCtx,
+    label: &str,
+    input: Value,
+) -> Result<ActionResult, StepError> {
+    let SendIn {
+        provider,
+        url,
+        text,
+        payload,
+        title,
+        msgtype,
+        secret,
+        timeout_ms,
+    } = serde_json::from_value(input)
+        .map_err(|e| StepError::msg(format!("{label} input invalid: {e}")))?;
+    ctx.ensure_network_url(&url)?;
+    if text.is_none() && payload.is_none() {
+        return Err(StepError::msg(format!("{label} requires `text` or `payload`")));
+    }
+    deliver(
+        ctx, &provider, &url, text, payload, title, &msgtype, secret, timeout_ms,
+    )
+    .await
 }
 
 /// Shared delivery path for `notify.send` and the per-platform robot actions:
