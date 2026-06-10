@@ -57,17 +57,18 @@ pub fn register(r: &mut ActionRegistry) {
 pub struct ScreenshotAction;
 
 /// 截图区域(相对所选显示器图像的像素坐标,原点左上)。
+/// `pub(crate)`:desktop_text(desktop.click_text)的 `region` 入参共用同一形状。
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-struct Region {
+pub(crate) struct Region {
     /// 区域左上角 X。
-    x: u32,
+    pub(crate) x: u32,
     /// 区域左上角 Y。
-    y: u32,
+    pub(crate) y: u32,
     /// 区域宽(像素,>0)。
-    width: u32,
+    pub(crate) width: u32,
     /// 区域高(像素,>0)。
-    height: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -167,28 +168,34 @@ impl Action for ScreenshotAction {
 /// 抓取第 `display` 个显示器的整屏图像。排序保证主屏恒为索引 0(系统枚举顺序在
 /// 多屏热插拔下不稳定,主屏置前让默认值语义可预期)。
 fn capture_display(display: usize) -> Result<image::RgbaImage, StepError> {
-    let mut monitors = Monitor::all()
-        .map_err(|e| StepError::msg(format!("desktop.screenshot: enumerate displays: {e}")))?;
+    let monitor = select_monitor("desktop.screenshot", display)?;
+    monitor
+        .capture_image()
+        .map_err(|e| StepError::msg(format!("desktop.screenshot: capture failed: {e}")))
+}
+
+/// 选第 `display` 个显示器(主屏恒为索引 0)。`pub(crate)`:desktop_text
+/// (desktop.click_text)需要显示器几何(逻辑坐标原点 / 尺寸)做像素 → 屏幕坐标换算,
+/// 不能只拿图像。
+pub(crate) fn select_monitor(action: &str, display: usize) -> Result<Monitor, StepError> {
+    let mut monitors =
+        Monitor::all().map_err(|e| StepError::msg(format!("{action}: enumerate displays: {e}")))?;
     // 稳定排序:主屏排前,其余保持枚举序。
     monitors.sort_by_key(|m| !m.is_primary().unwrap_or(false));
     let count = monitors.len();
     if count == 0 {
         // 实测:无窗口服务器连接(headless 会话)或宿主进程未获「屏幕录制」授权时,
         // 枚举为空 —— 给出可行动的提示而不是裸的 "index out of range"。
-        return Err(StepError::msg(
-            "desktop.screenshot: no displays detected (headless session, or missing \
+        return Err(StepError::msg(format!(
+            "{action}: no displays detected (headless session, or missing \
              Screen Recording permission on macOS)"
-                .to_string(),
-        ));
+        )));
     }
-    let monitor = monitors.into_iter().nth(display).ok_or_else(|| {
+    monitors.into_iter().nth(display).ok_or_else(|| {
         StepError::msg(format!(
-            "desktop.screenshot: display index {display} out of range ({count} display(s))"
+            "{action}: display index {display} out of range ({count} display(s))"
         ))
-    })?;
-    monitor
-        .capture_image()
-        .map_err(|e| StepError::msg(format!("desktop.screenshot: capture failed: {e}")))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -230,8 +237,8 @@ fn pick_window(
     id: Option<u32>,
     title_contains: Option<&str>,
 ) -> Result<(WinInfo, usize), StepError> {
-    let windows = Window::all()
-        .map_err(|e| StepError::msg(format!("{action}: enumerate windows: {e}")))?;
+    let windows =
+        Window::all().map_err(|e| StepError::msg(format!("{action}: enumerate windows: {e}")))?;
     let infos: Vec<WinInfo> = windows.iter().map(win_info).collect();
     let matched: Vec<WinInfo> = match (id, title_contains) {
         (Some(id), _) => infos.into_iter().filter(|w| w.id == id).collect(),

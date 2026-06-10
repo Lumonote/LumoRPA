@@ -44,7 +44,8 @@ pub fn register(r: &mut ActionRegistry) {
 const TICK: Duration = Duration::from_millis(20);
 
 /// 发一个事件并停顿一拍。仅在 `spawn_blocking` 内调用,sleep 不阻塞 async 执行器。
-fn send(ev: EventType) -> Result<(), StepError> {
+/// `pub(crate)`:desktop_text(desktop.click_text)复用同一条点击触发路径。
+pub(crate) fn send(ev: EventType) -> Result<(), StepError> {
     simulate(&ev).map_err(|e| StepError::msg(format!("desktop simulate failed: {e:?}")))?;
     std::thread::sleep(TICK);
     Ok(())
@@ -95,9 +96,10 @@ impl Action for MoveAction {
 pub struct ClickAction;
 
 /// 鼠标键(派生枚举 → schema 内联出 `["left","right","middle"]` 约束)。
+/// `pub(crate)`:desktop_text(desktop.click_text)的 `button` 入参共用同一约束。
 #[derive(Deserialize, JsonSchema, Default, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
-enum ClickButton {
+pub(crate) enum ClickButton {
     #[default]
     Left,
     Right,
@@ -105,7 +107,7 @@ enum ClickButton {
 }
 
 impl ClickButton {
-    fn to_rdev(self) -> Button {
+    pub(crate) fn to_rdev(self) -> Button {
         match self {
             ClickButton::Left => Button::Left,
             ClickButton::Right => Button::Right,

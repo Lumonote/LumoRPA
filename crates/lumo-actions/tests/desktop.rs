@@ -350,3 +350,128 @@ async fn window_list_returns_windows() {
     let first = &out["windows"][0];
     assert!(first.get("id").is_some() && first.get("title").is_some());
 }
+
+// ─── desktop.click_text(P1:OCR 文本定位点击) ────────────────────────────────
+//
+// 同一约定:CI 只跑能力闸门 + 入参校验 + provider 缺失(全部在触 xcap/rdev 之前
+// 返回);纯函数(解析/匹配/坐标换算)在 src/desktop_text.rs 内联单测覆盖。
+// 真截屏 + 真点击不进测试(需授权且会动鼠标)。
+
+/// screen + llm,但**无 mouse**:dry_run 的最小授权面。
+fn click_text_dry_caps() -> Capabilities {
+    Capabilities {
+        desktop: vec!["screen".into()],
+        llm: vec!["*".into()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn click_text_denies_without_desktop_grant() {
+    let err = run("desktop.click_text", json!({ "text": "登录" }))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("capability denied") && err.contains("desktop"),
+        "got: {err}"
+    );
+}
+
+/// 真点击需要 screen + mouse 双类别:只授 screen 必须被 mouse 闸门拦下。
+#[tokio::test]
+async fn click_text_requires_mouse_for_real_click() {
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "登录" }),
+        click_text_dry_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("capability denied") && err.contains("desktop"),
+        "got: {err}"
+    );
+}
+
+/// dry_run 免 mouse:只授 screen + llm 可通过全部闸门,卡在 provider 缺失
+/// (provider 检查先于截屏,CI 无显示器也走得到这一步)。
+#[tokio::test]
+async fn click_text_dry_run_needs_only_screen_then_provider() {
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "登录", "dry_run": true }),
+        click_text_dry_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("requires AI provider"), "got: {err}");
+}
+
+/// OCR 走 LLM 通路:desktop 全授但缺 llm 能力必须被拦(与 image.ocr 同语义)。
+#[tokio::test]
+async fn click_text_requires_llm_capability() {
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "登录", "dry_run": true }),
+        desktop_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("llm"), "got: {err}");
+}
+
+#[tokio::test]
+async fn click_text_rejects_empty_text() {
+    let mut caps = desktop_caps();
+    caps.llm = vec!["*".into()];
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "   ", "dry_run": true }),
+        caps,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("text must not be empty"), "got: {err}");
+}
+
+#[tokio::test]
+async fn click_text_rejects_zero_size_region() {
+    let mut caps = desktop_caps();
+    caps.llm = vec!["*".into()];
+    let err = run_with(
+        "desktop.click_text",
+        json!({
+            "text": "登录",
+            "dry_run": true,
+            "region": { "x": 0, "y": 0, "width": 0, "height": 10 },
+        }),
+        caps,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("width/height must be > 0"), "got: {err}");
+}
+
+#[tokio::test]
+async fn click_text_rejects_unknown_field() {
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "登录", "bogus": 1 }),
+        desktop_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("input invalid"), "got: {err}");
+}
+
+#[tokio::test]
+async fn click_text_rejects_bad_match_mode() {
+    let err = run_with(
+        "desktop.click_text",
+        json!({ "text": "登录", "match": "fuzzy" }),
+        desktop_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("input invalid"), "got: {err}");
+}

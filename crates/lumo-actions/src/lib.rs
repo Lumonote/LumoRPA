@@ -12,6 +12,8 @@ pub mod db_ops;
 pub mod desktop;
 #[cfg(feature = "desktop")]
 pub mod desktop_screen;
+#[cfg(feature = "desktop")]
+pub mod desktop_text;
 pub mod docx;
 pub mod email;
 pub mod excel;
@@ -59,6 +61,10 @@ pub fn register_all(registry: &mut ActionRegistry) {
     // 与输入模拟同走 desktop feature,补齐纯桌面的图像驱动闭环与窗口前置。
     #[cfg(feature = "desktop")]
     desktop_screen::register(registry);
+    // 指令集缺口 P1:OCR 文本定位点击(desktop.click_text)。截屏 + image.ocr 通路
+    // + 坐标点击三者拼合,文本驱动补齐 F-1「坐标 + 图像」路线。
+    #[cfg(feature = "desktop")]
+    desktop_text::register(registry);
 
     // 第二批：通用数据/系统/AI 周边指令
     string_ops::register(registry);

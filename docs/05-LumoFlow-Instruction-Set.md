@@ -93,9 +93,9 @@ Common gates:
 | `fs.read` | `file.read`, `file.exists`, `file.list`, `file.metadata`, `file.copy`, `file.move`, `file.rename`, `csv.read`, `excel.read_rows`, `excel.read_cell`, `excel.sheet_names`, `pdf.*`, uploads, archive inputs, `image.locate`, `image.compare`, `image.ocr`, `excel.read_range`, `docx.read_text`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`. |
 | `fs.write` | `file.write`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `csv.write`, `excel.write_row`, `excel.write_cell`, downloads, archive outputs, screenshots, `pdf.write`, `excel.write_range`, `file.append`, `docx.replace_placeholders`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `email.fetch` attachment saving (`save_attachments_to`). |
 | `network` | HTTP, browser, email, notification, FTP/S3, PostgreSQL/MySQL, MCP network targets. |
-| `llm` | `ai.chat`, `image.ocr`, and AI hook modes. |
+| `llm` | `ai.chat`, `image.ocr`, `desktop.click_text` (OCR goes through the LLM provider), and AI hook modes. |
 | `mcp` | MCP tool calls. |
-| `desktop` | Optional `desktop.*` / `window.*` actions when compiled with the `desktop` feature. Categories: `mouse` (move/click/scroll), `keyboard` (key/type), `screen` (`desktop.screenshot`), `window` (`window.list` / `window.activate` / `window.bounds`). The screenshot destination path is additionally gated by `fs.write`. |
+| `desktop` | Optional `desktop.*` / `window.*` actions when compiled with the `desktop` feature. Categories: `mouse` (move/click/scroll), `keyboard` (key/type), `screen` (`desktop.screenshot`), `window` (`window.list` / `window.activate` / `window.bounds`). `desktop.click_text` needs both `screen` and `mouse` (only `screen` with `dry_run: true`), plus `llm` for the OCR call. The screenshot destination path is additionally gated by `fs.write`. |
 
 ## Resources
 
@@ -324,6 +324,26 @@ window management: `desktop.screenshot` (full-screen or `region` capture of a
 window to the foreground by `id` or `title_contains`; multiple matches use the
 first and report `matched`), and `window.bounds` (read a window's geometry,
 optionally moving/resizing it via `set: {x, y, width, height}`).
+
+`desktop.click_text` clicks on-screen text located via OCR: it captures the
+screen (same `region` / `display` options as `desktop.screenshot`, kept
+in-memory — no `fs.write` needed), runs the screenshot through the same
+LLM-backed OCR pathway as `image.ocr` (so it needs the `llm` capability and a
+configured AI provider; a bounding-box-capable vision model is required — a
+plain-text OCR preset yields an explicit error), then converts the matched
+text's bbox center from screenshot pixels to screen coordinates (HiDPI/Retina
+scaling is derived from the capture itself, so coordinates stay correct on
+scaled displays) and clicks it through the `desktop.click` path. Inputs:
+`text` (required), `match` (`contains` — default, case-insensitive substring —
+or `exact`), `index` (which of multiple matches to click, default 0), `region`
+/ `display`, `button` / `double` (as in `desktop.click`), `model` (as in
+`image.ocr`), and `dry_run: true` to only locate — returning the bbox and the
+converted coordinates without clicking (and requiring only the `screen`
+category instead of `screen` + `mouse`). Output:
+`{clicked, x, y, matched_text, matches, bbox}`. When no text matches (or
+`index` is out of range) the step fails with `selector_not_found`, so
+`retry.on: [selector_not_found]` gives you "wait until the text appears, then
+click" for free.
 
 Window-management platform support:
 
