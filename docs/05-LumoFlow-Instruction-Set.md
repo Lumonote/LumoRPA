@@ -40,7 +40,7 @@ Each step supports:
 | `with` | Action input object validated against the action JSON schema. |
 | `bind` | Optional variable name that receives this step's output. |
 | `when` | Optional predicate. Falsy values skip the step. |
-| `retry` | Optional retry policy: `times`, `backoff` (`fixed` \| `exponential`), `initial_ms`, `on` (error kinds: `selector_not_found`, `extract_failed`, `cond_error`, `capability_denied`, `budget_exceeded`, `other`). 注意:步级超时由 VM 在重试循环外层强制执行,**不可被 retry 捕获**——`on` 里没有 `timeout`。 |
+| `retry` | Optional retry policy: `times`, `backoff` (`fixed` \| `exponential`), `initial_ms`, `on` (error kinds: `selector_not_found`, `extract_failed`, `cond_error`, `capability_denied`, `budget_exceeded`, `timeout`, `other`). 注意:步级超时**仅当 `on` 显式列出 `timeout`** 时才会重试——空 `on` 的"任意错误都重试"不含超时,此时超时仍是硬中断(整个运行立即终止);重试预算耗尽后,最后一次超时仍按 `timeout` 状态落库并终止运行。 |
 | `ai` | Optional AI hook policy: `mode: off`, `fallback`, or `primary`. |
 | `resource` | Optional name of a declared `spec.resources` entry to bind this step to (see [Resources](#resources)). |
 | `do`, `else`, `catch`, `finally`, `branches` | Nested control blocks for `control.*` actions. |

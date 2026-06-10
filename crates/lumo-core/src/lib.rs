@@ -17,6 +17,7 @@ pub use action::{Action, ActionResult};
 pub use ai_hook::{AiCallUsage, AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
 pub use ctx::{
     clamp_capabilities, host_matches_grants, CancelToken, ResumeMemo, RunStats, StepCtx,
+    StepInterrupt,
 };
 pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use registry::{ActionRegistry, RunTeardown};

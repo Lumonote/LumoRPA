@@ -99,6 +99,11 @@ pub enum StepError {
     /// AI budget exhausted (max_calls_per_run). Surfaces as raw error, never tries AI again this run.
     #[error("AI budget exhausted ({max} calls per run)")]
     BudgetExceeded { max: u32 },
+    /// P0-2:步级超时降级成的可重试错误。仅当该步 `retry.on` 显式包含
+    /// `timeout` 且还有重试预算时,VM 才把 `StepOutcome::TimedOut` 转成本
+    /// 变体送进重试循环;其余情况一律保持 `ExecError::Timeout` 硬中断语义。
+    #[error("timed out after {ms}ms")]
+    Timeout { ms: u64 },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -118,6 +123,8 @@ pub enum ErrorKind {
     CondError,
     CapabilityDenied,
     BudgetExceeded,
+    /// P0-2:步级超时(仅在 `retry.on` 显式列出 `timeout` 时可重试)。
+    Timeout,
     Other,
 }
 
@@ -131,6 +138,7 @@ impl ErrorKind {
             ErrorKind::CondError => "cond_error",
             ErrorKind::CapabilityDenied => "capability_denied",
             ErrorKind::BudgetExceeded => "budget_exceeded",
+            ErrorKind::Timeout => "timeout",
             ErrorKind::Other => "other",
         }
     }
@@ -144,6 +152,7 @@ impl StepError {
             StepError::CondError(_) => ErrorKind::CondError,
             StepError::CapabilityDenied { .. } => ErrorKind::CapabilityDenied,
             StepError::BudgetExceeded { .. } => ErrorKind::BudgetExceeded,
+            StepError::Timeout { .. } => ErrorKind::Timeout,
             _ => ErrorKind::Other,
         }
     }
@@ -165,6 +174,7 @@ mod tests {
             ErrorKind::CondError,
             ErrorKind::CapabilityDenied,
             ErrorKind::BudgetExceeded,
+            ErrorKind::Timeout,
             ErrorKind::Other,
         ] {
             let serde = serde_json::to_value(kind).unwrap();
@@ -188,6 +198,7 @@ mod tests {
             ErrorKind::CondError,
             ErrorKind::CapabilityDenied,
             ErrorKind::BudgetExceeded,
+            ErrorKind::Timeout,
             ErrorKind::Other,
         ];
         let actual: std::collections::BTreeSet<&str> = all.iter().map(|k| k.as_str()).collect();

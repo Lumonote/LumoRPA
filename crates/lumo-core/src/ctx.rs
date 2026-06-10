@@ -63,6 +63,32 @@ impl CancelToken {
     }
 }
 
+/// P0-2:步级协作中断信号,发给 `spawn_blocking` 闭包的取消句柄。
+///
+/// 背景:VM 的 `select!` 在超时/取消时只能 drop 动作 future,而动作内部
+/// `spawn_blocking` 的阻塞任务不会随 future drop 停止 —— 超时后 db 事务照样
+/// commit、文件照样写回(步骤状态却已记 timeout,重跑即重复写入)。本句柄把
+/// "这次 attempt 已被引擎判死"传进阻塞闭包:引擎在 `select!` 返回超时/取消后
+/// 翻转步级标志位;闭包在循环边界 / 写回(commit)前检查,命中即提前返回错误,
+/// 副作用不落地。运行级取消(`CancelToken`)一并纳入,动作侧只需查本句柄。
+#[derive(Clone, Default)]
+pub struct StepInterrupt {
+    /// 本次 attempt 的中断位。每个 attempt 换新 `Arc`(见
+    /// [`StepCtx::arm_step_interrupt`]),旧 attempt 的孤儿阻塞任务持旧位、
+    /// 保持已中断,不会被新 attempt 误"复活"。
+    flag: Arc<AtomicBool>,
+    /// 运行级取消令牌(与 VM 的 `CancelToken` 同源),为 `None` 时只看步级位。
+    cancel: Option<CancelToken>,
+}
+
+impl StepInterrupt {
+    /// 本次 attempt 是否已被引擎判定超时,或整个运行已被取消。
+    pub fn is_interrupted(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+            || self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+    }
+}
+
 /// F-20 (breakpoint debugging): cooperative pause handle for a run. Like
 /// [`CancelToken`] it is `Clone` + `Arc`-backed, so every `fork()`ed
 /// `control.parallel` branch shares the same `armed`/`paused`/`paused_at`
@@ -257,6 +283,11 @@ struct CtxInner {
     /// picks it up so the LLM can *see* the page (true multimodal extraction)
     /// instead of falling back to text-only. Cleared after each consume.
     last_screenshot: Option<bytes::Bytes>,
+    /// P0-2:当前 leaf attempt 的步级中断位(见 [`StepInterrupt`])。VM 每个
+    /// attempt 前经 `arm_step_interrupt` 换新;放 `CtxInner` 是因为同一上下文
+    /// 同一时刻只有一个 leaf 在跑(control 容器不进 `select!` 路径),而
+    /// parallel 分支各自 fork 出独立的 `CtxInner`,互不串扰。
+    step_interrupt: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -309,6 +340,7 @@ impl StepCtx {
                 current_step_path: None,
                 current_resource: None,
                 last_screenshot: None,
+                step_interrupt: Arc::new(AtomicBool::new(false)),
             })),
         }
     }
@@ -475,6 +507,25 @@ impl StepCtx {
         self.step_timeout
     }
 
+    /// P0-2:为即将开始的 leaf attempt 装填一个全新的步级中断位,返回引擎侧
+    /// 句柄。换新而非复位:上一个 attempt 超时后遗留的孤儿阻塞任务还持着旧位,
+    /// 原地复位会把它误"复活";换新让旧任务保持已中断、新 attempt 干净起步。
+    /// 由 VM 在每个 attempt 前调用,`select!` 判定超时/取消后对返回句柄置 true。
+    pub fn arm_step_interrupt(&self) -> Arc<AtomicBool> {
+        let fresh = Arc::new(AtomicBool::new(false));
+        self.inner.lock().step_interrupt = fresh.clone();
+        fresh
+    }
+
+    /// P0-2:动作侧取当前步骤的协作中断信号,克隆进 `spawn_blocking` 闭包,
+    /// 在循环边界 / 写回(commit)前调用 [`StepInterrupt::is_interrupted`]。
+    pub fn step_interrupt(&self) -> StepInterrupt {
+        StepInterrupt {
+            flag: self.inner.lock().step_interrupt.clone(),
+            cancel: self.cancel.clone(),
+        }
+    }
+
     /// 当前状态的模板上下文快照。P1-3:命名空间以 `Arc` 共享(零深拷贝),并按
     /// "代数"缓存——自上次 steps/vars/bindings 变更以来若已构造过快照,直接克隆
     /// 复用(含其内部已 serialize 好的 minijinja scope)。`env` 快照随缓存重建
@@ -607,6 +658,9 @@ impl StepCtx {
                 current_step_path: g.current_step_path.clone(),
                 current_resource: g.current_resource.clone(),
                 last_screenshot: None,
+                // P0-2:分支自带全新中断位 —— 各分支的 leaf attempt 独立判死,
+                // 一个分支超时不得连坐兄弟分支的阻塞任务。
+                step_interrupt: Arc::new(AtomicBool::new(false)),
             })),
         }
     }

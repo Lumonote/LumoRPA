@@ -682,6 +682,10 @@ async fn execute_step(
         // calls below. `biased` makes cancel/timeout win deterministically.
         let cancel = ctx.cancel_token();
         let limit = ctx.step_timeout();
+        // P0-2:为本 attempt 装填步级中断位。`select!` 超时/取消只能 drop 动作
+        // future,动作里 `spawn_blocking` 的阻塞任务不会随之停止;判死后对该位
+        // 置 true,阻塞闭包在循环/写回(commit)边界检查它提前退出,副作用不落地。
+        let interrupt = ctx.arm_step_interrupt();
         let outcome = {
             let exec_fut = action.execute(ctx, try_input).instrument(exec_span);
             tokio::pin!(exec_fut);
@@ -694,6 +698,10 @@ async fn execute_step(
         };
         let exec_result = match outcome {
             StepOutcome::Cancelled => {
+                // P0-2:future 已 drop,但其孤儿阻塞任务可能还在跑 —— 翻中断位
+                // 让它在下一个检查点退出(运行级 CancelToken 也已翻转,这里补翻
+                // 步级位保持两条路径行为一致)。
+                interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
                 persist_step(
                     ctx,
                     StepPersist {
@@ -715,29 +723,42 @@ async fn execute_step(
                 return Err(ExecError::Cancelled);
             }
             StepOutcome::TimedOut => {
+                // P0-2:先翻中断位再走任一分支 —— 被 drop 的 future 留下的孤儿
+                // 阻塞任务必须停在下一个检查点,事务/写回不得在判死后落地。
+                interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
                 let ms = limit.map(|d| d.as_millis() as u64).unwrap_or(0);
-                persist_step(
-                    ctx,
-                    StepPersist {
-                        step_id: &step.id,
-                        path: &path,
-                        parent_path: parent_path.as_deref(),
-                        depth,
-                        idx,
-                        state: "timeout",
-                        attempt: attempt as i64,
-                        input_hash: &input_hash,
-                        output: None,
-                        error: Some(format!("timed out after {ms}ms")),
-                        started_at,
-                        finished_at: Utc::now(),
-                    },
-                )
-                .await;
-                return Err(ExecError::Timeout {
-                    step: step.id.clone(),
-                    ms,
-                });
+                // P0-2 配套:当且仅当 `retry.on` **显式**列出 `timeout`(空 on
+                // 的"任意错误都重试"不含超时)且还有重试预算时,把超时降级成
+                // 可重试错误流入下方重试臂;否则保持既有硬中断语义不变。
+                if attempt <= times
+                    && !retry_on.is_empty()
+                    && retry_matches(&retry_on, ErrorKind::Timeout)
+                {
+                    Err(StepError::Timeout { ms })
+                } else {
+                    persist_step(
+                        ctx,
+                        StepPersist {
+                            step_id: &step.id,
+                            path: &path,
+                            parent_path: parent_path.as_deref(),
+                            depth,
+                            idx,
+                            state: "timeout",
+                            attempt: attempt as i64,
+                            input_hash: &input_hash,
+                            output: None,
+                            error: Some(format!("timed out after {ms}ms")),
+                            started_at,
+                            finished_at: Utc::now(),
+                        },
+                    )
+                    .await;
+                    return Err(ExecError::Timeout {
+                        step: step.id.clone(),
+                        ms,
+                    });
+                }
             }
             StepOutcome::Done(r) => r,
         };

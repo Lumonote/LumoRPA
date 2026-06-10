@@ -29,13 +29,15 @@ pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
 /// 是 lumo-core `ErrorKind::as_str()` 的静态快照(lumo-dsl 不能依赖 lumo-core,
 /// 否则循环依赖)。lumo-core 侧有同步测试(`error.rs` 的
 /// `retry_on_kinds_match_dsl_whitelist`)断言两边一致。
-/// 注意:没有 `timeout`——步级超时由 VM 在重试循环外层强制执行,不可被 retry 捕获。
+/// 注意:`timeout` 仅在 `on` 里**显式**列出时才可重试——空 `on` 的"任意错误都
+/// 重试"不含步级超时,VM 仍按硬中断处理(P0-2)。
 pub const RETRY_ON_KINDS: &[&str] = &[
     "selector_not_found",
     "extract_failed",
     "cond_error",
     "capability_denied",
     "budget_exceeded",
+    "timeout",
     "other",
 ];
 
@@ -92,7 +94,7 @@ pub enum ValidationError {
     },
 
     #[error(
-        "flow `{flow}` step `{id}` retry.on has unknown error kind `{value}` (known kinds: {known}; note: step timeouts are not retryable)"
+        "flow `{flow}` step `{id}` retry.on has unknown error kind `{value}` (known kinds: {known}; note: `timeout` retries step timeouts only when listed explicitly)"
     )]
     UnknownRetryOnKind {
         flow: String,
@@ -502,8 +504,10 @@ spec:
     }
 
     #[test]
-    fn retry_on_timeout_is_rejected_because_timeouts_are_not_retryable() {
-        // 步级超时在重试循环外层强制执行,`on: [timeout]` 是常见误解,必须拦下。
+    fn retry_on_timeout_is_accepted() {
+        // P0-2:`on: [timeout]` 是显式声明"超时也重试"的唯一写法(空 on 不含
+        // 超时),validate 必须放行 —— 钉住白名单含 `timeout`,防止回退到
+        // f6ec517 时代的"超时不可重试"拦截。
         let y = r#"
 apiVersion: lumorpa.io/v1
 kind: Flow
@@ -516,11 +520,7 @@ spec:
       retry: { times: 2, on: [timeout] }
 "#;
         let flow = parse_str(y).expect("parses");
-        let err = validate(&flow).expect_err("`timeout` is not a retryable error kind");
-        assert!(
-            err.to_string().contains("not retryable"),
-            "message explains timeouts are not retryable: {err}"
-        );
+        validate(&flow).expect("`on: [timeout]` must validate (P0-2 retryable timeouts)");
     }
 
     #[test]
