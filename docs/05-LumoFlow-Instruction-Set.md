@@ -143,7 +143,7 @@ share a handle.
 | `sqlite` | `db.sqlite_*` | One SQLite connection | `path` (the db file) |
 | `postgres` | `db.postgres_*` | One pooled PostgreSQL connection | — DSN/credentials come from the step (see below) |
 | `mysql` | `db.mysql_*` | One pooled MySQL connection | — DSN/credentials come from the step (see below) |
-| `http` | `http.*` | One pooled HTTP client (keep-alive) | `timeout_ms` (optional) |
+| `http` | `http.*` | One pooled HTTP client (keep-alive) | `timeout_ms` (optional); `proxy` (optional http/https/socks5 URL — the proxy URL itself is gated by the `network` capability, like any target URL) |
 | `smtp` | `email.send` | One pooled SMTP transport | — host/credentials come from the step (see below) |
 | `ftp` | `ftp.*` | One authenticated FTP session | — host/credentials come from the step (see below) |
 
@@ -273,6 +273,22 @@ pass `component: false` for `encodeURI` semantics (URL structure characters are
 preserved, so a whole URL can be encoded without breaking it). `util.url_decode`
 reverses percent encoding; `+` is left as-is (treating `+` as a space is form
 encoding, not URL decoding).
+
+### HTTP proxy and mTLS
+
+Every `http.*` action accepts an optional per-step `proxy` (an `http://` /
+`https://` / `socks5://` URL) and `mtls: {cert_path, key_path}` (paths to a
+PEM client certificate and its PEM private key, concatenated internally and
+fed to the rustls client — no native TLS involved). The proxy URL is itself
+subject to the `network` capability gate, and the certificate / key paths
+are gated by `fs.read` before they are read — routing through a proxy never
+relaxes the SSRF checks on the target URL or on redirect hops. A step
+carrying `proxy` or `mtls` builds its own dedicated client: these are
+step-private settings, never folded into a shared `http` resource client.
+An `http` resource decl may also declare `proxy` (see the resource table)
+so every bound step routes through it; mTLS stays per-step only, because
+the certificate paths must pass the step's `fs.read` capability gate, which
+lives on the step context rather than in the declaration.
 
 ### Screenshot / PDF artifacts
 

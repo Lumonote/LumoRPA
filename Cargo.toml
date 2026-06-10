@@ -108,7 +108,11 @@ mail-parser     = { version = "0.11", features = ["full_encoding"] }
 quick-xml       = "0.37"
 
 # http / browser / excel
-reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
+# reqwest 的 socks 特性:http.* 的 proxy 支持 socks5://(0.12.23+ 由 reqwest
+# 内置实现,不再经 tokio-socks,Cargo.lock 零新增依赖;纯 Rust 无 C 依赖,
+# 信创/交叉友好);rustls-tls 同时提供 Identity::from_pem(mTLS 客户端证书)
+# —— 严禁 native-tls(C 依赖,信创红线)。
+reqwest         = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart", "socks"] }
 axum            = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 tower-http      = { version = "0.6", default-features = false, features = ["trace"] }
 chromiumoxide   = { version = "0.7", default-features = false, features = ["tokio-runtime"] }

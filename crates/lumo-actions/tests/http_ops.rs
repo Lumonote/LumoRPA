@@ -486,3 +486,139 @@ async fn paginate_caps_total_items_and_reports_truncated() {
     assert_eq!(out["items"], json!([1, 2, 3, 1, 2, 3]));
     assert_eq!(out["truncated"], json!(true), "max_items 命中 ⇒ truncated");
 }
+
+// ─── per-step proxy / mTLS(现有增强)─────────────────────────────────────────
+
+/// network + fs.read(`dir/**`)双授权 —— mtls 测试要读 tempdir 下的 PEM。
+fn net_fs(host: &str, dir: &std::path::Path) -> Capabilities {
+    Capabilities {
+        network: vec![host.to_string()],
+        fs_read: vec![format!("{}/**", dir.display())],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn request_routes_through_per_step_proxy() {
+    // wiremock 充当 HTTP 正向代理:http 目标经代理时请求行用绝对 URI 打到代理,
+    // hyper 侧 path 匹配不受影响。目标端口 1 无人监听 —— 若没走代理必然连接
+    // 失败,拿到 200 即证明流量确实经过了代理。
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/via-proxy"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("proxied"))
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "http.request",
+        json!({"url": "http://127.0.0.1:1/via-proxy", "proxy": server.uri()}),
+        net("127.0.0.1"),
+    )
+    .await;
+    assert_eq!(out["status"], json!(200));
+    assert_eq!(out["text"], json!("proxied"));
+}
+
+#[tokio::test]
+async fn request_rejects_ungranted_proxy_host() {
+    // 代理 URL 本身过 SSRF 门禁:目标 host 已授权,但代理 host 未授权 ⇒ 拒绝,
+    // 且在任何 socket 建立之前就挡下(离线可测)—— 门禁不因走代理放松。
+    let err = common::run_with(
+        "http.request",
+        json!({"url": "http://127.0.0.1/x", "proxy": "http://10.99.99.99:3128"}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+}
+
+#[tokio::test]
+async fn request_rejects_invalid_proxy_url() {
+    // 代理 host 已授权但 scheme 不被支持(非 http/https/socks5)⇒ 在客户端
+    // 构造处显式报错,绝不静默直连。
+    let err = common::run_with(
+        "http.request",
+        json!({"url": "http://127.0.0.1/x", "proxy": "ftp://127.0.0.1:21"}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("proxy"), "got: {err}");
+}
+
+#[tokio::test]
+async fn bound_http_resource_decl_proxy_is_gated_too() {
+    // decl 路径与 per-step 路径同一条 SSRF 红线:`http` resource 声明的 proxy
+    // 也是网络目的地,未授权的代理 host 在共享客户端建起来之前就被拒。
+    let err = common::run_bound(
+        "run-decl-proxy-gate",
+        &[("api", "kind: http\nproxy: http://10.88.88.88:3128\n")],
+        Some("api"),
+        "http.request",
+        json!({"url": "http://127.0.0.1/x"}),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+}
+
+#[tokio::test]
+async fn request_mtls_is_denied_without_fs_read_grant() {
+    // 证书/私钥是本地敏感文件:无 fs.read 授权 ⇒ capability denied,文件内容
+    // 一个字节都不读(走门禁的拒绝路径)。
+    let err = common::run_with(
+        "http.request",
+        json!({
+            "url": "http://127.0.0.1/x",
+            "mtls": {"cert_path": "/etc/lumo-cert.pem", "key_path": "/etc/lumo-key.pem"}
+        }),
+        net("127.0.0.1"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("capability denied"), "got: {err}");
+}
+
+#[tokio::test]
+async fn request_mtls_errors_on_missing_cert_file() {
+    // 路径已授权但文件不存在 ⇒ 读取处显式报错(带路径),不静默降级成无证书请求。
+    let dir = tempfile::tempdir().unwrap();
+    let err = common::run_with(
+        "http.request",
+        json!({
+            "url": "http://127.0.0.1/x",
+            "mtls": {
+                "cert_path": dir.path().join("absent-cert.pem"),
+                "key_path": dir.path().join("absent-key.pem")
+            }
+        }),
+        net_fs("127.0.0.1", dir.path()),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("mtls") && err.contains("read cert"), "got: {err}");
+}
+
+#[tokio::test]
+async fn request_mtls_errors_on_invalid_pem() {
+    // 文件在、能读,但不是合法 PEM ⇒ Identity::from_pem 处显式报错。
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("junk-cert.pem");
+    let key = dir.path().join("junk-key.pem");
+    std::fs::write(&cert, "this is not a certificate").unwrap();
+    std::fs::write(&key, "this is not a key").unwrap();
+    let err = common::run_with(
+        "http.request",
+        json!({
+            "url": "http://127.0.0.1/x",
+            "mtls": {"cert_path": cert, "key_path": key}
+        }),
+        net_fs("127.0.0.1", dir.path()),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("invalid PEM"), "got: {err}");
+}

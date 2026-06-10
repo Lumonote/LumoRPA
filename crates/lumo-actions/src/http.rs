@@ -40,8 +40,21 @@ pub(crate) fn build_gated_client(
     grants: &[String],
     timeout_ms: u64,
 ) -> Result<reqwest::Client, StepError> {
+    build_gated_client_with(grants, timeout_ms, None, None)
+}
+
+/// [`build_gated_client`] 的全参版:可选 `proxy`(http/https/socks5 URL,经
+/// `Proxy::all` 对所有 scheme 生效)与可选 mTLS 客户端身份(rustls 路径,
+/// `Identity::from_pem`)。SSRF 门禁不因走代理而放松:重定向逐跳重审的策略
+/// 原样保留,且调用方必须先对目标 URL 与代理 URL 各过一次 `ensure_network_url`。
+fn build_gated_client_with(
+    grants: &[String],
+    timeout_ms: u64,
+    proxy: Option<&str>,
+    identity: Option<reqwest::Identity>,
+) -> Result<reqwest::Client, StepError> {
     let grants = grants.to_vec(); // owned, moved into the closure
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {
@@ -54,7 +67,30 @@ pub(crate) fn build_gated_client(
                     "redirect to ungranted host blocked (network capability): {other:?}"
                 )),
             }
-        }))
+        }));
+    if let Some(proxy) = proxy {
+        // reqwest 0.12 的 `Proxy::all` 对未知 scheme 并不报错(内部 Matcher 容忍
+        // 任意 scheme,无 scheme 还会自动补 http://,错配时可能退化成直连)——
+        // 这里自行白名单校验:仅 http/https/socks5(h) 是受支持的代理协议,其余
+        // 一律显式报错,绝不静默直连绕开操作者预期的出口路径。
+        let lower = proxy.to_ascii_lowercase();
+        let scheme_ok = ["http://", "https://", "socks5://", "socks5h://"]
+            .iter()
+            .any(|s| lower.starts_with(s));
+        if !scheme_ok {
+            return Err(StepError::msg(format!(
+                "http proxy `{proxy}` invalid: scheme must be http/https/socks5"
+            )));
+        }
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy)
+                .map_err(|e| StepError::msg(format!("http proxy `{proxy}` invalid: {e}")))?,
+        );
+    }
+    if let Some(identity) = identity {
+        builder = builder.identity(identity);
+    }
+    builder
         .build()
         .map_err(|e| StepError::msg(format!("http client: {e}")))
 }
@@ -101,6 +137,16 @@ fn http_timeout_from_decl(decl: &ResourceDecl) -> u64 {
         .unwrap_or_else(default_timeout_ms)
 }
 
+/// `http` resource decl 里的可选 `proxy`(http/https/socks5 URL,flattened 进
+/// `config`)。对齐 `chromium.cdp` decl 的 proxy 读取模式(9c68607):decl 路径
+/// 与 per-step 路径能力对齐,绑定资源的步骤由共享客户端统一走代理。
+fn http_proxy_from_decl(decl: &ResourceDecl) -> Option<String> {
+    decl.config
+        .get("proxy")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Build (once) and return the shared gated client for an `http` resource at
 /// `(run_id, slot)`, reusing it on later calls. Idempotent: on a concurrent open
 /// the first client wins and the loser is dropped by the store.
@@ -109,28 +155,104 @@ async fn ensure_client(
     slot: &str,
     grants: &[String],
     timeout_ms: u64,
+    proxy: Option<&str>,
 ) -> Result<Arc<reqwest::Client>, StepError> {
     if let Some(client) = HTTP_CLIENTS.get(run_id, slot) {
         return Ok(client);
     }
-    let client = build_gated_client(grants, timeout_ms)?;
+    let client = build_gated_client_with(grants, timeout_ms, proxy, None)?;
     Ok(HTTP_CLIENTS.get_or_put(run_id, slot, Arc::new(client)))
 }
 
 /// The client an HTTP step should use: a step bound to an `http` resource reuses
-/// the run's shared client (built with the resource's declared timeout); an
+/// the run's shared client (built with the resource's declared timeout/proxy); an
 /// unbound step builds a fresh client with its own `timeout_ms`. Returns an owned
 /// `reqwest::Client` either way (a clone of the cached one shares its pool), so
 /// callers are unchanged.
 async fn client_for(ctx: &StepCtx, step_timeout_ms: u64) -> Result<reqwest::Client, StepError> {
     match http_slot(ctx) {
         Some(name) => {
-            let timeout_ms = http_timeout_from_decl(&ctx.resource_decl(&name)?);
-            let client = ensure_client(ctx.run_id(), &name, ctx.network_grants(), timeout_ms).await?;
+            let decl = ctx.resource_decl(&name)?;
+            let timeout_ms = http_timeout_from_decl(&decl);
+            let proxy = http_proxy_from_decl(&decl);
+            // decl 声明的代理也是一个网络目的地 —— 与目标 URL 同样过 SSRF 门禁,
+            // 防止经未授权的中转主机绕过网络能力沙箱。
+            if let Some(p) = &proxy {
+                ctx.ensure_network_url(p)?;
+            }
+            let client = ensure_client(
+                ctx.run_id(),
+                &name,
+                ctx.network_grants(),
+                timeout_ms,
+                proxy.as_deref(),
+            )
+            .await?;
             Ok((*client).clone())
         }
         None => build_gated_client(ctx.network_grants(), step_timeout_ms),
     }
+}
+
+/// per-step mTLS 客户端证书输入:`{ cert_path, key_path }`,均为 PEM 文件路径。
+/// 拆成两个文件是业界发证的常见形状(cert.pem + key.pem);读取前各过一次
+/// `fs.read` 能力门禁,拼成一份 PEM 喂 `Identity::from_pem`(rustls 路径,
+/// 纯 Rust,严禁 native-tls)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Mtls {
+    /// 客户端证书 PEM(可含中间链)。
+    cert_path: String,
+    /// 私钥 PEM(PKCS#8 / RSA / EC)。
+    key_path: String,
+}
+
+/// 读取并装配 mTLS 客户端身份。证书与私钥都是本地敏感文件 —— 与 `http.upload`
+/// 读 `src` 同款,读取前必须过 `fs.read` 能力门禁(两个路径各审一次)。非法或
+/// 不匹配的 PEM 在 `Identity::from_pem` 处显式报错,绝不静默降级成无证书请求。
+async fn load_identity(ctx: &StepCtx, mtls: &Mtls) -> Result<reqwest::Identity, StepError> {
+    let cert_path = PathBuf::from(&mtls.cert_path);
+    let key_path = PathBuf::from(&mtls.key_path);
+    ctx.ensure_fs_read(&cert_path)?;
+    ctx.ensure_fs_read(&key_path)?;
+    let mut pem = tokio::fs::read(&cert_path).await.map_err(|e| {
+        StepError::msg(format!("http mtls: read cert {}: {e}", cert_path.display()))
+    })?;
+    let key = tokio::fs::read(&key_path)
+        .await
+        .map_err(|e| StepError::msg(format!("http mtls: read key {}: {e}", key_path.display())))?;
+    // `Identity::from_pem`(rustls)吃「证书(链)+ 私钥」合一的 PEM 流;两段
+    // 之间补一个换行,防 cert.pem 末尾无换行时两块 PEM 粘连解析失败。
+    pem.push(b'\n');
+    pem.extend_from_slice(&key);
+    reqwest::Identity::from_pem(&pem)
+        .map_err(|e| StepError::msg(format!("http mtls: invalid PEM identity: {e}")))
+}
+
+/// [`client_for`] 的步骤级覆写版:per-step `proxy` / `mtls` 是该步骤的私有网络
+/// 配置,不能折进按 run 缓存的共享资源客户端(否则同 run 其它绑定步骤会被动
+/// 走此代理 / 持此证书)—— 带任一者的步骤一律现建专属客户端,timeout 也取
+/// 步骤值。两者皆缺省时回落到既有规则(绑定资源共享 / 未绑定现建)。
+async fn client_for_with(
+    ctx: &StepCtx,
+    step_timeout_ms: u64,
+    proxy: Option<&str>,
+    mtls: Option<&Mtls>,
+) -> Result<reqwest::Client, StepError> {
+    if proxy.is_none() && mtls.is_none() {
+        return client_for(ctx, step_timeout_ms).await;
+    }
+    // 代理本身也是一个网络目的地:proxy URL 与目标 URL 一样过 SSRF 门禁,防止
+    // 经未授权中转主机绕过网络能力沙箱 —— 门禁不因走代理而放松,目标 URL 与
+    // 重定向逐跳重审照旧。
+    if let Some(p) = proxy {
+        ctx.ensure_network_url(p)?;
+    }
+    let identity = match mtls {
+        Some(m) => Some(load_identity(ctx, m).await?),
+        None => None,
+    };
+    build_gated_client_with(ctx.network_grants(), step_timeout_ms, proxy, identity)
 }
 
 /// Drop every `http` client opened for `run_id` (releasing its connection pool).
@@ -232,6 +354,14 @@ struct ReqIn {
     timeout_ms: u64,
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
+    /// 可选代理(http/https/socks5 URL)。代理 URL 与目标 URL 一样受网络能力
+    /// 门禁约束(SSRF 不因代理放松);带 proxy/mtls 的步骤现建专属客户端,
+    /// 不与 `http` 资源的共享客户端混用。
+    #[serde(default)]
+    proxy: Option<String>,
+    /// 可选 mTLS 客户端证书(PEM 文件路径,读取前过 `fs.read` 门禁)。
+    #[serde(default)]
+    mtls: Option<Mtls>,
 }
 
 /// HTTP auth scheme for `http.request`. A tagged enum so the derived schema
@@ -290,11 +420,13 @@ impl Action for RequestAction {
             auth,
             timeout_ms,
             max_bytes,
+            proxy,
+            mtls,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.request input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
 
-        let client = client_for(ctx, timeout_ms).await?;
+        let client = client_for_with(ctx, timeout_ms, proxy.as_deref(), mtls.as_ref()).await?;
 
         let mut req = client
             .request(
@@ -379,6 +511,12 @@ struct DownloadIn {
     headers: HashMap<String, String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// 可选代理 / mTLS,语义同 `http.request`(代理 URL 过 SSRF 门禁,证书
+    /// 路径过 `fs.read` 门禁,带任一者现建专属客户端)。
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    mtls: Option<Mtls>,
 }
 
 #[async_trait]
@@ -400,13 +538,15 @@ impl Action for DownloadAction {
             max_bytes,
             headers,
             timeout_ms,
+            proxy,
+            mtls,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.download input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
         let dest_path = PathBuf::from(&dest);
         ctx.ensure_fs_write(&dest_path)?;
 
-        let client = client_for(ctx, timeout_ms).await?;
+        let client = client_for_with(ctx, timeout_ms, proxy.as_deref(), mtls.as_ref()).await?;
         let mut req = client.get(&url);
         for (k, v) in &headers {
             req = req.header(k, v);
@@ -501,6 +641,11 @@ struct UploadIn {
     max_bytes: u64,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// 可选代理 / mTLS,语义同 `http.request`。
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    mtls: Option<Mtls>,
 }
 
 /// `http.upload` transport mode. Modeling it as an enum (not a free `String`)
@@ -536,6 +681,8 @@ impl Action for UploadAction {
             headers,
             max_bytes,
             timeout_ms,
+            proxy,
+            mtls,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.upload input invalid: {e}")))?;
         ctx.ensure_network_url(&url)?;
@@ -560,7 +707,7 @@ impl Action for UploadAction {
         // Reuse the SSRF-gated client: every redirect hop is re-authorized
         // against the network grants, so an upload can't be bounced to an
         // ungranted host (data exfiltration).
-        let client = client_for(ctx, timeout_ms).await?;
+        let client = client_for_with(ctx, timeout_ms, proxy.as_deref(), mtls.as_ref()).await?;
 
         let resp = match mode {
             UploadMode::Multipart => {
@@ -662,6 +809,12 @@ struct OAuth2TokenIn {
     timeout_ms: u64,
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
+    /// 可选代理 / mTLS,语义同 `http.request`(mTLS 绑定的 token 端点见
+    /// RFC 8705,client credentials 场景常见)。
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    mtls: Option<Mtls>,
 }
 
 /// How `http.oauth2_token` presents the client credentials. An enum (not a free
@@ -699,11 +852,13 @@ impl Action for OAuth2TokenAction {
             client_auth,
             timeout_ms,
             max_bytes,
+            proxy,
+            mtls,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.oauth2_token input invalid: {e}")))?;
         ctx.ensure_network_url(&token_url)?;
 
-        let client = client_for(ctx, timeout_ms).await?;
+        let client = client_for_with(ctx, timeout_ms, proxy.as_deref(), mtls.as_ref()).await?;
 
         // Build the form body: grant_type is fixed; scope/audience are optional.
         // For `client_auth: body` the credentials join the form; for `basic`
@@ -826,6 +981,11 @@ struct PaginateIn {
     max_bytes: u64,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// 可选代理 / mTLS,语义同 `http.request`(一个客户端打全部页)。
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    mtls: Option<Mtls>,
 }
 
 /// `http.paginate` next-page strategy. A tagged enum so the derived schema keeps
@@ -940,13 +1100,15 @@ impl Action for PaginateAction {
             max_items,
             max_bytes,
             timeout_ms,
+            proxy,
+            mtls,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("http.paginate input invalid: {e}")))?;
 
         let http_method: reqwest::Method = method
             .parse()
             .map_err(|e| StepError::msg(format!("http.paginate bad method: {e}")))?;
-        let client = client_for(ctx, timeout_ms).await?;
+        let client = client_for_with(ctx, timeout_ms, proxy.as_deref(), mtls.as_ref()).await?;
 
         let mut items: Vec<Value> = Vec::new();
         let mut pages: u32 = 0;
@@ -1212,14 +1374,33 @@ mod tests {
     async fn http_resource_opens_one_client_then_reuses_it() {
         let run = "http-reuse-unit";
         assert!(!http_client_open(run));
-        let c1 = ensure_client(run, "api", &[], 1_000).await.unwrap();
+        let c1 = ensure_client(run, "api", &[], 1_000, None).await.unwrap();
         // A second open of the same slot reuses the first client (later args ignored).
-        let c2 = ensure_client(run, "api", &[], 9_999).await.unwrap();
+        let c2 = ensure_client(run, "api", &[], 9_999, None).await.unwrap();
         assert!(Arc::ptr_eq(&c1, &c2), "second ensure reuses the cached client");
         assert!(http_client_open(run));
         // Teardown drops it; idempotent.
         close_run_clients(run);
         assert!(!http_client_open(run));
         close_run_clients(run); // no-op, must not panic
+    }
+
+    #[test]
+    fn http_proxy_from_decl_reads_optional_proxy() {
+        assert_eq!(
+            http_proxy_from_decl(&decl("kind: http\nproxy: http://127.0.0.1:3128\n")).as_deref(),
+            Some("http://127.0.0.1:3128")
+        );
+        assert_eq!(http_proxy_from_decl(&decl("kind: http\n")), None);
+    }
+
+    #[test]
+    fn gated_client_rejects_invalid_proxy_url() {
+        // 非法代理 URL(解析不了 / scheme 不被支持)必须在客户端构造处显式报错,
+        // 不能静默忽略后直连 —— 直连会绕开操作者预期的出口路径。
+        for bad in ["not a proxy", "ftp://127.0.0.1:21"] {
+            let err = build_gated_client_with(&[], 1_000, Some(bad), None).unwrap_err();
+            assert!(err.to_string().contains("proxy"), "got: {err}");
+        }
     }
 }
