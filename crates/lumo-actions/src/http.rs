@@ -180,6 +180,36 @@ impl ResourceFactory for HttpFactory {
     }
 }
 
+/// 把响应头收成 JSON 对象:单值头 → 字符串,同名多值头(典型如 `Set-Cookie`)
+/// → 字符串数组,按到达顺序聚合(P2-3)。此前用 `HashMap<String, String>`
+/// 收集,重复头只剩最后一个值 —— 多枚 `Set-Cookie` 被静默吞掉。
+///
+/// 向后兼容考量:绝大多数响应头都是单值,它们的输出形状(字符串)保持不变;
+/// 只有真出现重复头时该键才升级成数组,所以既有 flow 取单值头的表达式不受
+/// 影响。`http.request` / `http.upload` 共用本函数,装头逻辑只此一处。
+fn headers_to_json(headers: &reqwest::header::HeaderMap) -> Value {
+    let mut out = serde_json::Map::new();
+    // `HeaderMap` 迭代时同名多值头会按值逐条产出(键重复出现),逐条聚合即可。
+    for (name, value) in headers {
+        let v = Value::String(value.to_str().unwrap_or("").to_string());
+        match out.entry(name.as_str().to_string()) {
+            serde_json::map::Entry::Vacant(slot) => {
+                slot.insert(v);
+            }
+            serde_json::map::Entry::Occupied(mut slot) => match slot.get_mut() {
+                // 第三个及之后的值:追加进已有数组。
+                Value::Array(arr) => arr.push(v),
+                // 第二个值:把单值升级成双元素数组。
+                single => {
+                    let first = single.take();
+                    *slot.get_mut() = Value::Array(vec![first, v]);
+                }
+            },
+        }
+    }
+    Value::Object(out)
+}
+
 pub struct RequestAction;
 
 #[derive(Deserialize, JsonSchema)]
@@ -303,11 +333,7 @@ impl Action for RequestAction {
             }
         })?;
         let status = resp.status().as_u16();
-        let resp_headers: HashMap<_, _> = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
+        let resp_headers = headers_to_json(resp.headers());
         // 响应大小上限(F-11):Content-Length 预检挡掉声明超限的响应;读后再按
         // 实际字节兜底(chunked / 无 Content-Length 时预检看不到长度)。
         if let Some(len) = resp.content_length() {
@@ -593,11 +619,7 @@ impl Action for UploadAction {
         };
 
         let status = resp.status().as_u16();
-        let resp_headers: HashMap<_, _> = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
+        let resp_headers = headers_to_json(resp.headers());
         let text = resp
             .text()
             .await
@@ -791,6 +813,14 @@ struct PaginateIn {
     /// truncation).
     #[serde(default = "default_max_pages")]
     max_pages: u32,
+    /// 聚合 items 的总条数上限(P2-2,默认 10_000)。`max_bytes` 只是**每页**
+    /// 上限,乘上 `max_pages`(默认 50)后聚合体仍可能膨胀到 GB 级,这里再加
+    /// 一道总量闸。命中后**停止翻页**并置 `truncated: true` —— 与 `max_pages`
+    /// 命中同语义:截断是显式标记而非报错,因为调用方拿到的是完整页边界上的
+    /// 部分数据,本身可用;这与单页超 `max_bytes` 直接报错不同(那是单个响应
+    /// 异常,数据不可信)。不切割单页:最后一页整页计入,items 可略超此值。
+    #[serde(default = "default_max_items")]
+    max_items: u64,
     /// Per-page response body size cap.
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
@@ -830,6 +860,9 @@ enum Pagination {
 
 fn default_max_pages() -> u32 {
     50
+}
+fn default_max_items() -> u64 {
+    10_000
 }
 fn default_true() -> bool {
     true
@@ -904,6 +937,7 @@ impl Action for PaginateAction {
             items_path,
             pagination,
             max_pages,
+            max_items,
             max_bytes,
             timeout_ms,
         } = serde_json::from_value(input)
@@ -928,6 +962,13 @@ impl Action for PaginateAction {
         loop {
             if pages >= max_pages {
                 // Cap hit AND there is (or may be) more to fetch ⇒ truncated.
+                truncated = true;
+                break;
+            }
+            if items.len() as u64 >= max_items {
+                // 总量闸(P2-2):聚合条数已达上限且(可能)还有下一页 ⇒ 截断。
+                // 与 max_pages 同放在循环顶部:若上一页恰好是自然末页,循环在
+                // 上一轮尾部就 break 了,不会走到这里被误标 truncated。
                 truncated = true;
                 break;
             }
@@ -1075,6 +1116,21 @@ mod tests {
         .with_resources(map);
         ctx.set_current_resource(current);
         ctx
+    }
+
+    #[test]
+    fn headers_to_json_keeps_singles_and_aggregates_repeats() {
+        // P2-3:单值头 → 字符串(形状不变,向后兼容),重复头 → 按序数组;
+        // 第三个值走「追加进已有数组」分支,这里一并覆盖。
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut h = HeaderMap::new();
+        h.insert("x-one", HeaderValue::from_static("a"));
+        h.append("set-cookie", HeaderValue::from_static("a=1"));
+        h.append("set-cookie", HeaderValue::from_static("b=2"));
+        h.append("set-cookie", HeaderValue::from_static("c=3"));
+        let v = headers_to_json(&h);
+        assert_eq!(v["x-one"], serde_json::json!("a"));
+        assert_eq!(v["set-cookie"], serde_json::json!(["a=1", "b=2", "c=3"]));
     }
 
     #[test]

@@ -155,6 +155,36 @@ async fn request_rejects_unknown_auth_kind() {
 }
 
 #[tokio::test]
+async fn request_aggregates_repeated_response_headers_into_an_array() {
+    // P2-3:多枚 Set-Cookie 不能只剩最后一个。向后兼容形状:单值头仍是
+    // 字符串,只有重复头才聚合成数组。
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cookies"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-single", "one")
+                .append_header("set-cookie", "a=1; Path=/")
+                .append_header("set-cookie", "b=2; Path=/"),
+        )
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "http.request",
+        json!({"url": format!("{}/cookies", server.uri())}),
+        net("127.0.0.1"),
+    )
+    .await;
+    assert_eq!(out["headers"]["x-single"], json!("one"), "单值头保持字符串");
+    assert_eq!(
+        out["headers"]["set-cookie"],
+        json!(["a=1; Path=/", "b=2; Path=/"]),
+        "重复头按到达顺序聚合成数组"
+    );
+}
+
+#[tokio::test]
 async fn oauth2_token_parses_access_token_from_client_credentials_grant() {
     use wiremock::matchers::{body_string_contains, header};
     let server = MockServer::start().await;
@@ -422,4 +452,37 @@ async fn paginate_caps_pages_and_reports_truncated() {
     assert_eq!(out["pages"], json!(2), "stopped at the cap");
     assert_eq!(out["items"], json!([1, 1]));
     assert_eq!(out["truncated"], json!(true), "cap hit ⇒ truncated");
+}
+
+#[tokio::test]
+async fn paginate_caps_total_items_and_reports_truncated() {
+    // P2-2:max_bytes 只是每页上限,聚合总量需 max_items 兜底。命中后停止
+    // 翻页,与 max_pages 命中同语义 —— truncated: true 而不报错(数据在完整
+    // 页边界上,可用),与单页超 max_bytes 报错区分开。
+    let server = MockServer::start().await;
+    // 每页 3 条且永远链到自己 —— 不设总量闸就会一直翻到 max_pages。
+    Mock::given(method("GET"))
+        .and(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [1, 2, 3],
+            "next": format!("{}/big", server.uri())
+        })))
+        .mount(&server)
+        .await;
+
+    let out = ok_with(
+        "http.paginate",
+        json!({
+            "url": format!("{}/big", server.uri()),
+            "items_path": "/items",
+            "pagination": {"style": "next_url", "next_path": "/next"},
+            "max_items": 4
+        }),
+        net("127.0.0.1"),
+    )
+    .await;
+    // 不切割单页:第 2 页整页计入(共 6 条 ≥ 4),随后停止翻页。
+    assert_eq!(out["pages"], json!(2), "第 2 页后命中总量闸即停");
+    assert_eq!(out["items"], json!([1, 2, 3, 1, 2, 3]));
+    assert_eq!(out["truncated"], json!(true), "max_items 命中 ⇒ truncated");
 }
