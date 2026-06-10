@@ -250,6 +250,10 @@ pub struct StepCtx {
     /// the pause state is shared across parallel branch forks. `None` ⇒ a normal
     /// (non-debugged) run with zero per-step overhead.
     debug: Option<DebugController>,
+    /// P1（人机交互）：宿主注入的 human prompt 通道，`human.*` 动作经
+    /// [`StepCtx::human_prompter`] 取用。`None` ⇒ 宿主不支持人机交互，
+    /// 动作立刻报错而非静默挂起。
+    human: Option<Arc<dyn crate::human::HumanPrompter>>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -328,6 +332,7 @@ impl StepCtx {
             seq: Arc::new(AtomicI64::new(0)),
             resume_memo: None,
             debug: None,
+            human: None,
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: Arc::new(inputs),
                 steps: Arc::new(Map::new()),
@@ -463,6 +468,22 @@ impl StepCtx {
     pub fn with_debug(mut self, debug: Option<DebugController>) -> Self {
         self.debug = debug;
         self
+    }
+
+    /// P1（人机交互）：注入宿主的 [`crate::human::HumanPrompter`]（由 VM 从
+    /// `FlowVm::with_human_prompter` 播种）。`None` ⇒ 宿主不支持人机交互。
+    pub fn with_human_prompter(
+        mut self,
+        prompter: Option<Arc<dyn crate::human::HumanPrompter>>,
+    ) -> Self {
+        self.human = prompter;
+        self
+    }
+
+    /// P1（人机交互）：宿主注入的 human prompt 通道（克隆出 `Arc`，等待期间
+    /// 不持有上下文借用）。`None` ⇒ 动作侧报"宿主不支持人机交互"。
+    pub fn human_prompter(&self) -> Option<Arc<dyn crate::human::HumanPrompter>> {
+        self.human.clone()
     }
 
     /// F-20: whether a breakpoint has already fired (sticky). The VM checks this
@@ -653,6 +674,7 @@ impl StepCtx {
             seq: self.seq.clone(),
             resume_memo: self.resume_memo.clone(),
             debug: self.debug.clone(),
+            human: self.human.clone(),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: g.inputs.clone(),
                 steps: g.steps.clone(),

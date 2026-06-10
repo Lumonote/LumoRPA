@@ -7,6 +7,7 @@ pub mod action;
 pub mod ai_hook;
 pub mod ctx;
 pub mod error;
+pub mod human;
 pub mod registry;
 pub mod resource;
 pub mod schema;
@@ -20,6 +21,7 @@ pub use ctx::{
     StepInterrupt,
 };
 pub use error::{CapKind, ErrorKind, ExecError, StepError};
+pub use human::{HumanPromptKind, HumanPromptRequest, HumanPrompter, HumanResponse};
 pub use registry::{ActionRegistry, RunTeardown};
 pub use resource::ResourceFactory;
 pub use validate::validate_steps;

@@ -100,6 +100,9 @@ pub struct FlowVm {
     /// X-07（时光回溯）：artifacts 落盘根目录。设置后 `StepCtx::attach_artifact`
     /// 才真正写盘 + 落库；不设保持 no-op，无头冒烟不会产生垃圾文件。
     artifacts_dir: Option<std::path::PathBuf>,
+    /// P1（人机交互）：宿主注入的 human prompt 通道，播种进每个 run 的
+    /// `StepCtx`。`None`（默认）⇒ `human.*` 动作报"宿主不支持人机交互"。
+    human_prompter: Option<Arc<dyn crate::human::HumanPrompter>>,
 }
 
 impl FlowVm {
@@ -118,7 +121,18 @@ impl FlowVm {
             step_mode: false,
             run_id_override: None,
             artifacts_dir: None,
+            human_prompter: None,
         }
+    }
+
+    /// P1（人机交互）：注入宿主的 [`crate::human::HumanPrompter`]，`human.*`
+    /// 动作经 `StepCtx` 取用。`None` 保持默认（宿主不支持人机交互）。
+    pub fn with_human_prompter(
+        mut self,
+        prompter: Option<Arc<dyn crate::human::HumanPrompter>>,
+    ) -> Self {
+        self.human_prompter = prompter;
+        self
     }
 
     /// P0-1：宿主预生成 run_id（语义见字段注释）。`None` 保持引擎自生成。
@@ -310,6 +324,7 @@ impl FlowVm {
         .with_vault(self.vault_identity.clone())
         .with_resume_memo(self.load_resume_memo())
         .with_debug(self.build_debug_controller())
+        .with_human_prompter(self.human_prompter.clone())
         .with_resources(flow.spec.resources.clone());
         // X-07：仅在宿主显式开启时给 ctx 接上 artifacts 目录——StepCtx 的
         // builder 收 PathBuf 而非 Option，这里用 if-let 保持未开启路径零开销。
