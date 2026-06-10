@@ -251,7 +251,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append`, `file.wait` |
 | Flow | `flow.call` |
 | FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
-| Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.uuid` |
+| Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.url_encode`, `util.url_decode`, `util.uuid` |
 | HTTP | `http.request`, `http.download`, `http.upload`, `http.oauth2_token`, `http.paginate` |
 | Image | `image.locate`, `image.compare`, `image.ocr` |
 | JSON | `json.get`, `json.set`, `json.merge`, `json.keys`, `json.values`, `json.delete` |
@@ -266,6 +266,13 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list` |
 | XML | `xml.parse`, `xml.build`, `xml.xpath` |
 <!-- ACTIONS_END -->
+
+`util.url_encode` percent-encodes text — by default with `encodeURIComponent`
+semantics (structure characters like `/?&=#` are escaped; spaces become `%20`);
+pass `component: false` for `encodeURI` semantics (URL structure characters are
+preserved, so a whole URL can be encoded without breaking it). `util.url_decode`
+reverses percent encoding; `+` is left as-is (treating `+` as a space is form
+encoding, not URL decoding).
 
 The optional `desktop` feature adds `desktop.move`, `desktop.click`,
 `desktop.scroll`, `desktop.key`, `desktop.type`, plus native screen capture and

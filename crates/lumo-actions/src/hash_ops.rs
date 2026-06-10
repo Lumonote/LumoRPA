@@ -6,6 +6,7 @@ use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use md5::Digest as Md5Digest;
 use once_cell::sync::Lazy;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +20,8 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(Md5Action);
     r.register(Base64EncodeAction);
     r.register(Base64DecodeAction);
+    r.register(UrlEncodeAction);
+    r.register(UrlDecodeAction);
     r.register(UuidAction);
 }
 
@@ -162,6 +165,99 @@ impl Action for Base64DecodeAction {
         let out = String::from_utf8(bytes)
             .map_err(|e| StepError::msg(format!("base64 not UTF-8: {e}")))?;
         Ok(ActionResult::from(Value::String(out)))
+    }
+}
+
+// ─── util.url_encode / util.url_decode ──────────────────────────────────────
+
+/// `encodeURIComponent` 语义的编码集:`NON_ALPHANUMERIC` 去掉 JS 不转义的
+/// `- _ . ! ~ * ' ( )`(RFC 3986 unreserved + mark 子集),与浏览器行为逐字符
+/// 对齐 —— 这是拼 query 参数值时最常用、也最不易踩坑的语义,故为默认。
+const COMPONENT_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'!')
+    .remove(b'~')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')');
+
+/// `encodeURI` 语义:在 component 集之上再保留 URI 结构保留字
+/// `; , / ? : @ & = + $ #`,用于编码**整条 URL** 而不破坏其结构。
+const URI_SET: &AsciiSet = &COMPONENT_SET
+    .remove(b';')
+    .remove(b',')
+    .remove(b'/')
+    .remove(b'?')
+    .remove(b':')
+    .remove(b'@')
+    .remove(b'&')
+    .remove(b'=')
+    .remove(b'+')
+    .remove(b'$')
+    .remove(b'#');
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UrlEncodeIn {
+    text: String,
+    /// 编码语义开关(默认 `true`):`true` = `encodeURIComponent` 语义,
+    /// `/ ? & = #` 等结构字符全部转义,适合编码单个参数值;`false` =
+    /// `encodeURI` 语义,保留 URL 结构保留字,适合编码整条 URL。两种语义下
+    /// 空格都编码为 `%20`(不是表单语义的 `+`)。
+    #[serde(default = "default_component")]
+    component: bool,
+}
+fn default_component() -> bool {
+    true
+}
+
+pub struct UrlEncodeAction;
+#[async_trait]
+impl Action for UrlEncodeAction {
+    fn id(&self) -> &'static str {
+        "util.url_encode"
+    }
+    fn summary(&self) -> &'static str {
+        "Percent-encode text (component: true = encodeURIComponent, false = encodeURI)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<UrlEncodeIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let UrlEncodeIn { text, component } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("util.url_encode invalid: {e}")))?;
+        let set = if component { COMPONENT_SET } else { URI_SET };
+        Ok(ActionResult::from(Value::String(
+            utf8_percent_encode(&text, set).to_string(),
+        )))
+    }
+}
+
+pub struct UrlDecodeAction;
+#[async_trait]
+impl Action for UrlDecodeAction {
+    fn id(&self) -> &'static str {
+        "util.url_decode"
+    }
+    fn summary(&self) -> &'static str {
+        "Percent-decode text → UTF-8 (`+` is left as-is, not a space)"
+    }
+    fn schema(&self) -> &'static Value {
+        text_schema()
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let TextIn { text } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("util.url_decode invalid: {e}")))?;
+        // 纯 percent 解码:`+` 原样保留 —— 把 `+` 当空格是
+        // application/x-www-form-urlencoded 的表单语义,不属于 URL 解码本身。
+        let out = percent_decode_str(&text)
+            .decode_utf8()
+            .map_err(|e| StepError::msg(format!("util.url_decode: not UTF-8 after decode: {e}")))?;
+        Ok(ActionResult::from(Value::String(out.into_owned())))
     }
 }
 

@@ -46,6 +46,49 @@ async fn base64_decode_rejects_garbage() {
 }
 
 #[tokio::test]
+async fn url_encode_component_and_uri_semantics() {
+    // 默认 component=true:encodeURIComponent 语义 —— /?&= 等结构字符全部
+    // 转义,空格是 %20(不是表单语义的 +),JS 不转义的 -_.!~*'() 保留。
+    assert_eq!(
+        ok("util.url_encode", json!({"text": "a b/c?x=1&y=中"})).await,
+        json!("a%20b%2Fc%3Fx%3D1%26y%3D%E4%B8%AD")
+    );
+    assert_eq!(
+        ok("util.url_encode", json!({"text": "-_.!~*'()"})).await,
+        json!("-_.!~*'()")
+    );
+    // component=false:encodeURI 语义 —— URL 结构保留字 /?:&=# 原样保留,
+    // 可整条 URL 编码而不破坏结构。
+    assert_eq!(
+        ok(
+            "util.url_encode",
+            json!({"text": "https://e.com/a b?q=中#f", "component": false})
+        )
+        .await,
+        json!("https://e.com/a%20b?q=%E4%B8%AD#f")
+    );
+}
+
+#[tokio::test]
+async fn url_decode_round_trips_and_rejects_bad_utf8() {
+    assert_eq!(
+        ok("util.url_decode", json!({"text": "a%20b%2Fc%3F%E4%B8%AD"})).await,
+        json!("a b/c?中")
+    );
+    // `+` 不当空格 —— 那是 x-www-form-urlencoded 的表单语义,纯 percent
+    // 解码原样保留。
+    assert_eq!(
+        ok("util.url_decode", json!({"text": "a+b"})).await,
+        json!("a+b")
+    );
+    // 解码出非法 UTF-8 字节序列要显式报错,不能静默吞。
+    let err = run("util.url_decode", json!({"text": "%FF%FE"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("UTF-8"), "got: {err}");
+}
+
+#[tokio::test]
 async fn uuid_is_a_v4_string() {
     let v = ok("util.uuid", json!({})).await;
     let s = v.as_str().expect("uuid is a string");

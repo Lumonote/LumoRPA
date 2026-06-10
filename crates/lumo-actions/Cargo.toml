@@ -33,6 +33,10 @@ calamine.workspace = true
 rust_xlsxwriter.workspace = true
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
+# util.url_encode / util.url_decode:percent-encoding 为 servo 系纯 Rust 微件
+# (url crate 的组成部分,已是本 workspace 经 reqwest/url 的传递依赖,锁定
+# 2.3.2,零新增编译单元成本),无 C 依赖,MSRV 无忧。
+percent-encoding = "2.3"
 bytes = "1"
 hmac = "0.12"
 regex = "1"
