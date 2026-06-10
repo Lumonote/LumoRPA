@@ -2374,11 +2374,12 @@ fn parse_and_validate(home: &Path, flow_path: &Path) -> Result<Flow, String> {
     lumo_dsl::validate(&flow).map_err(|e| e.to_string())?;
     let registry = build_action_registry(home, Some(flow_path));
     let skills = load_skill_registry(home, Some(flow_path));
-    validate_steps(
+    // P1-7:步级校验上移到 lumo-core 的单一实现(原桌面侧副本已删),与 CLI 共用。
+    lumo_core::validate_steps(
         &flow.spec.steps,
         &flow.spec.capabilities,
         &registry,
-        &skills,
+        &|name| skills.get(name).is_some(),
     )
     .map_err(|e| e.to_string())?;
     Ok(flow)
@@ -2392,11 +2393,11 @@ fn validate_generated_flow_yaml(home: &Path, yaml: &str) -> Result<(), String> {
     lumo_dsl::validate(&flow).map_err(|e| format!("validate: {e}"))?;
     let registry = build_action_registry(home, None);
     let skills = load_skill_registry(home, None);
-    validate_steps(
+    lumo_core::validate_steps(
         &flow.spec.steps,
         &flow.spec.capabilities,
         &registry,
-        &skills,
+        &|name| skills.get(name).is_some(),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -2684,179 +2685,6 @@ fn load_skill_registry(home: &Path, flow_path: Option<&Path>) -> Arc<SkillRegist
         }
     }
     skill_reg
-}
-
-fn validate_steps(
-    steps: &[Step],
-    capabilities: &lumo_dsl::Capabilities,
-    registry: &ActionRegistry,
-    skills: &Arc<SkillRegistry>,
-) -> anyhow::Result<()> {
-    for step in steps {
-        let action = registry.get(&step.action).ok_or_else(|| {
-            anyhow::anyhow!("unknown action `{}` in step `{}`", step.action, step.id)
-        })?;
-        validate_capability_declaration(step, capabilities)?;
-        let input = serde_json::to_value(&step.with).unwrap_or(Value::Null);
-        validate_schema(&step.id, &step.action, &input, action.schema())?;
-        validate_skill_reference(step, &input, skills)?;
-        for children in step.children() {
-            validate_steps(children, capabilities, registry, skills)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_capability_declaration(
-    step: &Step,
-    capabilities: &lumo_dsl::Capabilities,
-) -> anyhow::Result<()> {
-    let missing = match step.action.as_str() {
-        "file.read" | "file.exists" | "file.list" | "file.metadata" | "file.copy" | "file.move"
-        | "file.rename" | "excel.read_rows" | "excel.read_cell" | "excel.sheet_names"
-        | "image.locate" | "image.compare" | "image.ocr"
-            if capabilities.fs_read.is_empty() =>
-        {
-            Some("fs.read")
-        }
-        "file.write" | "file.mkdir" | "file.copy" | "file.move" | "file.rename" | "file.delete"
-        | "excel.write_row" | "excel.write_cell"
-            if capabilities.fs_write.is_empty() =>
-        {
-            Some("fs.write")
-        }
-        "http.request" | "browser.open" if capabilities.network.is_empty() => Some("network"),
-        "ai.chat" | "image.ocr" if capabilities.llm.is_empty() => Some("llm"),
-        _ => None,
-    };
-    if let Some(kind) = missing {
-        anyhow::bail!(
-            "step `{}` action `{}` requires spec.capabilities.{kind}",
-            step.id,
-            step.action
-        );
-    }
-    Ok(())
-}
-
-fn validate_skill_reference(
-    step: &Step,
-    input: &Value,
-    skills: &Arc<SkillRegistry>,
-) -> anyhow::Result<()> {
-    if step.action != "skill.invoke" {
-        return Ok(());
-    }
-    let Some(name) = input.get("name").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    if is_template_string(name) {
-        return Ok(());
-    }
-    if skills.get(name).is_none() {
-        anyhow::bail!("step `{}` invokes unknown skill `{name}`", step.id);
-    }
-    Ok(())
-}
-
-fn validate_schema(
-    step_id: &str,
-    action_id: &str,
-    input: &Value,
-    schema: &Value,
-) -> anyhow::Result<()> {
-    if schema.get("type").and_then(Value::as_str) == Some("object") {
-        let Some(input_obj) = input.as_object() else {
-            anyhow::bail!("step `{step_id}` action `{action_id}` with: must be an object");
-        };
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for key in required.iter().filter_map(Value::as_str) {
-                if !input_obj.contains_key(key) {
-                    anyhow::bail!(
-                        "step `{step_id}` action `{action_id}` missing required with.{key}"
-                    );
-                }
-            }
-        }
-        let properties = schema.get("properties").and_then(Value::as_object);
-        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-            for key in input_obj.keys() {
-                if !properties
-                    .map(|props| props.contains_key(key))
-                    .unwrap_or(false)
-                {
-                    anyhow::bail!("step `{step_id}` action `{action_id}` has unknown with.{key}");
-                }
-            }
-        }
-        if let Some(properties) = properties {
-            for (key, value) in input_obj {
-                if let Some(prop_schema) = properties.get(key) {
-                    validate_value_type(step_id, action_id, key, value, prop_schema)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_value_type(
-    step_id: &str,
-    action_id: &str,
-    key: &str,
-    value: &Value,
-    schema: &Value,
-) -> anyhow::Result<()> {
-    if value.as_str().map(is_template_string).unwrap_or(false) {
-        return Ok(());
-    }
-    let Some(expected) = schema.get("type") else {
-        return Ok(());
-    };
-    let ok = match expected {
-        Value::String(s) => json_type_matches(s, value),
-        Value::Array(types) => types
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|s| json_type_matches(s, value)),
-        _ => true,
-    };
-    if !ok {
-        anyhow::bail!(
-            "step `{step_id}` action `{action_id}` with.{key} expected {}, got {}",
-            expected,
-            json_kind(value)
-        );
-    }
-    Ok(())
-}
-
-fn json_type_matches(expected: &str, value: &Value) -> bool {
-    match expected {
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "boolean" => value.is_boolean(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        "null" => value.is_null(),
-        _ => true,
-    }
-}
-
-fn json_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-fn is_template_string(s: &str) -> bool {
-    s.contains("{{") || s.contains("{%")
 }
 
 fn flow_uses_action(steps: &[Step], action_id: &str) -> bool {

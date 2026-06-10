@@ -1894,4 +1894,18 @@ mod tests {
         let on = vec![" Other ".to_string()];
         assert!(retry_matches(&on, ErrorKind::Other));
     }
+
+    /// P1-6:lumo-dsl 的 `RETRY_BACKOFF_KINDS` 白名单必须覆盖且仅覆盖
+    /// `compute_backoff` 实际区分的策略(精确匹配 "exponential",其余按 fixed)。
+    /// 漂移时在这里炸,而不是 validate 拒绝运行期支持的值(或放过会静默降级的值)。
+    #[test]
+    fn backoff_whitelist_matches_compute_backoff() {
+        assert_eq!(lumo_dsl::RETRY_BACKOFF_KINDS, &["fixed", "exponential"]);
+        // fixed:每次都等 initial_ms。
+        assert_eq!(compute_backoff("fixed", 100, 1), 100);
+        assert_eq!(compute_backoff("fixed", 100, 3), 100);
+        // exponential:initial_ms * 2^(attempt-1)。
+        assert_eq!(compute_backoff("exponential", 100, 1), 100);
+        assert_eq!(compute_backoff("exponential", 100, 3), 400);
+    }
 }

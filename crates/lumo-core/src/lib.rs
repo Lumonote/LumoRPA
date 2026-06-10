@@ -10,6 +10,7 @@ pub mod error;
 pub mod registry;
 pub mod resource;
 pub mod schema;
+pub mod validate;
 pub mod vm;
 
 pub use action::{Action, ActionResult};
@@ -20,4 +21,5 @@ pub use ctx::{
 pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use registry::{ActionRegistry, RunTeardown};
 pub use resource::ResourceFactory;
+pub use validate::validate_steps;
 pub use vm::{FlowVm, RunHandle, RunOptions, RunReport};

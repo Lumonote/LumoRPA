@@ -315,7 +315,7 @@ spec:
     - id: a
       action: control.log
       with: { message: "hi {{ inputs.x }}" }
-      retry: { times: 1, backoff: fixed, initial_ms: 100, on: [timeout] }
+      retry: { times: 1, backoff: fixed, initial_ms: 100, on: [other] }
       when: "true"
       bind: out
       ai: { mode: fallback, model: "x/y", prompt: "p" }

@@ -14,4 +14,6 @@ pub use expr::eval_predicate;
 pub use lint::{lint_flow, LintIssue, LintSeverity};
 pub use parse::{parse_file, parse_str, ParseError};
 pub use template::{render, TemplateCtx, TemplateError};
-pub use validate::{validate, ValidationError};
+pub use validate::{
+    validate, ValidationError, KNOWN_RESOURCE_KINDS, RETRY_BACKOFF_KINDS, RETRY_ON_KINDS,
+};

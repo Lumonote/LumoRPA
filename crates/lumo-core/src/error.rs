@@ -165,4 +165,27 @@ mod tests {
             );
         }
     }
+
+    /// P1-6:lumo-dsl 的 `RETRY_ON_KINDS` 白名单是本 enum `as_str` 的静态副本
+    /// (lumo-dsl 不能依赖 lumo-core,否则循环依赖)。本测试断言两边一致——
+    /// 新增 ErrorKind 而忘了同步白名单时在这里炸,而不是让合法的 `retry.on`
+    /// 过不了 validate。
+    #[test]
+    fn retry_on_kinds_match_dsl_whitelist() {
+        let all = [
+            ErrorKind::SelectorNotFound,
+            ErrorKind::ExtractFailed,
+            ErrorKind::CondError,
+            ErrorKind::CapabilityDenied,
+            ErrorKind::BudgetExceeded,
+            ErrorKind::Other,
+        ];
+        let actual: std::collections::BTreeSet<&str> = all.iter().map(|k| k.as_str()).collect();
+        let whitelist: std::collections::BTreeSet<&str> =
+            lumo_dsl::RETRY_ON_KINDS.iter().copied().collect();
+        assert_eq!(
+            whitelist, actual,
+            "lumo-dsl RETRY_ON_KINDS 与 ErrorKind::as_str 漂移了——两边必须同步更新"
+        );
+    }
 }

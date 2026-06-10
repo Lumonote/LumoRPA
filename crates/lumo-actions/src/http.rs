@@ -74,7 +74,7 @@ pub(crate) fn build_gated_client(
 // constant for the whole run, so one cached client stays correctly SSRF-gated
 // for every step.
 
-const HTTP_KIND: &str = "http";
+pub(crate) const HTTP_KIND: &str = "http";
 
 /// Gated clients opened for `http` resources, keyed `(run_id, resource name)`.
 /// `reqwest::Client` is `Send + Sync` and cheaply clonable (it shares its pool

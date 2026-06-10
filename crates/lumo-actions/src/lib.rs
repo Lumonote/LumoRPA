@@ -105,3 +105,32 @@ pub(crate) fn attach_artifact_lenient(
         }
     }
 }
+
+#[cfg(test)]
+mod resource_kind_sync {
+    //! P1-2:lumo-dsl 的 `KNOWN_RESOURCE_KINDS` 白名单是各 action crate KIND
+    //! 常量的静态副本(lumo-dsl 不能依赖 lumo-actions,层次反转)。本测试断言
+    //! 两边一致——新增/改名资源 kind 而忘了同步白名单时在这里炸,而不是让
+    //! 合法 flow 过不了 validate(或拼错 kind 静默漏网)。
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn dsl_whitelist_matches_action_kind_constants() {
+        let actual: BTreeSet<&str> = [
+            crate::browser::BROWSER_KIND,
+            crate::db_ops::SQLITE_KIND,
+            crate::db_ops::PG_KIND,
+            crate::db_ops::MYSQL_KIND,
+            crate::http::HTTP_KIND,
+            crate::email::SMTP_KIND,
+            crate::transfer::FTP_KIND,
+        ]
+        .into_iter()
+        .collect();
+        let whitelist: BTreeSet<&str> = lumo_dsl::KNOWN_RESOURCE_KINDS.iter().copied().collect();
+        assert_eq!(
+            whitelist, actual,
+            "lumo-dsl KNOWN_RESOURCE_KINDS 与 action crate 的 KIND 常量漂移了——两边必须同步更新"
+        );
+    }
+}

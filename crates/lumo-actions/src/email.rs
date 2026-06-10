@@ -59,7 +59,7 @@ pub fn register(r: &mut ActionRegistry) {
 // transport and their own host/port/credentials are ignored. The per-step network
 // gate on `host` still runs on every send (defense in depth).
 
-const SMTP_KIND: &str = "smtp";
+pub(crate) const SMTP_KIND: &str = "smtp";
 
 /// Transports opened for `smtp` resources, keyed `(run_id, resource name)`.
 /// `AsyncSmtpTransport` is `Send + Sync + Clone` (it shares a pool internally),

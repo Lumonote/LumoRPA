@@ -145,7 +145,7 @@ fn run_batch(
 // connection lock; the `Mutex` serializes use, so the toggle can't leak across
 // concurrent ops.
 
-const SQLITE_KIND: &str = "sqlite";
+pub(crate) const SQLITE_KIND: &str = "sqlite";
 
 /// Connections opened for `sqlite` resources, keyed `(run_id, resource name)`.
 /// `Mutex<Connection>` because `Connection` is `Send` but not `Sync`, and the
@@ -506,8 +506,8 @@ impl Action for SqliteBatchAction {
 
 use sqlx::{Column, Row, TypeInfo, ValueRef as SqlxValueRef};
 
-const PG_KIND: &str = "postgres";
-const MYSQL_KIND: &str = "mysql";
+pub(crate) const PG_KIND: &str = "postgres";
+pub(crate) const MYSQL_KIND: &str = "mysql";
 
 /// `postgres` 资源的连接池,键 `(run_id, resource name)`。`PgPool` 本身是
 /// `Clone + Send + Sync`(内部 `Arc`),无需 `Mutex`。

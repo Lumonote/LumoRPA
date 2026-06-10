@@ -265,7 +265,7 @@ async fn ftp_connect_login(
 // `tokio::sync::Mutex` so a bound transfer can hold it across `.await` (the FTP
 // ops are async); that also serializes use if parallel branches share one session.
 
-const FTP_KIND: &str = "ftp";
+pub(crate) const FTP_KIND: &str = "ftp";
 
 /// Logged-in sessions opened for `ftp` resources, keyed `(run_id, resource name)`.
 type FtpSession = tokio::sync::Mutex<suppaftp::tokio::AsyncFtpStream>;

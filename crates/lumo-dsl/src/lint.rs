@@ -467,7 +467,7 @@ spec:
     - id: a
       action: control.log
       with: { message: "x" }
-      retry: { times: 0, on: ["timeout"] }
+      retry: { times: 0, on: ["other"] }
 "#;
         let r = lint(y);
         assert!(has(&r, "retry.dead"), "issues: {r:?}");
