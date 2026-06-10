@@ -7,8 +7,8 @@
 
 use minijinja::{Environment, Value};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as Json;
-use std::sync::Arc;
+use serde_json::{Map, Value as Json};
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,16 +17,21 @@ pub enum TemplateError {
     Render(#[from] minijinja::Error),
 }
 
+/// 模板渲染上下文(P1-3 性能税修复:命名空间全部 `Arc` 持有)。
+///
+/// 步骤输出全部累积在 `steps` 里(http 响应上限 100MiB),而 vm.rs 每个步骤
+/// 至少构造/克隆本结构 2-3 次。字段 `Arc` 化后,克隆只是引用计数 +1(O(1)),
+/// 真正的数据由调用方(`StepCtx`)以写时复制(`Arc::make_mut`)维护。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TemplateCtx {
     #[serde(default)]
-    pub inputs: Json,
+    pub inputs: Arc<Json>,
     #[serde(default)]
-    pub steps: Json,
+    pub steps: Arc<Map<String, Json>>,
     #[serde(default)]
-    pub vars: Json,
+    pub vars: Arc<Map<String, Json>>,
     #[serde(default)]
-    pub env: Json,
+    pub env: Arc<Json>,
     /// Vault placeholders (`{{ vault.smtp.user }}`) render to the literal
     /// string `${{ vault.smtp.user }}` so that secrets never appear in
     /// step input snapshots, logs, or LLM prompts. The runtime substitutes
@@ -35,13 +40,60 @@ pub struct TemplateCtx {
     pub vault: Vec<String>,
     /// Loop bindings injected by for/for_each.
     #[serde(default)]
-    pub bindings: Json,
+    pub bindings: Arc<Map<String, Json>>,
+    /// minijinja 渲染作用域缓存:同一个上下文快照(及其克隆,经 `Arc` 共享)
+    /// 首次走完整字符串渲染时构建一次,之后复用 —— 把"每个字符串字段一次
+    /// 全量 serialize"降为"每个状态代数一次"。字段保留 `pub` 仅为允许跨 crate
+    /// 以字面量 + `..Default::default()` 构造,外部不应直接读写。
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub scope: Arc<OnceLock<Value>>,
+}
+
+impl TemplateCtx {
+    /// 便捷构造:把一个 JSON 对象包成命名空间 map(非对象 ⇒ 空 map)。
+    /// 供测试与调用方以 `serde_json::json!` 字面量填充 `steps`/`vars`/`bindings`。
+    pub fn ns(v: Json) -> Arc<Map<String, Json>> {
+        match v {
+            Json::Object(m) => Arc::new(m),
+            _ => Arc::new(Map::new()),
+        }
+    }
+
+    /// minijinja 渲染作用域:loop 绑定平铺为顶层名字,保留命名空间
+    /// (`inputs`/`steps`/`vars`/`env`)压顶、不可被绑定遮蔽(与旧实现
+    /// "绑定先插、命名空间后插覆盖"语义等价)。整体转换只做一次并缓存;
+    /// minijinja `Value` 克隆是廉价的引用计数操作。
+    fn scope_value(&self) -> Value {
+        self.scope
+            .get_or_init(|| {
+                let mut pairs: Vec<(String, Value)> = Vec::with_capacity(self.bindings.len() + 4);
+                for (k, v) in self.bindings.iter() {
+                    if matches!(k.as_str(), "inputs" | "steps" | "vars" | "env") {
+                        continue; // 保留命名空间不可被 loop 绑定遮蔽
+                    }
+                    pairs.push((k.clone(), Value::from_serialize(v)));
+                }
+                pairs.push(("inputs".into(), Value::from_serialize(&*self.inputs)));
+                pairs.push(("steps".into(), Value::from_serialize(&*self.steps)));
+                pairs.push(("vars".into(), Value::from_serialize(&*self.vars)));
+                pairs.push(("env".into(), Value::from_serialize(&*self.env)));
+                Value::from_iter(pairs)
+            })
+            .clone()
+    }
 }
 
 /// Render any string field. Non-string scalars / objects are returned as-is.
 pub fn render(input: &Json, ctx: &TemplateCtx) -> Result<Json, TemplateError> {
-    let env = build_env();
-    render_inner(&env, input, ctx)
+    render_inner(global_env(), input, ctx)
+}
+
+/// 全局共享的 minijinja `Environment`:配置是纯静态的(无每上下文状态),
+/// 进程内构建一次即可,省掉每次 `render` 的环境搭建开销。
+fn global_env() -> &'static Environment<'static> {
+    static ENV: OnceLock<Environment<'static>> = OnceLock::new();
+    ENV.get_or_init(build_env)
 }
 
 fn build_env() -> Environment<'static> {
@@ -148,50 +200,52 @@ fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
 /// Walk `path` against the template context's namespaces. The first segment
 /// is one of the reserved roots (`inputs`/`steps`/`vars`/`env`) or any loop
 /// binding name (`row`/`item`/`index` or a custom `bind:` like `n`).
+///
+/// P1-3:全程按引用下钻,只克隆最终命中的叶子值 —— 旧实现先把整个命名空间
+/// (含累积的全部步骤输出)深拷贝出来再逐段 `remove`,是每次纯路径查找的
+/// O(累积体积) 放大点。
 pub(crate) fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
+    const JSON_NULL: Json = Json::Null;
     if path.is_empty() {
         return None;
     }
     let head = &path[0];
-    let root: Json = match head.as_str() {
-        "inputs" => ctx.inputs.clone(),
-        "steps" => ctx.steps.clone(),
-        "vars" => ctx.vars.clone(),
-        "env" => ctx.env.clone(),
+    // 解析根:inputs/env 是任意 JSON 值;steps/vars 是 map(整体引用时包一层
+    // 对象,仅此一处发生整 map 克隆,实际模板里几乎不会写裸 `{{ steps }}`)。
+    let (mut cur, rest): (&Json, &[String]) = match head.as_str() {
+        "inputs" => (&ctx.inputs, &path[1..]),
+        "env" => (&ctx.env, &path[1..]),
+        "steps" | "vars" => {
+            let map = if head == "steps" { &ctx.steps } else { &ctx.vars };
+            match path.get(1) {
+                None => return Some(Json::Object((**map).clone())),
+                // 与旧语义一致:对象缺键视作 Null 继续下钻(尾段为空 ⇒ Some(Null),
+                // 还有剩余段 ⇒ None,交还 minijinja 在 SemiStrict 下报未定义)。
+                Some(k) => (map.get(k).unwrap_or(&JSON_NULL), &path[2..]),
+            }
+        }
         // Any other head may be a loop binding (row/item/index or a custom
         // `bind:` name). Resolve it from bindings; unknown heads fall through
         // to minijinja (which errors under SemiStrict for truly-undefined vars).
-        other => ctx.bindings.get(other).cloned()?,
+        other => (ctx.bindings.get(other)?, &path[1..]),
     };
-    let mut cur = root;
-    for seg in &path[1..] {
+    for seg in rest {
         cur = match cur {
-            Json::Object(mut m) => m.remove(seg).unwrap_or(Json::Null),
+            Json::Object(m) => m.get(seg).unwrap_or(&JSON_NULL),
             _ => return None,
         };
     }
-    Some(cur)
+    Some(cur.clone())
 }
 
 fn render_string(env: &Environment, src: &str, ctx: &TemplateCtx) -> Result<String, TemplateError> {
     // Replace vault placeholders BEFORE rendering so they survive untouched.
     // i.e. `{{ vault.smtp.user }}` -> literal `${{ vault.smtp.user }}` token.
     let pre = preprocess_vault(src, &ctx.vault);
-    // Build the render scope: every loop binding (row/item/index AND any custom
-    // `bind:` name) is exposed as a top-level name, then the reserved
-    // namespaces are layered on last so they can never be shadowed by a bind.
-    let mut root = serde_json::Map::new();
-    if let Json::Object(binds) = &ctx.bindings {
-        for (k, v) in binds {
-            root.insert(k.clone(), v.clone());
-        }
-    }
-    root.insert("inputs".into(), ctx.inputs.clone());
-    root.insert("steps".into(), ctx.steps.clone());
-    root.insert("vars".into(), ctx.vars.clone());
-    root.insert("env".into(), ctx.env.clone());
-    let tmpl_ctx = Value::from_serialize(Json::Object(root));
-    let rendered = Arc::new(env).template_from_str(&pre)?.render(tmpl_ctx)?;
+    // 渲染作用域整体转换一次后缓存在上下文快照里(见 `TemplateCtx::scope_value`),
+    // 同一代数内的后续字符串渲染直接复用,不再逐串克隆 + serialize。
+    let scope = ctx.scope_value();
+    let rendered = env.template_from_str(&pre)?.render(scope)?;
     Ok(rendered)
 }
 
@@ -312,7 +366,7 @@ mod tests {
     #[test]
     fn vault_placeholder_mixed_with_live_expression() {
         let ctx = TemplateCtx {
-            inputs: serde_json::json!({ "who": "bob" }),
+            inputs: Arc::new(serde_json::json!({ "who": "bob" })),
             vault: vec!["smtp".into()],
             ..Default::default()
         };
@@ -354,7 +408,7 @@ mod tests {
         // hard-coded row/item/index binds, so `{{ n }}` silently rendered ""
         // (and errors outright under SemiStrict). row/index must still work.
         let ctx = TemplateCtx {
-            bindings: serde_json::json!({ "n": "hello", "row": "hello", "index": 2 }),
+            bindings: TemplateCtx::ns(serde_json::json!({ "n": "hello", "row": "hello", "index": 2 })),
             ..Default::default()
         };
         let out = render(
@@ -369,7 +423,7 @@ mod tests {
     fn bare_custom_binding_single_expr_resolves() {
         // The pure-lookup fast path must also resolve a custom bind name.
         let ctx = TemplateCtx {
-            bindings: serde_json::json!({ "n": "solo" }),
+            bindings: TemplateCtx::ns(serde_json::json!({ "n": "solo" })),
             ..Default::default()
         };
         let out = render(&Json::String("{{ n }}".into()), &ctx).unwrap();

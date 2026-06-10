@@ -67,7 +67,7 @@ spec:
 #[test]
 fn template_renders_inputs() {
     let ctx = TemplateCtx {
-        inputs: json!({ "who": "LumoRPA" }),
+        inputs: std::sync::Arc::new(json!({ "who": "LumoRPA" })),
         ..Default::default()
     };
     let out = render(&json!("hello {{ inputs.who }}"), &ctx).unwrap();
@@ -77,7 +77,7 @@ fn template_renders_inputs() {
 #[test]
 fn template_preserves_numeric_types() {
     let ctx = TemplateCtx {
-        inputs: json!({ "n": 42 }),
+        inputs: std::sync::Arc::new(json!({ "n": 42 })),
         ..Default::default()
     };
     let out = render(&json!("{{ inputs.n }}"), &ctx).unwrap();
@@ -87,7 +87,7 @@ fn template_preserves_numeric_types() {
 #[test]
 fn template_recurses_into_objects() {
     let ctx = TemplateCtx {
-        inputs: json!({ "host": "example.com" }),
+        inputs: std::sync::Arc::new(json!({ "host": "example.com" })),
         ..Default::default()
     };
     let out = render(
@@ -352,7 +352,7 @@ fn render_bare_undefined_variable_is_error() {
 #[test]
 fn render_defined_variable_succeeds() {
     let ctx = TemplateCtx {
-        inputs: json!({ "present": "ok" }),
+        inputs: std::sync::Arc::new(json!({ "present": "ok" })),
         ..Default::default()
     };
     let out = render(&json!("value = {{ inputs.present }}"), &ctx).expect("defined var renders");

@@ -8,13 +8,14 @@
 
 use lumo_dsl::{eval_predicate, TemplateCtx};
 use serde_json::json;
+use std::sync::Arc;
 
 fn ctx() -> TemplateCtx {
     TemplateCtx {
-        inputs: json!({ "count": 5, "name": "Alice", "tags": ["a", "b"] }),
-        steps: json!({ "fetch": { "result": "done" } }),
-        vars: json!({ "flag": true, "ratio": 0 }),
-        bindings: json!({ "index": 3 }),
+        inputs: Arc::new(json!({ "count": 5, "name": "Alice", "tags": ["a", "b"] })),
+        steps: TemplateCtx::ns(json!({ "fetch": { "result": "done" } })),
+        vars: TemplateCtx::ns(json!({ "flag": true, "ratio": 0 })),
+        bindings: TemplateCtx::ns(json!({ "index": 3 })),
         ..Default::default()
     }
 }

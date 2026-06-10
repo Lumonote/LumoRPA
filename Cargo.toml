@@ -42,7 +42,8 @@ async-trait     = "0.1"
 futures         = "0.3"
 
 # serde + dsl
-serde           = { version = "1", features = ["derive"] }
+# P1-3:TemplateCtx 字段 Arc 化后,serde 对 `Arc<T>` 的 (De)Serialize 实现需要 "rc"。
+serde           = { version = "1", features = ["derive", "rc"] }
 serde_json      = "1"
 serde_yaml      = "0.9"
 toml            = "0.8"

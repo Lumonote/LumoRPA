@@ -384,7 +384,7 @@ mod tests {
 
     fn ctx() -> TemplateCtx {
         TemplateCtx {
-            vars: json!({ "n": 7 }),
+            vars: TemplateCtx::ns(json!({ "n": 7 })),
             ..Default::default()
         }
     }

@@ -232,6 +232,12 @@ struct CtxInner {
     steps: Arc<Map<String, Value>>,
     vars: Arc<Map<String, Value>>,
     bindings: Arc<Map<String, Value>>,
+    /// P1-3(全局性能税):`template_ctx()` 的代数缓存。steps/vars/bindings 任一
+    /// 变更点(record_step_output / set_var / push_binding / merge_branch …)把它
+    /// 置 `None` 即"代数 +1";同代数内(vm.rs 每步 when 判断、输入渲染、控制流
+    /// inline 渲染共 2-3 次)直接克隆缓存——`TemplateCtx` 字段全是 `Arc`,克隆是
+    /// O(1),且克隆间共享内部的 minijinja scope 缓存,重复 serialize 一并消除。
+    tpl_cache: Option<TemplateCtx>,
     log_buffer: Vec<String>,
     stats: RunStats,
     /// Step id currently being executed. Set by the VM right before
@@ -296,6 +302,7 @@ impl StepCtx {
                 steps: Arc::new(Map::new()),
                 vars: Arc::new(Map::new()),
                 bindings: Arc::new(Map::new()),
+                tpl_cache: None,
                 log_buffer: Vec::new(),
                 stats: RunStats::default(),
                 current_step_id: None,
@@ -468,20 +475,31 @@ impl StepCtx {
         self.step_timeout
     }
 
+    /// 当前状态的模板上下文快照。P1-3:命名空间以 `Arc` 共享(零深拷贝),并按
+    /// "代数"缓存——自上次 steps/vars/bindings 变更以来若已构造过快照,直接克隆
+    /// 复用(含其内部已 serialize 好的 minijinja scope)。`env` 快照随缓存重建
+    /// 刷新,粒度为每个状态变更点(≥ 每步一次),与旧行为在步骤边界上等价。
     pub fn template_ctx(&self) -> TemplateCtx {
-        let g = self.inner.lock();
-        TemplateCtx {
-            inputs: (*g.inputs).clone(),
-            steps: Value::Object((*g.steps).clone()),
-            vars: Value::Object((*g.vars).clone()),
-            bindings: Value::Object((*g.bindings).clone()),
-            env: env_snapshot(),
-            vault: self.vault_names.clone(),
+        let mut g = self.inner.lock();
+        if let Some(tc) = &g.tpl_cache {
+            return tc.clone(); // 全 Arc 字段,克隆是 O(1) 引用计数操作
         }
+        let tc = TemplateCtx {
+            inputs: g.inputs.clone(),
+            steps: g.steps.clone(),
+            vars: g.vars.clone(),
+            bindings: g.bindings.clone(),
+            env: Arc::new(env_snapshot()),
+            vault: self.vault_names.clone(),
+            ..Default::default()
+        };
+        g.tpl_cache = Some(tc.clone());
+        tc
     }
 
     pub fn record_step_output(&self, step_id: &str, output: &Value) {
         let mut g = self.inner.lock();
+        g.tpl_cache = None; // steps 变更 ⇒ 模板上下文代数 +1
         Arc::make_mut(&mut g.steps)
             .insert(step_id.to_string(), serde_json::json!({ "result": output }));
     }
@@ -492,6 +510,7 @@ impl StepCtx {
     /// reference contract. No-op if the step has no recorded output yet.
     pub fn record_step_ai(&self, step_id: &str, ai: Value) {
         let mut g = self.inner.lock();
+        g.tpl_cache = None; // steps 内容变更 ⇒ 失效
         if let Some(Value::Object(entry)) = Arc::make_mut(&mut g.steps).get_mut(step_id) {
             entry.insert("_ai".to_string(), ai);
         }
@@ -510,7 +529,9 @@ impl StepCtx {
     }
 
     pub fn set_var(&self, key: &str, value: Value) {
-        Arc::make_mut(&mut self.inner.lock().vars).insert(key.to_string(), value);
+        let mut g = self.inner.lock();
+        g.tpl_cache = None; // vars 变更 ⇒ 失效,下次渲染必须看到新值
+        Arc::make_mut(&mut g.vars).insert(key.to_string(), value);
     }
 
     pub fn vars_snapshot(&self) -> Value {
@@ -522,11 +543,15 @@ impl StepCtx {
     }
 
     pub fn push_binding(&self, key: &str, value: Value) {
-        Arc::make_mut(&mut self.inner.lock().bindings).insert(key.into(), value);
+        let mut g = self.inner.lock();
+        g.tpl_cache = None; // bindings 变更 ⇒ 失效
+        Arc::make_mut(&mut g.bindings).insert(key.into(), value);
     }
 
     pub fn clear_binding(&self, key: &str) {
-        Arc::make_mut(&mut self.inner.lock().bindings).remove(key);
+        let mut g = self.inner.lock();
+        g.tpl_cache = None; // bindings 变更 ⇒ 失效
+        Arc::make_mut(&mut g.bindings).remove(key);
     }
 
     pub fn log(&self, line: impl Into<String>) {
@@ -573,6 +598,9 @@ impl StepCtx {
                 steps: g.steps.clone(),
                 vars: g.vars.clone(),
                 bindings: g.bindings.clone(),
+                // 分支不继承父缓存:fork 后分支内首个渲染重建自己的快照,
+                // 之后分支内 set_var 走写时复制,不会污染父/兄弟分支。
+                tpl_cache: None,
                 log_buffer: Vec::new(),
                 stats: RunStats::default(),
                 current_step_id: g.current_step_id.clone(),
@@ -590,6 +618,7 @@ impl StepCtx {
     pub fn merge_branch(&self, branch: &StepCtx) {
         let b = branch.inner.lock();
         let mut g = self.inner.lock();
+        g.tpl_cache = None; // 合并写入 steps/vars ⇒ 失效
         {
             let steps = Arc::make_mut(&mut g.steps);
             for (k, v) in b.steps.iter() {
