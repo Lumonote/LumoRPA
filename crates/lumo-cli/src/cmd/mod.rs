@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod copilot;
 pub mod hotkey;
+pub mod human;
 pub mod init;
 pub mod lint;
 pub mod mcp;

@@ -88,6 +88,11 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         // `$LUMO_HOME/artifacts`)。`--no-store` 没有 repo,归档只会留下没有表行
         // 的孤儿 blob,索性一并关掉(attach 退化为 no-op)。
         .with_artifacts_dir((!args.no_store).then(|| home.join("artifacts")))
+        // P1(人机交互):CLI 宿主的 stdin prompter。非 TTY 场景在 prompt 时
+        // 立刻报错(human.* 步骤才会触发,不影响无人值守流程)。
+        .with_human_prompter(Some(std::sync::Arc::new(
+            super::human::CliPrompter::new(),
+        )))
         .with_cancel(cancel);
     let report = match vm.run(&flow, opts).await {
         Ok(report) => report,
