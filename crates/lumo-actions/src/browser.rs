@@ -8,9 +8,15 @@ use chromiumoxide::cdp::browser_protocol::browser::{
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
-use chromiumoxide::cdp::browser_protocol::network::CookieParam;
+use chromiumoxide::cdp::browser_protocol::input::{
+    DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+};
+use chromiumoxide::cdp::browser_protocol::network::{
+    CookieParam, EventLoadingFailed, EventLoadingFinished, EventResponseReceived,
+    GetResponseBodyParams, RequestId,
+};
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventJavascriptDialogOpening, HandleJavaScriptDialogParams,
+    EventJavascriptDialogOpening, HandleJavaScriptDialogParams, PrintToPdfParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ExecutionContextId};
 use chromiumoxide::{Browser, BrowserConfig, Page};
@@ -58,6 +64,10 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(DialogAction);
     r.register(FrameAction);
     r.register(ExtractTableAction);
+    // 指令集 P1 批次:CDP 三件套 —— 鼠标拖拽 / 打印 PDF / 等待网络响应。
+    r.register(DragAndDropAction);
+    r.register(PrintPdfAction);
+    r.register(WaitResponseAction);
     // P1-2: reclaim any browser process left open by a run that failed (or
     // forgot `browser.close`) once the VM finishes that run.
     r.register_teardown(Arc::new(BrowserTeardown));
@@ -2645,6 +2655,524 @@ impl Action for ExtractTableAction {
     }
 }
 
+// ─── browser.drag_and_drop(指令集 P1)────────────────────────────────────────
+// CDP `Input.dispatchMouseEvent` 鼠标序列拖拽:mousePressed → 若干 mouseMoved
+// 插值 → mouseReleased。为什么不用 `Input.dispatchDragEvent`:该命令必须携带
+// `DragData`(拖拽项列表),而 DragData 只能从 `Input.setInterceptDrags` 拦截到的
+// 真实拖拽事件里获得,无法凭空构造 —— 对"从 A 拖到 B"这一主动合成场景不可用,
+// 故走鼠标事件序列(与 Puppeteer 的 mouse.drag 同思路)。
+//
+// 注意:HTML5 `draggable` 元素(dragstart/dataTransfer 协议)与鼠标拖拽是两套
+// 事件模型,纯鼠标序列可能驱动不了它们;此类页面建议用 `browser.eval` 兜底,
+// 直接派发 DragEvent / 调页面自身的 API。鼠标序列覆盖的是更常见的
+// mousedown/mousemove/mouseup 式拖拽(滑块、画布、行排序库等)。
+
+pub struct DragAndDropAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DragAndDropIn {
+    /// 拖拽起点:CSS 选择器(与 `from_selectors` 二选一,至少给一个)。
+    #[serde(default)]
+    from: Option<String>,
+    /// 拖拽起点:多策略选择器(同 browser.click 的 `selectors`)。
+    #[serde(default)]
+    from_selectors: Option<MultiSelector>,
+    /// 拖拽终点:CSS 选择器(与坐标 `x`/`y` 互斥)。
+    #[serde(default)]
+    to: Option<String>,
+    /// 拖拽终点:多策略选择器(与坐标 `x`/`y` 互斥)。
+    #[serde(default)]
+    to_selectors: Option<MultiSelector>,
+    /// 拖拽终点:视口 X 坐标(CSS 像素;与 `to`/`to_selectors` 互斥,须与 `y` 成对)。
+    #[serde(default)]
+    x: Option<f64>,
+    /// 拖拽终点:视口 Y 坐标(CSS 像素;与 `to`/`to_selectors` 互斥,须与 `x` 成对)。
+    #[serde(default)]
+    y: Option<f64>,
+    /// 起点→终点之间的 mouseMoved 插值步数(默认 10,夹取到 1..=200)。
+    #[serde(default = "default_drag_steps")]
+    steps: u32,
+    /// 每个插值步之间的停顿毫秒数(默认 0;给拖拽库留出响应时间)。
+    #[serde(default)]
+    delay_ms: u64,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+fn default_drag_steps() -> u32 {
+    10
+}
+
+/// 起点→终点的线性插值轨迹(不含起点,含终点)。拆成纯函数便于无浏览器单测。
+fn drag_path(from: (f64, f64), to: (f64, f64), steps: u32) -> Vec<(f64, f64)> {
+    let steps = steps.clamp(1, 200);
+    (1..=steps)
+        .map(|i| {
+            let t = f64::from(i) / f64::from(steps);
+            (
+                from.0 + (to.0 - from.0) * t,
+                from.1 + (to.1 - from.1) * t,
+            )
+        })
+        .collect()
+}
+
+/// 派发一个鼠标事件(左键语义由调用方在 `evt` 上设置)。
+async fn dispatch_mouse(page: &Page, evt: DispatchMouseEventParams) -> Result<(), StepError> {
+    page.execute(evt)
+        .await
+        .map(|_| ())
+        .map_err(|e| StepError::msg(format!("browser.drag_and_drop dispatch: {e}")))
+}
+
+#[async_trait]
+impl Action for DragAndDropAction {
+    fn id(&self) -> &'static str {
+        "browser.drag_and_drop"
+    }
+    fn summary(&self) -> &'static str {
+        "Drag from one element to another element or to viewport coordinates (mouse-event sequence)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<DragAndDropIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DragAndDropIn {
+            from,
+            from_selectors,
+            to,
+            to_selectors,
+            x,
+            y,
+            steps,
+            delay_ms,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.drag_and_drop input invalid: {e}")))?;
+
+        // 输入校验全部在会话查找之前完成(CI 可测,不需要 Chrome)。
+        let from_spec = build_selector(from, from_selectors).map_err(|_| {
+            StepError::msg("browser.drag_and_drop requires `from` (CSS) or `from_selectors`")
+        })?;
+        let has_to_selector = to.as_ref().is_some_and(|s| !s.is_empty())
+            || to_selectors.as_ref().is_some_and(|s| !s.is_empty());
+        let to_spec = match (has_to_selector, x, y) {
+            // 终点二选一:选择器 XOR 坐标(坐标必须 x/y 成对)。
+            (true, None, None) => Some(build_selector(to, to_selectors)?),
+            (false, Some(_), Some(_)) => None,
+            (true, _, _) if x.is_some() || y.is_some() => {
+                return Err(StepError::msg(
+                    "browser.drag_and_drop: set either `to`/`to_selectors` or `x`+`y`, not both",
+                ))
+            }
+            _ => {
+                return Err(StepError::msg(
+                    "browser.drag_and_drop requires a target: `to`/`to_selectors`, or both `x` and `y`",
+                ))
+            }
+        };
+
+        let s = session_for_ctx(ctx)?;
+        let page = current_page(&s)?;
+
+        // 解析起点中心坐标。
+        let from_hint = from_spec.first_hint();
+        let (from_el, _strategy) = resolve_element(&page, &from_spec, timeout_ms).await?;
+        let fp = from_el.clickable_point().await.map_err(|e| {
+            StepError::msg(format!("browser.drag_and_drop from `{from_hint}`: {e}"))
+        })?;
+        // 解析终点坐标(选择器 → 元素中心;否则用调用方给的视口坐标)。
+        let (tx, ty, to_label) = if let Some(spec) = &to_spec {
+            let hint = spec.first_hint();
+            let (to_el, _strategy) = resolve_element(&page, spec, timeout_ms).await?;
+            let tp = to_el
+                .clickable_point()
+                .await
+                .map_err(|e| StepError::msg(format!("browser.drag_and_drop to `{hint}`: {e}")))?;
+            (tp.x, tp.y, hint)
+        } else {
+            // 上面的校验保证了坐标分支 x/y 同时存在。
+            let (cx, cy) = (x.unwrap_or_default(), y.unwrap_or_default());
+            (cx, cy, format!("({cx},{cy})"))
+        };
+        clear_marker(&page).await;
+
+        // mousePressed → 插值 mouseMoved(按住左键)→ mouseReleased。
+        let drag = async {
+            let mut press =
+                DispatchMouseEventParams::new(DispatchMouseEventType::MousePressed, fp.x, fp.y);
+            press.button = Some(MouseButton::Left);
+            press.buttons = Some(1);
+            press.click_count = Some(1);
+            dispatch_mouse(&page, press).await?;
+
+            let path = drag_path((fp.x, fp.y), (tx, ty), steps);
+            let moved = path.len();
+            for (mx, my) in path {
+                let mut mv =
+                    DispatchMouseEventParams::new(DispatchMouseEventType::MouseMoved, mx, my);
+                mv.button = Some(MouseButton::Left);
+                mv.buttons = Some(1);
+                dispatch_mouse(&page, mv).await?;
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+
+            let mut release =
+                DispatchMouseEventParams::new(DispatchMouseEventType::MouseReleased, tx, ty);
+            release.button = Some(MouseButton::Left);
+            release.click_count = Some(1);
+            dispatch_mouse(&page, release).await?;
+            Ok::<usize, StepError>(moved)
+        };
+        let moved = tokio::time::timeout(Duration::from_millis(timeout_ms), drag)
+            .await
+            .map_err(|_| StepError::msg("browser.drag_and_drop: timed out"))??;
+
+        Ok(ActionResult::from(serde_json::json!({
+            "from": from_hint,
+            "to": to_label,
+            "steps": moved,
+        })))
+    }
+}
+
+// ─── browser.print_pdf(指令集 P1)────────────────────────────────────────────
+// CDP `Page.printToPDF` 把当前页打成 PDF 写入 `path`(fs.write 门控,与
+// browser.screenshot 同序:先验权后碰浏览器),同一份字节再归档为 run 级
+// artifact(kind=pdf / application/pdf,循 screenshot 的 attach_artifact_lenient
+// 先例)。注意:Chrome 仅在 headless 模式支持 printToPDF,有头会话会报错。
+
+pub struct PrintPdfAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PrintPdfIn {
+    /// 目标 PDF 路径(受 fs.write capability 门控)。
+    path: String,
+    /// 横向打印(默认 false,纵向)。
+    #[serde(default)]
+    landscape: Option<bool>,
+    /// 纸宽,英寸(默认 8.5)。
+    #[serde(default)]
+    paper_width: Option<f64>,
+    /// 纸高,英寸(默认 11)。
+    #[serde(default)]
+    paper_height: Option<f64>,
+    /// 打印背景图形(默认 false)。
+    #[serde(default)]
+    print_background: Option<bool>,
+    /// 页码范围,如 "1-5, 8, 11-13"(默认整篇)。
+    #[serde(default)]
+    page_ranges: Option<String>,
+    /// 缩放比例(默认 1)。
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[async_trait]
+impl Action for PrintPdfAction {
+    fn id(&self) -> &'static str {
+        "browser.print_pdf"
+    }
+    fn summary(&self) -> &'static str {
+        "Print the current page to a PDF file via CDP Page.printToPDF (headless only)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<PrintPdfIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let PrintPdfIn {
+            path,
+            landscape,
+            paper_width,
+            paper_height,
+            print_background,
+            page_ranges,
+            scale,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.print_pdf input invalid: {e}")))?;
+        // 先过 fs.write 闸门再碰浏览器 —— 未授权路径快速失败(capability 错误,
+        // 不拉 Chrome),与 browser.screenshot / http.download 同序。
+        let dest = PathBuf::from(&path);
+        ctx.ensure_fs_write(&dest)?;
+        let s = session_for_ctx(ctx)?;
+        let page = current_page(&s)?;
+
+        let params = PrintToPdfParams {
+            landscape,
+            print_background,
+            scale,
+            paper_width,
+            paper_height,
+            page_ranges,
+            ..PrintToPdfParams::builder().build()
+        };
+        let pdf = tokio::time::timeout(Duration::from_millis(timeout_ms), page.pdf(params))
+            .await
+            .map_err(|_| StepError::msg("browser.print_pdf: timed out"))?
+            .map_err(|e| StepError::msg(format!("browser.print_pdf: {e}")))?;
+
+        if let Some(parent) = dest.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(&dest, &pdf).await.map_err(|e| {
+            StepError::msg(format!("browser.print_pdf write {}: {e}", dest.display()))
+        })?;
+        // X-07 时光回溯:同一份 PDF 字节再归档为 run 级 artifact;未接
+        // artifacts_dir 时为无害 no-op,归档失败只告警(见封装注释)。
+        let artifact_id =
+            crate::attach_artifact_lenient(ctx, "browser.print_pdf", "pdf", "application/pdf", &pdf);
+        Ok(ActionResult::from(serde_json::json!({
+            "path": path,
+            "bytes": pdf.len(),
+            "artifact_id": artifact_id,
+        })))
+    }
+}
+
+// ─── browser.wait_response(指令集 P1)───────────────────────────────────────
+// 等待 URL 匹配 `url_pattern` 的网络响应 **加载完成**。监听用 chromiumoxide 的
+// Network 域事件流(Network.enable 在 target 初始化时已默认开启):
+// `Network.responseReceived` 拿 URL/状态码,`Network.loadingFinished` 确认字节
+// 收完(`loadingFailed` 则报错)。两条事件流各自独立,完成事件可能先于响应事件
+// 被本侧消费,所以用已完成/已失败的 request_id 集合做缓冲再对账。
+//
+// 典型用法是"先监听后点击"规避竞态:`trigger.click` 在订阅事件流 **之后** 执行
+// 一次点击;不给 trigger 就纯等待(适合页面自身轮询/已在途的请求)。
+// capability 语义与现有 browser 动作一致:导航入口(browser.open)已过 network
+// 闸门,本动作只被动观测该页面自己发出的流量,不再二次门控。
+
+/// `url_pattern` 的匹配器:默认子串包含;`regex: true` 时为正则。
+/// 拆成独立类型便于无浏览器单测(构造即校验,坏正则在会话之前失败)。
+enum UrlMatcher {
+    Substring(String),
+    Regex(regex::Regex),
+}
+
+impl UrlMatcher {
+    fn build(pattern: &str, regex: bool) -> Result<Self, StepError> {
+        if pattern.is_empty() {
+            return Err(StepError::msg(
+                "browser.wait_response requires a non-empty `url_pattern`",
+            ));
+        }
+        if regex {
+            Ok(UrlMatcher::Regex(regex::Regex::new(pattern).map_err(
+                |e| StepError::msg(format!("browser.wait_response: invalid regex: {e}")),
+            )?))
+        } else {
+            Ok(UrlMatcher::Substring(pattern.to_string()))
+        }
+    }
+
+    fn matches(&self, url: &str) -> bool {
+        match self {
+            UrlMatcher::Substring(s) => url.contains(s.as_str()),
+            UrlMatcher::Regex(re) => re.is_match(url),
+        }
+    }
+}
+
+/// 在开始监听之后执行一次的触发动作(目前仅支持点击)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WaitResponseTrigger {
+    /// 订阅事件流后点击一次该 CSS 选择器(规避"先点击、后监听"丢响应的竞态)。
+    click: String,
+}
+
+pub struct WaitResponseAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WaitResponseIn {
+    /// URL 匹配模式:默认子串包含;`regex: true` 时按正则解释。
+    url_pattern: String,
+    /// 把 `url_pattern` 当正则(默认 false,子串包含)。
+    #[serde(default)]
+    regex: bool,
+    /// 响应完成后经 CDP `Network.getResponseBody` 回传 body(默认 false)。
+    #[serde(default)]
+    include_body: bool,
+    /// `include_body` 时允许的最大 body 字节数,超限报错(默认 10 MiB)。
+    #[serde(default = "default_body_max_bytes")]
+    max_bytes: u64,
+    /// 可选触发:开始监听之后执行一次 `{click: <selector>}`。
+    #[serde(default)]
+    trigger: Option<WaitResponseTrigger>,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+fn default_body_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+#[async_trait]
+impl Action for WaitResponseAction {
+    fn id(&self) -> &'static str {
+        "browser.wait_response"
+    }
+    fn summary(&self) -> &'static str {
+        "Wait for a network response whose URL matches a pattern (optionally click a trigger first)"
+    }
+    fn schema(&self) -> &'static serde_json::Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WaitResponseIn>);
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let WaitResponseIn {
+            url_pattern,
+            regex,
+            include_body,
+            max_bytes,
+            trigger,
+            timeout_ms,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("browser.wait_response input invalid: {e}")))?;
+        // 输入校验先于会话查找(CI 可测):空 pattern / 坏正则 / 空 trigger 选择器。
+        let matcher = UrlMatcher::build(&url_pattern, regex)?;
+        if trigger.as_ref().is_some_and(|t| t.click.is_empty()) {
+            return Err(StepError::msg(
+                "browser.wait_response: `trigger.click` must be a non-empty selector",
+            ));
+        }
+        let s = session_for_ctx(ctx)?;
+        let page = current_page(&s)?;
+
+        // 先订阅三条 Network 事件流,再触发 —— 不丢快响应。
+        let mut responses = page
+            .event_listener::<EventResponseReceived>()
+            .await
+            .map_err(|e| StepError::msg(format!("browser.wait_response subscribe: {e}")))?;
+        let mut finished = page
+            .event_listener::<EventLoadingFinished>()
+            .await
+            .map_err(|e| StepError::msg(format!("browser.wait_response subscribe: {e}")))?;
+        let mut failed = page
+            .event_listener::<EventLoadingFailed>()
+            .await
+            .map_err(|e| StepError::msg(format!("browser.wait_response subscribe: {e}")))?;
+
+        if let Some(t) = &trigger {
+            let spec = build_selector(Some(t.click.clone()), None)?;
+            let (element, _strategy) = resolve_element(&page, &spec, timeout_ms).await?;
+            element
+                .click()
+                .await
+                .map_err(|e| StepError::msg(format!("browser.wait_response trigger click: {e}")))?;
+            clear_marker(&page).await;
+        }
+
+        let start = std::time::Instant::now();
+        // 等待:先匹配 responseReceived,再等同一 request_id 的 loadingFinished。
+        // 两条流的消费顺序不保证与 CDP 事件顺序一致,故 done/errs 集合缓冲对账。
+        let wait = async {
+            let mut matched: Option<(RequestId, String, i64)> = None;
+            let mut done: std::collections::HashSet<RequestId> = Default::default();
+            let mut errs: std::collections::HashSet<RequestId> = Default::default();
+            loop {
+                if let Some((id, url, status)) = &matched {
+                    if done.contains(id) {
+                        return Ok((id.clone(), url.clone(), *status));
+                    }
+                    if errs.contains(id) {
+                        return Err(StepError::msg(format!(
+                            "browser.wait_response: response `{url}` failed to load"
+                        )));
+                    }
+                }
+                tokio::select! {
+                    ev = responses.next() => {
+                        let Some(ev) = ev else {
+                            return Err(StepError::msg(
+                                "browser.wait_response: network event stream closed",
+                            ));
+                        };
+                        if matched.is_none() && matcher.matches(&ev.response.url) {
+                            matched = Some((
+                                ev.request_id.clone(),
+                                ev.response.url.clone(),
+                                ev.response.status,
+                            ));
+                        }
+                    }
+                    ev = finished.next() => {
+                        if let Some(ev) = ev {
+                            done.insert(ev.request_id.clone());
+                        }
+                    }
+                    ev = failed.next() => {
+                        if let Some(ev) = ev {
+                            errs.insert(ev.request_id.clone());
+                        }
+                    }
+                }
+            }
+        };
+        let (request_id, url, status) =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), wait)
+                .await
+                .map_err(|_| {
+                    StepError::msg(format!(
+                        "browser.wait_response: no response matching `{url_pattern}` completed within {timeout_ms}ms"
+                    ))
+                })??;
+
+        let mut out = serde_json::json!({
+            "url": url,
+            "status": status,
+            "waited_ms": start.elapsed().as_millis() as u64,
+        });
+        if include_body {
+            // 响应体须趁资源未被驱逐时取;binary 内容 CDP 以 base64 回传。
+            let resp = page
+                .execute(GetResponseBodyParams::new(request_id))
+                .await
+                .map_err(|e| StepError::msg(format!("browser.wait_response body: {e}")))?;
+            let returns = &resp.result;
+            let (bytes, was_base64) = if returns.base64_encoded {
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(returns.body.as_bytes())
+                    .map_err(|e| {
+                        StepError::msg(format!("browser.wait_response body decode: {e}"))
+                    })?;
+                (decoded, true)
+            } else {
+                (returns.body.clone().into_bytes(), false)
+            };
+            if bytes.len() as u64 > max_bytes {
+                return Err(StepError::msg(format!(
+                    "browser.wait_response: body is {} bytes, exceeding max_bytes {max_bytes}",
+                    bytes.len()
+                )));
+            }
+            // 文本直接回传;二进制(或非 UTF-8)回退为 base64 字符串并标记。
+            match String::from_utf8(bytes) {
+                Ok(text) => {
+                    out["body"] = Value::String(text);
+                    out["body_base64"] = Value::Bool(false);
+                }
+                Err(e) => {
+                    use base64::Engine;
+                    let b64 = if was_base64 {
+                        returns.body.clone()
+                    } else {
+                        base64::engine::general_purpose::STANDARD.encode(e.into_bytes())
+                    };
+                    out["body"] = Value::String(b64);
+                    out["body_base64"] = Value::Bool(true);
+                }
+            }
+        }
+        Ok(ActionResult::from(out))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2833,5 +3361,40 @@ mod tests {
             take_run(&mut map, "run").is_none(),
             "second drain of the same run is a clean None"
         );
+    }
+
+    // ─── 指令集 P1:drag_and_drop / wait_response 纯逻辑单测(无浏览器)──────────
+
+    #[test]
+    fn drag_path_interpolates_from_exclusive_to_inclusive() {
+        // 4 步:不含起点、含终点,均匀插值。
+        let p = drag_path((0.0, 0.0), (40.0, -8.0), 4);
+        assert_eq!(p.len(), 4);
+        assert_eq!(p[0], (10.0, -2.0));
+        assert_eq!(p[3], (40.0, -8.0), "最后一步必须正好落在终点");
+        // 步数夹取:0 → 1 步(仍至少派发一次到终点的 move)。
+        let one = drag_path((0.0, 0.0), (10.0, 10.0), 0);
+        assert_eq!(one, vec![(10.0, 10.0)]);
+        // 上限夹取到 200,防止病态输入刷爆 CDP。
+        assert_eq!(drag_path((0.0, 0.0), (1.0, 1.0), 100_000).len(), 200);
+    }
+
+    #[test]
+    fn url_matcher_substring_and_regex() {
+        // 默认子串包含。
+        let sub = UrlMatcher::build("/api/orders", false).expect("substring matcher");
+        assert!(sub.matches("https://x.test/api/orders?page=1"));
+        assert!(!sub.matches("https://x.test/api/users"));
+        // regex: true 时按正则解释。
+        let re = UrlMatcher::build(r"/api/orders/\d+$", true).expect("regex matcher");
+        assert!(re.matches("https://x.test/api/orders/42"));
+        assert!(!re.matches("https://x.test/api/orders/list"));
+        // 空 pattern / 坏正则在会话之前就失败。
+        assert!(UrlMatcher::build("", false).is_err());
+        let err = match UrlMatcher::build("(unclosed", true) {
+            Err(e) => e,
+            Ok(_) => panic!("a broken regex must be rejected"),
+        };
+        assert!(err.to_string().contains("invalid regex"), "got: {err}");
     }
 }

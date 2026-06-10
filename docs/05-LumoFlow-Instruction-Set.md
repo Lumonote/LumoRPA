@@ -40,7 +40,7 @@ Each step supports:
 | `with` | Action input object validated against the action JSON schema. |
 | `bind` | Optional variable name that receives this step's output. |
 | `when` | Optional predicate. Falsy values skip the step. |
-| `retry` | Optional retry policy: `times`, `backoff` (`fixed` \| `exponential`), `initial_ms`, `on` (error kinds: `selector_not_found`, `extract_failed`, `cond_error`, `capability_denied`, `budget_exceeded`, `other`). 注意:步级超时由 VM 在重试循环外层强制执行,**不可被 retry 捕获**——`on` 里没有 `timeout`。 |
+| `retry` | Optional retry policy: `times`, `backoff`, `initial_ms`, `on`. |
 | `ai` | Optional AI hook policy: `mode: off`, `fallback`, or `primary`. |
 | `resource` | Optional name of a declared `spec.resources` entry to bind this step to (see [Resources](#resources)). |
 | `do`, `else`, `catch`, `finally`, `branches` | Nested control blocks for `control.*` actions. |
@@ -212,7 +212,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | --- | --- |
 | AI | `ai.chat` |
 | Archive | `archive.zip`, `archive.unzip` |
-| Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table` |
+| Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
 | Clipboard | `clipboard.get`, `clipboard.set` |
 | Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.try`, `control.parallel`, `control.fail` |
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
