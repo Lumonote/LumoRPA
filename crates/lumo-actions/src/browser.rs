@@ -1536,9 +1536,16 @@ impl Action for ScreenshotAction {
         tokio::fs::write(&dest, &png).await.map_err(|e| {
             StepError::msg(format!("browser.screenshot write {}: {e}", dest.display()))
         })?;
+        // X-07 时光回溯:除写用户目标路径外,同一份 PNG 再归档为 run 级 artifact
+        // (kind=screenshot / mime=image/png),供桌面端回放 scrubber 取数。
+        // 未接 artifacts_dir 的宿主下是无害 no-op,归档失败只告警 —— 见封装注释。
+        let artifact_id =
+            crate::attach_artifact_lenient(ctx, "browser.screenshot", "screenshot", "image/png", &png);
         Ok(ActionResult::from(serde_json::json!({
             "path": path,
             "bytes": png.len(),
+            // 归档成功时为 artifact ULID;no-op / 失败时为 null(新增字段,向后兼容)。
+            "artifact_id": artifact_id,
         })))
     }
 }
@@ -2620,6 +2627,19 @@ impl Action for ExtractTableAction {
             return Err(StepError::ExtractFailed(format!(
                 "browser.extract_table: no <table> found at `{selector}`"
             )));
+        }
+        // X-07:抽取结果同步归档为结构化 artifact(kind=table / application/json)。
+        // `attach_artifact` 本就是「blob 落盘 + 表行」的文件型语义,JSON 序列化的
+        // 字节即合法 blob,无需另开存储路径。输出保持裸的行数组不变(下游按行
+        // 索引,不能在外面包一层 artifact_id),归档 id 只进 artifacts 表。
+        if let Ok(bytes) = serde_json::to_vec(&result) {
+            crate::attach_artifact_lenient(
+                ctx,
+                "browser.extract_table",
+                "table",
+                "application/json",
+                &bytes,
+            );
         }
         Ok(ActionResult::from(result))
     }

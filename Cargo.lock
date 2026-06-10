@@ -3745,6 +3745,7 @@ dependencies = [
  "lopdf",
  "lumo-core",
  "lumo-dsl",
+ "lumo-storage",
  "mail-parser",
  "md-5",
  "once_cell",

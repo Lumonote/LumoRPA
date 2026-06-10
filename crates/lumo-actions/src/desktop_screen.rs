@@ -114,7 +114,7 @@ impl Action for ScreenshotAction {
                 ));
             }
         }
-        let (width, height) = tokio::task::spawn_blocking(move || {
+        let (width, height, png) = tokio::task::spawn_blocking(move || {
             let img = capture_display(display)?;
             let img = match region {
                 Some(r) => {
@@ -134,18 +134,32 @@ impl Action for ScreenshotAction {
             if let Some(parent) = dest.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            img.save_with_format(&dest, image::ImageFormat::Png)
-                .map_err(|e| {
-                    StepError::msg(format!("desktop.screenshot write {}: {e}", dest.display()))
-                })?;
-            Ok::<(u32, u32), StepError>((img.width(), img.height()))
+            // 先编码进内存再落盘:同一份 PNG 字节既写用户目标路径,又供下方 X-07
+            // artifact 归档复用,避免「写完再回读」的双重 IO 与竞态。
+            let mut png = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|e| StepError::msg(format!("desktop.screenshot encode: {e}")))?;
+            std::fs::write(&dest, &png).map_err(|e| {
+                StepError::msg(format!("desktop.screenshot write {}: {e}", dest.display()))
+            })?;
+            Ok::<(u32, u32, Vec<u8>), StepError>((img.width(), img.height(), png))
         })
         .await
         .map_err(|e| StepError::msg(format!("desktop.screenshot join: {e}")))??;
+        // X-07 时光回溯:与 browser.screenshot 同语义 —— 截图归档为 run 级
+        // artifact(kind=screenshot / mime=image/png);no-op / 失败 → null。
+        let artifact_id = crate::attach_artifact_lenient(
+            ctx,
+            "desktop.screenshot",
+            "screenshot",
+            "image/png",
+            &png,
+        );
         Ok(ActionResult::from(json!({
             "path": path,
             "width": width,
             "height": height,
+            "artifact_id": artifact_id,
         })))
     }
 }

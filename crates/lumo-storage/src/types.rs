@@ -45,7 +45,7 @@ pub struct ArtifactRow {
     pub id: String,
     pub flow_run_id: String,
     pub step_id: Option<String>,
-    pub kind: String, // screenshot | dom | har | video | file
+    pub kind: String, // screenshot | dom | har | video | table | file
     pub mime: String,
     pub size: i64,
     pub blob_path: String,

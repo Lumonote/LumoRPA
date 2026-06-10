@@ -84,6 +84,10 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
     let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow)
         .with_vault(super::load_vault_identity(&home))
         .with_resume_from(args.resume)
+        // X-07:CLI run 同样接 artifacts 落盘(与桌面端 execute_flow 对齐,固定写
+        // `$LUMO_HOME/artifacts`)。`--no-store` 没有 repo,归档只会留下没有表行
+        // 的孤儿 blob,索性一并关掉(attach 退化为 no-op)。
+        .with_artifacts_dir((!args.no_store).then(|| home.join("artifacts")))
         .with_cancel(cancel);
     let report = match vm.run(&flow, opts).await {
         Ok(report) => report,

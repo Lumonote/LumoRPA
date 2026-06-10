@@ -129,6 +129,8 @@ windows-sys = { version = "0.59", optional = true, features = [
 ] }
 
 [dev-dependencies]
+# X-07 artifacts e2e(browser_actions.rs 的 --ignored 用例)需要直查 artifacts 表。
+lumo-storage.workspace = true
 tempfile.workspace = true
 serde_yaml.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

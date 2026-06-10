@@ -80,3 +80,28 @@ pub fn register_all(registry: &mut ActionRegistry) {
     // 指令集缺口 P0:XML 族(SOAP/政企对接/电子发票)。纯数据变换,不进 capability gate。
     xml_ops::register(registry);
 }
+
+/// X-07(时光回溯):以 best-effort 方式把 blob 归档为当前步骤的 artifact。
+///
+/// `StepCtx::attach_artifact` 的语义是「blob 落 `{artifacts_dir}/{run_id}/` +
+/// `artifacts` 表插行」;宿主未接 artifacts_dir(如 `--no-store` 的 CLI 路径)时
+/// 它本身就是无害 no-op(返回空 id)。本封装再把归档 *失败* 也降级为告警 ——
+/// artifact 只是回放侧的可观测性副本,绝不连坐动作本身的成败。
+///
+/// 返回值可直接嵌进动作输出:成功 → artifact ULID 字符串;no-op / 失败 → `null`。
+pub(crate) fn attach_artifact_lenient(
+    ctx: &lumo_core::StepCtx,
+    action: &str,
+    kind: &str,
+    mime: &str,
+    data: &[u8],
+) -> serde_json::Value {
+    match ctx.attach_artifact(kind, mime, data) {
+        Ok(id) if !id.is_empty() => serde_json::Value::String(id),
+        Ok(_) => serde_json::Value::Null,
+        Err(e) => {
+            tracing::warn!(target: "lumo.flow", "{action}: attach {kind} artifact failed: {e}");
+            serde_json::Value::Null
+        }
+    }
+}

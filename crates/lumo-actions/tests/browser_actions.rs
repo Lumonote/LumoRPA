@@ -316,3 +316,100 @@ async fn extract_table_maps_rows_to_headers() {
     // of <th> then <td> rows); browser.extract_table {selector:"table"} returns an
     // array of objects keyed by the header cells' text.
 }
+
+// ─── X-07 artifacts 生产者(时光回溯)────────────────────────────────────────────
+
+/// 真实浏览器路径的 artifacts 闭环:launch → open(本地 wiremock 页,data: URL
+/// 没有 host 过不了 network 闸门)→ screenshot → extract_table。VM 接上
+/// artifacts_dir + 内存 repo 后,两个生产者各归档一个 artifact —— 表行的
+/// kind/mime/步骤归属正确,blob 逐字节可读(截图是真 PNG,表格 blob 解析回抽取
+/// 结果),screenshot 输出新增的 `artifact_id` 与表行一致。
+/// 不依赖浏览器的归档/no-op 契约见 `lumo-core/tests/artifacts.rs`。
+#[tokio::test]
+#[ignore = "launches a real headless Chrome; run with --ignored"]
+async fn screenshot_and_extract_table_attach_artifacts() {
+    use lumo_core::{ActionRegistry, FlowVm, RunOptions};
+    use lumo_storage::Repo;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/t"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<html><body><table><tr><th>name</th><th>qty</th></tr>\
+             <tr><td>widget</td><td>3</td></tr></table></body></html>",
+            "text/html",
+        ))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let artifacts_dir = tmp.path().join("artifacts");
+    let shot = tmp.path().join("shot.png");
+    let repo = Repo::open_in_memory().unwrap();
+
+    let mut reg = ActionRegistry::new();
+    lumo_actions::register_all(&mut reg);
+    let vm = FlowVm::new(reg, Some(repo.clone())).with_artifacts_dir(Some(artifacts_dir));
+
+    let tmp_glob = format!("{}/**", tmp.path().display());
+    let flow = lumo_dsl::parse_str(&format!(
+        r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: artifacts-e2e }}
+spec:
+  capabilities:
+    network: ["*"]
+    fs.write: ["{tmp_glob}"]
+  steps:
+    - {{ id: launch, action: browser.launch, with: {{ headless: true }} }}
+    - {{ id: open, action: browser.open, with: {{ url: "{url}/t" }} }}
+    - {{ id: shot, action: browser.screenshot, with: {{ path: "{shot}" }} }}
+    - {{ id: tbl, action: browser.extract_table, with: {{ selector: "table" }} }}
+"#,
+        url = server.uri(),
+        shot = shot.display(),
+    ))
+    .expect("parse flow");
+
+    let report = vm.run(&flow, RunOptions::default()).await.expect("run ok");
+    assert!(report.success, "flow should succeed");
+
+    let rows = repo.list_artifacts(&report.run_id).expect("list artifacts");
+    let shot_row = rows
+        .iter()
+        .find(|r| r.kind == "screenshot")
+        .expect("screenshot artifact row");
+    assert_eq!(shot_row.mime, "image/png");
+    assert_eq!(shot_row.step_id.as_deref(), Some("shot"));
+    let tbl_row = rows
+        .iter()
+        .find(|r| r.kind == "table")
+        .expect("table artifact row");
+    assert_eq!(tbl_row.mime, "application/json");
+    assert_eq!(tbl_row.step_id.as_deref(), Some("tbl"));
+
+    let png = std::fs::read(&shot_row.blob_path).expect("png blob readable");
+    assert!(png.starts_with(b"\x89PNG"), "screenshot blob is a real PNG");
+    let table: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&tbl_row.blob_path).expect("table blob readable"),
+    )
+    .expect("table blob is valid JSON");
+    assert_eq!(table[0]["name"], "widget");
+    assert_eq!(table[0]["qty"], "3");
+
+    // screenshot 步骤输出回报的 artifact_id 与 artifacts 表行一致。
+    let steps = repo.list_steps(&report.run_id).expect("list steps");
+    let shot_step = steps.iter().find(|s| s.step_id == "shot").expect("shot row");
+    assert_eq!(
+        shot_step
+            .output_json
+            .as_ref()
+            .and_then(|o| o.get("artifact_id"))
+            .and_then(serde_json::Value::as_str),
+        Some(shot_row.id.as_str()),
+        "browser.screenshot output carries the artifact id"
+    );
+}
