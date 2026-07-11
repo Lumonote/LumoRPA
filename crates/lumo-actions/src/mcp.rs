@@ -66,7 +66,7 @@ enum McpTransport {
     },
     StreamableHttp {
         client: reqwest::Client,
-        url: String,
+        url: reqwest::Url,
         headers: reqwest::header::HeaderMap,
         session_id: Option<String>,
     },
@@ -109,6 +109,14 @@ impl McpClient {
                 }
             }
             McpTransportConfig::StreamableHttp { url, headers } => {
+                let url = reqwest::Url::parse(&url).map_err(|_| McpError::Transport {
+                    message: "invalid Streamable HTTP URL".to_string(),
+                })?;
+                if !url.username().is_empty() || url.password().is_some() {
+                    return Err(McpError::Transport {
+                        message: "Streamable HTTP URL must not contain credentials".to_string(),
+                    });
+                }
                 let mut parsed_headers = reqwest::header::HeaderMap::new();
                 for (name, value) in headers {
                     let name =
@@ -124,6 +132,7 @@ impl McpClient {
                     })?;
                     parsed_headers.insert(name, value);
                 }
+                parsed_headers.remove("mcp-session-id");
                 McpTransport::StreamableHttp {
                     client: reqwest::Client::new(),
                     url,
@@ -139,7 +148,7 @@ impl McpClient {
             next_id: 1,
         };
         let initialized = async {
-            client
+            let initialize_result = client
                 .request(
                     "initialize",
                     Some(json!({
@@ -152,6 +161,7 @@ impl McpClient {
                     })),
                 )
                 .await?;
+            validate_initialize_result(&initialize_result)?;
             client.notification("notifications/initialized", None).await
         };
         match timeout(operation_timeout, initialized).await {
@@ -329,7 +339,7 @@ impl McpClient {
                 session_id,
             } => {
                 let mut request = client
-                    .post(url.as_str())
+                    .post(url.clone())
                     .headers(headers.clone())
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .header(
@@ -345,7 +355,7 @@ impl McpClient {
                         .send()
                         .await
                         .map_err(|error| McpError::Transport {
-                            message: format!("HTTP request failed: {error}"),
+                            message: format!("HTTP request failed: {}", error.without_url()),
                         })?;
                 let status = response.status();
                 if !status.is_success() {
@@ -371,7 +381,7 @@ impl McpClient {
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let body = response.text().await.map_err(|error| McpError::Transport {
-                    message: format!("failed to read HTTP response: {error}"),
+                    message: format!("failed to read HTTP response: {}", error.without_url()),
                 })?;
                 let id = response_id.expect("checked above");
                 if content_type.starts_with("text/event-stream") {
@@ -403,8 +413,13 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        if let Some(McpTransport::Stdio { child, .. }) = self.transport.as_mut() {
+        if let Some(McpTransport::Stdio { mut child, .. }) = self.transport.take() {
             let _ = child.start_kill();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
         }
     }
 }
@@ -462,6 +477,45 @@ fn response_matches_id(value: &Value, wanted_id: u64) -> bool {
     value.get("id").and_then(Value::as_u64) == Some(wanted_id)
 }
 
+fn validate_initialize_result(result: &Value) -> Result<(), McpError> {
+    let result = result.as_object().ok_or_else(|| McpError::Protocol {
+        message: "initialize result must be an object".to_string(),
+    })?;
+    let protocol_version = result
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .ok_or_else(|| McpError::Protocol {
+            message: "initialize result protocolVersion must be a string".to_string(),
+        })?;
+    if protocol_version != MCP_PROTOCOL_VERSION {
+        return Err(McpError::Protocol {
+            message: format!("initialize result protocolVersion must equal {MCP_PROTOCOL_VERSION}"),
+        });
+    }
+    if !result.get("capabilities").is_some_and(Value::is_object) {
+        return Err(McpError::Protocol {
+            message: "initialize result capabilities must be an object".to_string(),
+        });
+    }
+    let server_info = result
+        .get("serverInfo")
+        .and_then(Value::as_object)
+        .ok_or_else(|| McpError::Protocol {
+            message: "initialize result serverInfo must be an object".to_string(),
+        })?;
+    if !server_info.get("name").is_some_and(Value::is_string) {
+        return Err(McpError::Protocol {
+            message: "initialize result serverInfo.name must be a string".to_string(),
+        });
+    }
+    if !server_info.get("version").is_some_and(Value::is_string) {
+        return Err(McpError::Protocol {
+            message: "initialize result serverInfo.version must be a string".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn parse_response(response: Value) -> Result<Value, McpError> {
     let object = response.as_object().ok_or_else(|| McpError::Protocol {
         message: "JSON-RPC response must be an object".to_string(),
@@ -506,15 +560,13 @@ fn parse_sse_response(body: &str, wanted_id: u64) -> Result<Value, McpError> {
     for line in body.lines().chain(std::iter::once("")) {
         if let Some(value) = line.strip_prefix("data:") {
             data.push(value.strip_prefix(' ').unwrap_or(value));
-        } else if line.is_empty() && !data.is_empty() {
+        } else if line.trim().is_empty() && !data.is_empty() {
             let payload = data.join("\n");
             data.clear();
-            let value: Value =
-                serde_json::from_str(&payload).map_err(|error| McpError::Protocol {
-                    message: format!("invalid SSE JSON-RPC event: {error}"),
-                })?;
-            if response_matches_id(&value, wanted_id) {
-                return Ok(value);
+            if let Ok(value) = serde_json::from_str(&payload) {
+                if response_matches_id(&value, wanted_id) {
+                    return Ok(value);
+                }
             }
         }
     }
