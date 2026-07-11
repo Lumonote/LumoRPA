@@ -1,3 +1,5 @@
+import { renderImprovementProposals, runImprovementAction } from "./improvements.js";
+
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -57,7 +59,7 @@ function overviewMarkup(data) {
 
 export function mountCapabilityHub({ call, root }) {
   if (!root) return { refresh: async () => {} };
-  const data = { servers: [], skills: [], profiles: [], errors: [] };
+  const data = { servers: [], skills: [], profiles: [], proposals: [], errors: [] };
   let active = "overview";
   const content = root.querySelector("[data-hub-content]");
   const render = () => {
@@ -66,21 +68,32 @@ export function mountCapabilityHub({ call, root }) {
     else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Protocol fabric</span><h3>MCP Servers</h3></div><button class="primary" data-open-import>Import server</button></header>${renderServerRows(data.servers)}</section>`;
     else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Local intelligence</span><h3>Skills</h3></div></header>${renderSkillRows(data.skills)}</section>`;
     else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Execution policy</span><h3>Agent Profiles</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
+    else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Supervised evolution</span><h3>改进提案</h3><p>所有变更先评估、再人工批准，并以新版本应用。</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
     else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sections[active])}</span><h3>Policy-ready workspace</h3><p>This surface is ready for backend data and actions. Empty state is intentional while commands are being connected.</p></section>`;
     const error = root.querySelector("[data-hub-errors]");
     error.textContent = data.errors.length ? `Backend not connected: ${data.errors.join(" · ")}` : "Capability services online";
     error.classList.toggle("is-warning", data.errors.length > 0);
   };
-  root.addEventListener("click", (event) => {
+  root.addEventListener("click", async (event) => {
     const tab = event.target.closest("[data-hub-section]");
     if (tab) { active = tab.dataset.hubSection; render(); }
     const importButton = event.target.closest("[data-import-mode]");
     if (importButton) root.querySelector("[data-import-state]").textContent = `${label(importButton.dataset.importMode)} selected — awaiting source input.`;
     if (event.target.closest("[data-open-import]")) root.querySelector("[data-import-wizard]")?.scrollIntoView({ behavior: "smooth" });
+    const improvement = event.target.closest("[data-improvement-action]");
+    if (improvement) {
+      improvement.disabled = true;
+      try {
+        await runImprovementAction({ action: improvement.dataset.improvementAction, proposalId: improvement.dataset.proposalId, patchHash: improvement.dataset.patchHash }, call);
+        const result = await call("list_improvement_proposals");
+        data.proposals = Array.isArray(result) ? result : result?.items || [];
+        render();
+      } finally { improvement.disabled = false; }
+    }
   });
   const refresh = async () => {
     data.errors = [];
-    const requests = [["servers", "list_mcp_servers"], ["skills", "list_skills"], ["profiles", "list_agent_profiles"]];
+    const requests = [["servers", "list_mcp_servers"], ["skills", "list_skills"], ["profiles", "list_agent_profiles"], ["proposals", "list_improvement_proposals"]];
     await Promise.all(requests.map(async ([key, command]) => {
       try { const result = await call(command); data[key] = Array.isArray(result) ? result : result?.items || []; }
       catch { data[key] = []; data.errors.push(label(key)); }
