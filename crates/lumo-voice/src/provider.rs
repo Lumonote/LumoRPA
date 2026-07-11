@@ -9,20 +9,44 @@ pub enum SttEvent {
     Final(String),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
     #[error("operation cancelled")]
     Cancelled,
+    #[error("required voice models are missing: {asset_ids:?}")]
+    ModelMissing { asset_ids: Vec<String> },
+    #[error("voice model `{asset_id}` is invalid: {reason}")]
+    ModelInvalid { asset_id: String, reason: String },
+    #[error("wake word was not detected before the audio stream ended")]
+    NoWakeDetected,
+    #[error("provider timed out after {timeout_ms}ms")]
+    Timeout { timeout_ms: u64 },
+    #[error("cloud speech recognition is disabled by privacy policy")]
+    PrivacyDenied,
+    #[error("no speech recognition provider is available")]
+    Unavailable,
+    #[error("native voice backend `{backend}` is unavailable in this build")]
+    NativeUnavailable { backend: String },
+    #[error("invalid provider input: {message}")]
+    InvalidInput { message: String },
     #[error("provider error: {0}")]
     Other(String),
 }
 
 #[async_trait]
 pub trait WakeWordProvider: Send + Sync {
-    async fn wait_for_wake(&self, cancel: CancellationToken) -> Result<(), ProviderError>;
+    async fn wait_for_wake(
+        &self,
+        audio: mpsc::Receiver<AudioFrame>,
+        cancel: CancellationToken,
+    ) -> Result<(), ProviderError>;
 }
 #[async_trait]
 pub trait SttProvider: Send + Sync {
+    fn readiness(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     async fn transcribe(
         &self,
         audio: mpsc::Receiver<AudioFrame>,
