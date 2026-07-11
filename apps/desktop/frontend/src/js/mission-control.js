@@ -1,4 +1,6 @@
 import { readyTopology } from "./agent-events.js";
+import { renderConfirmation, renderRunControls, runAgentControl } from "./agent-confirmation.js";
+import { renderAgentLog } from "./agent-feedback.js";
 
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
@@ -32,14 +34,22 @@ export function updateMissionControl(root, projection) {
   const topology = readyTopology(projection);
   root.querySelector("[data-mc-topology]").innerHTML = renderTopology(topology);
   const selected = root.dataset.selectedNode || topology.activeNodeId;
-  root.querySelector("[data-mc-detail]").innerHTML = renderNodeDetail(projection.nodes?.[selected]);
+  const pending = [...(projection.events || [])].reverse().find((event) => event.kind === "permission.requested" && !event.resolved);
+  root.querySelector("[data-mc-detail]").innerHTML = `${pending ? renderConfirmation({ runId: projection.runId, nodeId: pending.nodeId || pending.node_id, ...(pending.payload || {}) }) : renderNodeDetail(projection.nodes?.[selected])}${renderRunControls(projection)}`;
   root.querySelector("[data-mc-metrics]").innerHTML = renderRunMetrics(projection);
-  root.querySelector("[data-mc-log]").innerHTML = (projection.events || []).slice(-80).reverse().map((event) => `<div><span>${escapeHtml(event.seq)}</span><strong>${escapeHtml(event.kind)}</strong><em>${escapeHtml(event.nodeId || event.node_id || "run")}</em></div>`).join("") || '<div class="mc-empty">暂无事件</div>';
+  root.querySelector("[data-mc-log]").innerHTML = renderAgentLog(projection.events || []);
+  root.classList.toggle("is-replanning", projection.status === "replanning");
 }
 
-export function mountMissionControl(root, projection) {
+export function mountMissionControl(root, projection, call = async () => {}) {
   if (!root) return;
   root.addEventListener("click", (event) => {
+    const control = event.target.closest("[data-agent-action]");
+    if (control) {
+      control.disabled = true;
+      runAgentControl({ action: control.dataset.agentAction, runId: control.dataset.runId, nodeId: control.dataset.nodeId, planHash: control.dataset.planHash }, call, () => root.querySelector("[data-plan-hash]")?.dataset.planHash).finally(() => { control.disabled = false; });
+      return;
+    }
     const node = event.target.closest("[data-node-id]");
     if (!node) return;
     root.dataset.selectedNode = node.dataset.nodeId;

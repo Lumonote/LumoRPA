@@ -33,7 +33,8 @@ import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
 import { mountCapabilityHub } from "./capability-hub.js";
-import { mountMissionControl } from "./mission-control.js";
+import { mountMissionControl, updateMissionControl } from "./mission-control.js";
+import { restoreAndSubscribeAgentEvents } from "./app-events.js";
 
 let bootStarted = false;
 
@@ -65,7 +66,7 @@ function bindEvents() {
       state.capabilityHubMounted = true;
     }
     if (b.dataset.view === "mission-control" && !state.missionControlMounted) {
-      mountMissionControl(mission, state.agentProjection);
+      mountMissionControl(mission, state.agentProjection, call);
       state.missionControlMounted = true;
     }
   }));
@@ -352,6 +353,11 @@ async function boot() {
   renderElementLibrary();
   ensureRecorderListener();
   bindAppEvents();
+  const agentListen = window.__TAURI__?.event?.listen;
+  if (agentListen) restoreAndSubscribeAgentEvents({ runId: "latest", call, listen: agentListen, onProjection: (projection) => {
+    state.agentProjection = projection;
+    if (state.missionControlMounted) updateMissionControl($("missionControlView"), projection);
+  } }).catch(() => {});
 
   try {
     await Promise.all([
