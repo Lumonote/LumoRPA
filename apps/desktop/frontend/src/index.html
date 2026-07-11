@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LumoRPA Studio</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles/capability-hub.css" />
   </head>
   <body>
     <div class="shell">
@@ -24,6 +25,7 @@
           <button class="tab" data-view="runs">运行</button>
           <button class="tab" data-view="models">模型</button>
           <button class="tab" data-view="features">能力地图</button>
+          <button class="tab" data-view="capability-hub">Capability Hub</button>
           <button class="tab" data-view="settings">设置</button>
         </nav>
 
@@ -403,6 +405,14 @@
               </section>
             </div>
           </div>
+        </section>
+        <section id="capabilityHubView" class="capability-hub" style="grid-column: 1 / -1; display: none" aria-label="Capability Hub">
+          <header class="hub-hero"><div><span class="hub-kicker">LUMO CONTROL PLANE / 01</span><h1>Capability Hub</h1><p>Discover, govern, and compose the intelligence available to every local agent.</p></div><div class="hub-status"><span class="hub-pulse"></span><span data-hub-errors>Checking capability services…</span></div></header>
+          <nav class="hub-nav" aria-label="Capability Hub sections">
+            <button class="is-active" data-hub-section="overview">Overview</button><button data-hub-section="skills">Skills</button><button data-hub-section="servers">MCP Servers</button><button data-hub-section="catalog">Capability Catalog</button><button data-hub-section="profiles">Agent Profiles</button><button data-hub-section="permissions">Permissions</button><button data-hub-section="audit">Audit</button><button data-hub-section="proposals">Improvement Proposals</button>
+          </nav>
+          <div data-hub-content aria-live="polite"></div>
+          <section class="hub-card hub-import" data-import-wizard><header><div><span class="hub-eyebrow">Secure ingestion</span><h3>Import MCP configuration</h3><p>Secrets are detected locally and routed to Vault; raw values are never previewed.</p></div></header><div class="hub-import-modes"><button data-import-mode="auto-discover">Auto-discover</button><button data-import-mode="file">File</button><button data-import-mode="paste">Paste</button><button data-import-mode="manual">Manual</button></div><div class="hub-import-stage"><div><span>Preview</span><strong data-import-state>Choose an import source</strong></div><div><span>Conflicts</span><strong>No scan yet</strong></div><div><span>Connection test</span><strong>Waiting</strong></div></div></section>
         </section>
       </main>
 

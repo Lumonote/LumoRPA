@@ -32,6 +32,7 @@ import { refreshSettings } from "./settings.js";
 import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
+import { mountCapabilityHub } from "./capability-hub.js";
 
 let bootStarted = false;
 
@@ -52,7 +53,15 @@ async function bindAppEvents() {
 
 function bindEvents() {
   // Top tabs
-  $$(".tabs .tab").forEach((b) => b.addEventListener("click", () => switchTopView(b.dataset.view)));
+  $$(".tabs .tab").forEach((b) => b.addEventListener("click", () => {
+    switchTopView(b.dataset.view);
+    const hub = $("capabilityHubView");
+    hub.style.display = b.dataset.view === "capability-hub" ? "" : "none";
+    if (b.dataset.view === "capability-hub" && !state.capabilityHubMounted) {
+      mountCapabilityHub({ call, root: hub });
+      state.capabilityHubMounted = true;
+    }
+  }));
   // Editor mode switch
   $$("#viewSwitch button").forEach((b) => b.addEventListener("click", () => switchEditorMode(b.dataset.mode)));
   // Right tabs

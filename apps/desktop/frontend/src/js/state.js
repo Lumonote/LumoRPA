@@ -45,6 +45,7 @@ export const state = {
   features: [],
   viewMode: "steps",
   currentView: "design",
+  capabilityHubMounted: false,
   rightSection: "inspector",
   windowAlpha: loadAlpha("lumo.win", 0, 18),
   panelAlpha: loadAlpha("lumo.panel", 14, [18, 38, 62]),
