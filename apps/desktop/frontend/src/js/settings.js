@@ -3,9 +3,10 @@
 import { $, html, kv } from "./dom.js";
 import { call } from "./api.js";
 import { state } from "./state.js";
+import { bindVoiceSettings, renderVoiceSettings } from "./voice-settings.js";
 
 export async function refreshSettings() {
-  const [info, skills] = await Promise.all([call("app_info"), call("list_skills")]);
+  const [info, skills, voice] = await Promise.all([call("app_info"), call("list_skills"), call("voice_status").catch(() => ({ wakeWordEnabled: false, shortcut: "Option+Space", sttProfile: "local", retainAudio: false, models: [] }))]);
   state.app = info;
   $("environmentBox").innerHTML = [
     kv("版本", info.version),
@@ -19,6 +20,8 @@ export async function refreshSettings() {
   $("skillsBox").innerHTML = skills.length
     ? skills.map((s) => kv(s.name, s.description || s.source)).join("")
     : `<div class="kv"><span>暂无</span><strong>把 SKILL.md 放到 ${html(info.skillsPath)}</strong></div>`;
+  $("voiceSettingsBox").innerHTML = renderVoiceSettings(voice);
+  bindVoiceSettings($("voiceSettingsBox"), call);
   $("appMeta").textContent = `${info.platform} ${info.arch} · v${info.version}`;
   $("versionPill").lastChild.textContent = `v${info.version}`;
 }
