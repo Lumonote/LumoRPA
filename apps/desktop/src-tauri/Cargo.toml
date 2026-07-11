@@ -18,6 +18,7 @@ tauri-build = { version = "2.0.6", features = [] }
 
 [dependencies]
 lumo-actions.workspace = true
+lumo-agent.workspace = true
 lumo-ai.workspace = true
 lumo-core.workspace = true
 lumo-dsl.workspace = true
@@ -31,6 +32,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 tauri = { version = "2.3.1", features = ["macos-private-api", "tray-icon", "image-png"] }
 tokio.workspace = true
 ulid.workspace = true

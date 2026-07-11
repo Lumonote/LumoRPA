@@ -3797,11 +3797,14 @@ dependencies = [
 name = "lumo-agent"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "json5",
+ "lumo-skills",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
 ]
@@ -3985,6 +3988,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "lumo-actions",
+ "lumo-agent",
  "lumo-ai",
  "lumo-core",
  "lumo-dsl",
@@ -3994,6 +3998,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tauri",
  "tauri-build",
  "tempfile",

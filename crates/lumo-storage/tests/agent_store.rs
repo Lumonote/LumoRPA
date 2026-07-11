@@ -127,6 +127,35 @@ fn upsert_mcp_server_inserts_then_updates_same_id() {
 }
 
 #[test]
+fn list_mcp_servers_returns_all_servers_by_name_then_id() {
+    let repo = Repo::open_in_memory().unwrap();
+    let mut zeta = server("Zeta", "unknown");
+    zeta.id = "server-z".into();
+    let mut alpha_two = server("Alpha", "healthy");
+    alpha_two.id = "server-b".into();
+    let mut alpha_one = server("Alpha", "unhealthy");
+    alpha_one.id = "server-a".into();
+
+    repo.upsert_mcp_server(&zeta).unwrap();
+    repo.upsert_mcp_server(&alpha_two).unwrap();
+    repo.upsert_mcp_server(&alpha_one).unwrap();
+
+    let listed = repo.list_mcp_servers().unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| (row.name.as_str(), row.id.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Alpha", "server-a"),
+            ("Alpha", "server-b"),
+            ("Zeta", "server-z")
+        ]
+    );
+    assert_eq!(listed[0].health, "unhealthy");
+}
+
+#[test]
 fn replace_mcp_tools_replaces_atomically_and_lists_by_name() {
     let repo = Repo::open_in_memory().unwrap();
     repo.upsert_mcp_server(&server("Server", "healthy"))

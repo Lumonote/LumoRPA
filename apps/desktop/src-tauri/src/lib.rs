@@ -30,6 +30,13 @@ use tauri::{
     Emitter, Manager, State, WindowEvent, Wry,
 };
 
+mod mcp_commands;
+
+use mcp_commands::{
+    apply_mcp_import, call_mcp_tool, delete_mcp_server, discover_mcp_tools, list_mcp_servers,
+    preview_mcp_import, set_mcp_server_enabled, set_mcp_tool_enabled, test_mcp_server,
+};
+
 type AppHandle = tauri::AppHandle<Wry>;
 
 // ─── Shared mutable state ───────────────────────────────────────────────────
@@ -46,6 +53,7 @@ struct DesktopState {
     /// 事件，`human_respond` 命令摘出发送端投递回执；等待方先行退出
     /// （超时/取消，RAII 自清理）后，迟到的回执自然落到 ok=false。
     prompts: PromptMap,
+    pending_mcp_imports: Mutex<HashMap<String, lumo_agent::McpImportBatch>>,
 }
 
 /// P0-1：跨命令共享的取消句柄表。包一层 Arc 是因为 `execute_flow` 在测试里
@@ -1747,7 +1755,10 @@ async fn recorder_start(
         // yet, so mixed currently captures the desktop lane only (the browser
         // lane stays available via the dedicated "browser" target).
         "desktop" => (Arc::new(DesktopRecorder::new()), "DesktopRecorder (AX)"),
-        "mixed" => (Arc::new(DesktopRecorder::new()), "DesktopRecorder (AX, mixed→desktop)"),
+        "mixed" => (
+            Arc::new(DesktopRecorder::new()),
+            "DesktopRecorder (AX, mixed→desktop)",
+        ),
         _ => (Arc::new(NoopRecorder::new()), "NoopRecorder (heartbeat)"),
     };
 
@@ -1886,6 +1897,15 @@ pub fn run() {
             recorder_start,
             recorder_stop,
             feature_map,
+            list_mcp_servers,
+            preview_mcp_import,
+            apply_mcp_import,
+            test_mcp_server,
+            discover_mcp_tools,
+            call_mcp_tool,
+            delete_mcp_server,
+            set_mcp_server_enabled,
+            set_mcp_tool_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumoRPA desktop");

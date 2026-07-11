@@ -119,6 +119,27 @@ impl Repo {
         .map_err(Into::into)
     }
 
+    pub fn list_mcp_servers(&self) -> Result<Vec<McpServerRow>, StorageError> {
+        let conn = self.inner.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id,name,transport,config_json,enabled,health,created_at,updated_at \
+             FROM mcp_servers ORDER BY name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(McpServerRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                transport: row.get(2)?,
+                config: json_value(row, 3)?,
+                enabled: row.get(4)?,
+                health: row.get(5)?,
+                created_at: timestamp(row, 6)?,
+                updated_at: timestamp(row, 7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn delete_mcp_server(&self, id: &str) -> Result<bool, StorageError> {
         let conn = self.inner.lock();
         Ok(conn.execute("DELETE FROM mcp_servers WHERE id=?", [id])? > 0)
