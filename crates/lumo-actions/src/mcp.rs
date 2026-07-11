@@ -202,17 +202,33 @@ impl McpClient {
                             });
                         }
                     };
-                    let input_schema =
-                        tool.get("inputSchema")
-                            .cloned()
-                            .ok_or_else(|| McpError::Protocol {
-                                message: "tool descriptor inputSchema is required".to_string(),
-                            })?;
+                    let input_schema = match tool.get("inputSchema") {
+                        None => json!({ "type": "object" }),
+                        Some(Value::Object(schema)) => Value::Object(schema.clone()),
+                        Some(_) => {
+                            return Err(McpError::Protocol {
+                                message: format!(
+                                    "tool descriptor `{name}` inputSchema must be an object"
+                                ),
+                            });
+                        }
+                    };
+                    let output_schema = match tool.get("outputSchema") {
+                        None => None,
+                        Some(Value::Object(schema)) => Some(Value::Object(schema.clone())),
+                        Some(_) => {
+                            return Err(McpError::Protocol {
+                                message: format!(
+                                    "tool descriptor `{name}` outputSchema must be an object"
+                                ),
+                            });
+                        }
+                    };
                     Ok(McpTool {
                         name: name.to_string(),
                         description: description.to_string(),
                         input_schema,
-                        output_schema: tool.get("outputSchema").cloned(),
+                        output_schema,
                     })
                 })
                 .collect()

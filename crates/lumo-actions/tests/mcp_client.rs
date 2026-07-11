@@ -39,7 +39,20 @@ while IFS= read -r line; do
         printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'
         printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"tools":[]}}'
       fi
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object"},"outputSchema":{"type":"object"}}]}}\n' "$id"
+      case "$mode" in
+        input_schema_non_object)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":[]}]}}\n' "$id"
+          ;;
+        output_schema_non_object)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"},"outputSchema":"bad"}]}}\n' "$id"
+          ;;
+        missing_input_schema)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo"}]}}\n' "$id"
+          ;;
+        *)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object"},"outputSchema":{"type":"object"}}]}}\n' "$id"
+          ;;
+      esac
       ;;
     *'"method":"tools/call"'*)
       if [ -n "${MCP_CALL_LOG:-}" ]; then
@@ -150,6 +163,43 @@ async fn stdio_ignores_notifications_and_unrelated_response_ids() {
         .await
         .expect("call echo");
     assert_eq!(result["content"][0]["text"], json!("echoed"));
+
+    client.close().await;
+}
+
+#[tokio::test]
+async fn list_tools_rejects_non_object_input_schema() {
+    let mut client = connect_stdio("input_schema_non_object").await;
+
+    let err = client
+        .list_tools()
+        .await
+        .expect_err("array inputSchema must be rejected");
+    assert!(matches!(err, McpError::Protocol { .. }), "got: {err:?}");
+    assert!(err.to_string().contains("echo"));
+    assert!(err.to_string().contains("inputSchema"));
+}
+
+#[tokio::test]
+async fn list_tools_rejects_non_object_output_schema() {
+    let mut client = connect_stdio("output_schema_non_object").await;
+
+    let err = client
+        .list_tools()
+        .await
+        .expect_err("string outputSchema must be rejected");
+    assert!(matches!(err, McpError::Protocol { .. }), "got: {err:?}");
+    assert!(err.to_string().contains("echo"));
+    assert!(err.to_string().contains("outputSchema"));
+}
+
+#[tokio::test]
+async fn list_tools_defaults_missing_input_schema_to_object() {
+    let mut client = connect_stdio("missing_input_schema").await;
+
+    let tools = client.list_tools().await.expect("missing schema defaults");
+    assert_eq!(tools[0].input_schema, json!({"type": "object"}));
+    assert_eq!(tools[0].output_schema, None);
 
     client.close().await;
 }
