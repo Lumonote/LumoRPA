@@ -25,8 +25,50 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  production-gate:
+    name: Production agent gates
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/frontend/package-lock.json
+      - name: Verify agent, voice, security and recovery
+        run: |
+          cargo test -p lumo-storage -p lumo-agent -p lumo-voice
+          cargo test -p lumo-voice --features sherpa-native --test sherpa_native
+          cargo test -p lumorpa-desktop --lib
+          cargo clippy -p lumo-agent -p lumo-voice -p lumorpa-desktop --all-targets -- -D warnings
+      - name: Verify Mission Control and desktop surfaces
+        working-directory: apps/desktop/frontend
+        run: |
+          npm ci
+          npm test
+          npm run lint
+      - name: Require macOS signing and notarization secrets for tagged releases
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+
   macos:
     name: macOS (universal · Intel + Apple Silicon)
+    needs: production-gate
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +102,7 @@ jobs:
 
   windows:
     name: Windows (x86_64)
+    needs: production-gate
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +138,7 @@ jobs:
 
   linux-x64:
     name: Linux (x86_64 · deb/rpm/AppImage)
+    needs: production-gate
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -132,6 +176,7 @@ jobs:
 
   linux-arm64:
     name: Linux (aarch64 · 麒麟 ARM 基线)
+    needs: production-gate
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -168,6 +213,7 @@ jobs:
 
   loongarch64:
     name: loongarch64 (龙芯 · best-effort CLI)
+    needs: production-gate
     runs-on: ubuntu-22.04
     continue-on-error: true # no GitHub-hosted loong runner; informational only
     steps:

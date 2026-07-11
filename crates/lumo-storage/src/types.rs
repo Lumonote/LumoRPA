@@ -40,6 +40,63 @@ pub struct AgentEventInsert<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAgentJob {
+    pub id: String,
+    pub idempotency_key: String,
+    pub payload: Value,
+    pub schedule_kind: String,
+    pub schedule_spec: Value,
+    pub priority: i64,
+    pub available_at: DateTime<Utc>,
+    pub max_attempts: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentJobRow {
+    pub id: String,
+    pub idempotency_key: String,
+    pub payload: Value,
+    pub schedule_kind: String,
+    pub schedule_spec: Value,
+    pub state: String,
+    pub priority: i64,
+    pub available_at: DateTime<Utc>,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub worker_id: Option<String>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueJobResult {
+    pub job: AgentJobRow,
+    pub inserted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobNodeCheckpoint {
+    pub job_id: String,
+    pub node_id: String,
+    pub state: String,
+    pub risk: String,
+    pub idempotent: bool,
+    pub attempt: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveredJob {
+    pub job_id: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerRow {
     pub id: String,
     pub name: String,

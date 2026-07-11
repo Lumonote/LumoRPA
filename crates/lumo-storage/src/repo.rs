@@ -27,7 +27,8 @@ use std::{path::Path, sync::Arc};
 ///           fresh DBs already get the column from the v2 baseline DDL, so the
 ///           ALTER only fires on older v2 DBs that predate it.
 ///   3 -> 4: add durable voice, MCP, capability, agent, and improvement tables.
-pub const LATEST_USER_VERSION: i64 = 4;
+///   4 -> 5: add durable scheduled agent jobs and node recovery checkpoints.
+pub const LATEST_USER_VERSION: i64 = 5;
 
 #[derive(Clone)]
 pub struct Repo {
@@ -472,10 +473,19 @@ type MigrationStep = fn(&Connection) -> Result<(), StorageError>;
 /// applies every step with `version > current` in order, then stamps the DB to
 /// the highest applied version. Fresh DBs start at 0 and get the full chain.
 fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
-    run_migrations_with_v4_ddl(conn, schema::V4_DDL)
+    run_migrations_with_ddls(conn, schema::V4_DDL, schema::V5_DDL)
 }
 
+#[cfg(test)]
 fn run_migrations_with_v4_ddl(conn: &Connection, v4_ddl: &str) -> Result<(), StorageError> {
+    run_migrations_with_ddls(conn, v4_ddl, schema::V5_DDL)
+}
+
+fn run_migrations_with_ddls(
+    conn: &Connection,
+    v4_ddl: &str,
+    v5_ddl: &str,
+) -> Result<(), StorageError> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current >= LATEST_USER_VERSION {
         return Ok(());
@@ -500,6 +510,9 @@ fn run_migrations_with_v4_ddl(conn: &Connection, v4_ddl: &str) -> Result<(), Sto
     }
     if current < 4 {
         migrate_v4_agent_storage(&tx, v4_ddl)?;
+    }
+    if current < 5 {
+        migrate_v5_agent_jobs(&tx, v5_ddl)?;
     }
 
     // PRAGMA user_version does not accept bound parameters; the value is a
@@ -534,6 +547,11 @@ fn migrate_v3_step_vars(conn: &Connection) -> Result<(), StorageError> {
 }
 
 fn migrate_v4_agent_storage(conn: &Connection, ddl: &str) -> Result<(), StorageError> {
+    conn.execute_batch(ddl)?;
+    Ok(())
+}
+
+fn migrate_v5_agent_jobs(conn: &Connection, ddl: &str) -> Result<(), StorageError> {
     conn.execute_batch(ddl)?;
     Ok(())
 }

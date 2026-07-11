@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Must match `lumo_storage::repo::LATEST_USER_VERSION`. Hard-coded here on
 /// purpose so an accidental change to the migration list trips the test.
 /// v4: adds durable agent, MCP, voice, capability, and improvement tables.
-const EXPECTED_USER_VERSION: i64 = 4;
+const EXPECTED_USER_VERSION: i64 = 5;
 
 fn make_run(id: &str) -> FlowRunRow {
     FlowRunRow {
@@ -72,6 +72,23 @@ fn fresh_db_contains_v4_tables() {
             })
             .unwrap();
         assert!(exists, "missing v4 table {table}");
+    }
+}
+
+#[test]
+fn fresh_db_contains_v5_job_tables() {
+    let repo = Repo::open_in_memory().unwrap();
+    for table in ["agent_jobs", "agent_job_nodes"] {
+        let exists = repo
+            .with_raw(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .unwrap();
+        assert!(exists, "missing v5 table {table}");
     }
 }
 

@@ -10,3 +10,17 @@ export function buildMcpApplyRequest({ token, serverInputs, secretInputs }) {
   return { token, selectedIds: serverInputs.filter((input) => input.checked).map((input) => input.id), secretOverrides: secretInputs.map((input) => ({ serverId: input.serverId, fieldPath: input.fieldPath, vaultKey: input.vaultKey, value: input.value || null })) };
 }
 
+export function renderMcpGovernance(server = {}) {
+  const oauth = server.oauth || { state: "not configured", scopes: [] };
+  const supervisor = server.supervisor || { state: "closed", failures: 0 };
+  const changes = server.schemaChanges || [];
+  return `<section class="mcp-governance"><div class="mcp-governance-status"><span>OAUTH ${escapeHtml(String(oauth.state).toUpperCase())}</span><span>CIRCUIT ${escapeHtml(String(supervisor.state).toUpperCase())}</span><span>${Number(supervisor.failures || 0)} FAILURES</span></div><div class="mcp-governance-actions"><button data-mcp-governance-action="oauth" data-server-id="${escapeHtml(server.id)}">${oauth.state === "active" ? "重新授权" : "连接 OAuth"}</button></div>${changes.map((change) => `<article><div><strong>${escapeHtml(change.tool)}</strong><span>${escapeHtml(change.oldHash)} → ${escapeHtml(change.newHash)}</span></div><button data-mcp-governance-action="approve-schema" data-server-id="${escapeHtml(server.id)}" data-tool="${escapeHtml(change.tool)}" data-schema-hash="${escapeHtml(change.newHash)}">批准 Schema</button></article>`).join("")}</section>`;
+}
+
+const governanceCommands = { oauth: "mcp_oauth_start", "approve-schema": "approve_mcp_schema_change" };
+
+export function runMcpGovernanceAction(action, call) {
+  const command = governanceCommands[action.action];
+  if (!command) throw new Error(`unknown MCP governance action: ${action.action}`);
+  return call(command, { id: action.serverId, tool: action.tool, schemaHash: action.schemaHash });
+}

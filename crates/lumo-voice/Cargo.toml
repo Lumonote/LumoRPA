@@ -5,9 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+sherpa-native = ["dep:libloading"]
+
 [dependencies]
 async-trait.workspace = true
+cpal = "0.15"
+libloading = { version = "0.8", optional = true }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = "0.7"

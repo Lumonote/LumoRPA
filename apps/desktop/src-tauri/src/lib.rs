@@ -30,11 +30,46 @@ use tauri::{
     Emitter, Manager, State, WindowEvent, Wry,
 };
 
+mod agent_commands;
+mod agent_service;
+mod job_commands;
 mod mcp_commands;
+mod mcp_supervisor;
+mod security_commands;
+#[allow(dead_code)]
+mod update_commands;
+mod voice_commands;
+mod voice_daemon;
+mod voice_model_commands;
 
+use agent_commands::{
+    agent_approve, agent_cancel, agent_events, agent_pause, agent_restore, agent_resume,
+    agent_start, setup_agent_service, DesktopAgentRuntime,
+};
+use agent_service::DesktopAgentService;
+use job_commands::{
+    job_cancel, job_list, job_pause, job_resume, job_schedule, setup_job_worker, JobRuntime,
+};
 use mcp_commands::{
-    apply_mcp_import, call_mcp_tool, delete_mcp_server, discover_mcp_tools, list_mcp_servers,
+    apply_mcp_import, approve_mcp_schema_change, call_mcp_tool, delete_mcp_server,
+    discover_mcp_tools, list_mcp_servers, mcp_oauth_callback, mcp_oauth_refresh, mcp_oauth_start,
     preview_mcp_import, set_mcp_server_enabled, set_mcp_tool_enabled, test_mcp_server,
+};
+use mcp_supervisor::McpSupervisorRuntime;
+use security_commands::{
+    security_biometric_challenge as security_biometric_challenge_at,
+    security_export_audit as security_export_audit_at, security_list as security_list_at,
+    security_revoke as security_revoke_at, DesktopSecurityRuntime, SecuritySnapshotDto,
+};
+use voice_commands::{
+    handle_global_shortcut, setup_voice_daemon, setup_voice_host, voice_configure,
+    voice_daemon_resume, voice_daemon_set_device, voice_daemon_set_enabled,
+    voice_daemon_set_muted, voice_daemon_status, voice_daemon_suspend, voice_devices,
+    voice_start_listening, voice_status, voice_stop, VoiceRuntime,
+};
+use voice_daemon::VoiceDaemon;
+use voice_model_commands::{
+    voice_model_install, voice_model_list, voice_model_remove, VoiceModelRuntime,
 };
 
 type AppHandle = tauri::AppHandle<Wry>;
@@ -54,11 +89,45 @@ struct DesktopState {
     /// （超时/取消，RAII 自清理）后，迟到的回执自然落到 ok=false。
     prompts: PromptMap,
     pending_mcp_imports: Mutex<HashMap<String, lumo_agent::McpImportBatch>>,
+    mcp: Mutex<McpSupervisorRuntime>,
+    security: DesktopSecurityRuntime,
+    voice: Mutex<VoiceRuntime>,
+    voice_daemon: Mutex<VoiceDaemon>,
+    agent: Mutex<DesktopAgentRuntime>,
+    agent_service: Mutex<Option<Arc<DesktopAgentService>>>,
+    jobs: Mutex<JobRuntime>,
+    voice_models: Mutex<VoiceModelRuntime>,
 }
 
 /// P0-1：跨命令共享的取消句柄表。包一层 Arc 是因为 `execute_flow` 在测试里
 /// 脱离 tauri `State` 直接驱动（见 `cancel_timeout_tests`），需要可独立持有。
 type CancelMap = Arc<Mutex<HashMap<String, CancelToken>>>;
+
+#[tauri::command]
+fn security_list(state: State<'_, DesktopState>) -> Result<SecuritySnapshotDto, String> {
+    security_list_at(&state.security, chrono::Utc::now())
+}
+
+#[tauri::command]
+fn security_revoke(
+    state: State<'_, DesktopState>,
+    request: lumo_agent::PermissionRevocationRequest,
+) -> Result<lumo_agent::PermissionRevocation, String> {
+    security_revoke_at(&state.security, request, chrono::Utc::now())
+}
+
+#[tauri::command]
+fn security_export_audit(state: State<'_, DesktopState>) -> Result<String, String> {
+    security_export_audit_at(&state.security)
+}
+
+#[tauri::command]
+fn security_biometric_challenge(
+    state: State<'_, DesktopState>,
+    request: lumo_agent::PermissionGrantRequest,
+) -> Result<lumo_agent::PermissionGrant, String> {
+    security_biometric_challenge_at(&state.security, request, chrono::Utc::now())
+}
 
 /// P1（人机交互）：跨命令共享的 human prompt 回执表（语义见 `DesktopState`）。
 type PromptMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>>;
@@ -1832,6 +1901,13 @@ fn feature_map() -> Vec<FeatureSection> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    handle_global_shortcut(app, event.state);
+                })
+                .build(),
+        )
         .manage(DesktopState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1839,6 +1915,10 @@ pub fn run() {
                 std::env::set_var("LUMO_HOME", home);
             }
             setup_tray(app)?;
+            setup_agent_service(&handle).map_err(|error| anyhow::anyhow!(error))?;
+            setup_job_worker(&handle).map_err(|error| anyhow::anyhow!(error))?;
+            setup_voice_host(&handle).map_err(|error| anyhow::anyhow!(error))?;
+            setup_voice_daemon(&handle).map_err(|error| anyhow::anyhow!(error))?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1906,6 +1986,40 @@ pub fn run() {
             delete_mcp_server,
             set_mcp_server_enabled,
             set_mcp_tool_enabled,
+            mcp_oauth_start,
+            mcp_oauth_callback,
+            mcp_oauth_refresh,
+            approve_mcp_schema_change,
+            security_list,
+            security_revoke,
+            security_export_audit,
+            security_biometric_challenge,
+            voice_status,
+            voice_configure,
+            voice_start_listening,
+            voice_stop,
+            voice_devices,
+            voice_daemon_status,
+            voice_daemon_set_enabled,
+            voice_daemon_set_muted,
+            voice_daemon_suspend,
+            voice_daemon_resume,
+            voice_daemon_set_device,
+            agent_start,
+            agent_pause,
+            agent_resume,
+            agent_cancel,
+            agent_approve,
+            agent_events,
+            agent_restore,
+            job_list,
+            job_schedule,
+            job_pause,
+            job_resume,
+            job_cancel,
+            voice_model_install,
+            voice_model_remove,
+            voice_model_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumoRPA desktop");

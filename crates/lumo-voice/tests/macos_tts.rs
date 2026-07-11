@@ -44,8 +44,9 @@ fn config() -> MacOsTtsConfig {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
-fn unavailable_native_avspeech_backend_is_typed() {
+fn unavailable_native_avspeech_backend_is_typed_off_macos() {
     let err = match native_macos_tts_backend() {
         Ok(_) => panic!("AVSpeechSynthesizer is not linked in this build"),
         Err(err) => err,
@@ -54,6 +55,12 @@ fn unavailable_native_avspeech_backend_is_typed() {
         err,
         ProviderError::NativeUnavailable { ref backend } if backend == "AVSpeechSynthesizer"
     ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_avspeech_backend_constructs_on_macos() {
+    native_macos_tts_backend().expect("AVSpeechSynthesizer should be available on macOS");
 }
 
 #[tokio::test]

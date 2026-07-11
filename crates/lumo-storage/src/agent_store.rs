@@ -32,6 +32,29 @@ impl Repo {
         Ok(())
     }
 
+    pub fn update_agent_run_state(
+        &self,
+        id: &str,
+        state: &str,
+        finished_at: Option<chrono::DateTime<Utc>>,
+        error: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let conn = self.inner.lock();
+        let updated = conn.execute(
+            "UPDATE agent_runs SET state=?, finished_at=?, error=? WHERE id=?",
+            params![
+                state,
+                finished_at.map(|time| time.timestamp_millis()),
+                error,
+                id,
+            ],
+        )?;
+        if updated == 0 {
+            return Err(StorageError::NotFound(format!("agent run {id}")));
+        }
+        Ok(())
+    }
+
     pub fn append_agent_event(&self, row: AgentEventInsert<'_>) -> Result<(), StorageError> {
         let conn = self.inner.lock();
         conn.execute(

@@ -2,7 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop permissions for the LumoRPA workbench.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "windows": ["main", "voice-capsule"],
+  "permissions": ["core:default", "global-shortcut:default"]
 }
-

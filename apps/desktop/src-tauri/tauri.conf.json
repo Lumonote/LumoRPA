@@ -25,6 +25,23 @@
         "hiddenTitle": true,
         "titleBarStyle": "Transparent",
         "backgroundColor": "#FFFFFF00"
+      },
+      {
+        "label": "voice-capsule",
+        "title": "Lumo Voice",
+        "url": "capsule.html",
+        "width": 360,
+        "height": 64,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": false,
+        "focus": false,
+        "focusable": true,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {

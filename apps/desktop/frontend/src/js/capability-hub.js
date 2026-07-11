@@ -1,5 +1,6 @@
 import { renderImprovementProposals, runImprovementAction } from "./improvements.js";
-import { buildMcpApplyRequest, renderMcpImportWorkspace } from "./mcp-manager.js";
+import { buildMcpApplyRequest, renderMcpGovernance, renderMcpImportWorkspace, runMcpGovernanceAction } from "./mcp-manager.js";
+import { renderSecurityCenter, runSecurityAction } from "./security-center.js";
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -19,7 +20,7 @@ export function renderServerRows(servers = []) {
   return servers.map((server) => {
     const health = server.health || server.status || "unknown";
     const tools = Array.isArray(server.tools) ? server.tools : [];
-    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(server.description || `${tools.length || server.tools || 0} tools available`)}</span><div class="hub-tool-chips">${tools.slice(0, 6).map((tool) => `<button data-mcp-tool="${escapeHtml(tool.name)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(tool.name)}</button>`).join("")}</div></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(label(health))}</span><button data-mcp-action="test" data-server-id="${escapeHtml(server.id)}">Test</button><button data-mcp-action="discover" data-server-id="${escapeHtml(server.id)}">Discover</button><button data-mcp-action="toggle" data-enabled="${Boolean(server.enabled)}" data-server-id="${escapeHtml(server.id)}">${server.enabled === false ? "Enable" : "Disable"}</button><button data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">Delete</button></div></article>`;
+    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(server.description || `${tools.length || server.tools || 0} tools available`)}</span><div class="hub-tool-chips">${tools.slice(0, 6).map((tool) => `<button data-mcp-tool="${escapeHtml(tool.name)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(tool.name)}</button>`).join("")}</div>${renderMcpGovernance(server)}</div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(label(health))}</span><button data-mcp-action="test" data-server-id="${escapeHtml(server.id)}">Test</button><button data-mcp-action="discover" data-server-id="${escapeHtml(server.id)}">Discover</button><button data-mcp-action="toggle" data-enabled="${Boolean(server.enabled)}" data-server-id="${escapeHtml(server.id)}">${server.enabled === false ? "Enable" : "Disable"}</button><button data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">Delete</button></div></article>`;
   }).join("");
 }
 
@@ -70,6 +71,7 @@ export function mountCapabilityHub({ call, root }) {
     else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Protocol fabric</span><h3>MCP Servers</h3></div><button class="primary" data-open-import>Import server</button></header>${renderServerRows(data.servers)}</section>`;
     else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Local intelligence</span><h3>Skills</h3></div></header>${renderSkillRows(data.skills)}</section>`;
     else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Execution policy</span><h3>Agent Profiles</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
+    else if (active === "permissions") content.innerHTML = `<section class="hub-card">${renderSecurityCenter(data.security || {})}</section>`;
     else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Supervised evolution</span><h3>改进提案</h3><p>所有变更先评估、再人工批准，并以新版本应用。</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
     else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sections[active])}</span><h3>Policy-ready workspace</h3><p>This surface is ready for backend data and actions. Empty state is intentional while commands are being connected.</p></section>`;
     const error = root.querySelector("[data-hub-errors]");
@@ -105,6 +107,10 @@ export function mountCapabilityHub({ call, root }) {
     }
     const tool = event.target.closest("[data-mcp-tool]");
     if (tool) await call("call_mcp_tool", { id: tool.dataset.serverId, tool: tool.dataset.mcpTool, arguments: {} });
+    const security = event.target.closest("[data-security-action]");
+    if (security) await runSecurityAction({ action: security.dataset.securityAction, grantId: security.dataset.grantId }, call);
+    const governance = event.target.closest("[data-mcp-governance-action]");
+    if (governance) await runMcpGovernanceAction({ action: governance.dataset.mcpGovernanceAction, serverId: governance.dataset.serverId, tool: governance.dataset.tool, schemaHash: governance.dataset.schemaHash }, call);
     const improvement = event.target.closest("[data-improvement-action]");
     if (improvement) {
       improvement.disabled = true;

@@ -216,3 +216,45 @@ CREATE TABLE IF NOT EXISTS improvement_approvals (
   FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(id) ON DELETE CASCADE
 );
 "#;
+
+pub const V5_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS agent_jobs (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL,
+  schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('one_shot', 'cron')),
+  schedule_spec_json TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued'
+    CHECK (state IN ('queued', 'running', 'waiting', 'paused', 'completed', 'failed', 'unknown')),
+  priority INTEGER NOT NULL DEFAULT 5,
+  available_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+  worker_id TEXT,
+  lease_until INTEGER,
+  heartbeat_at INTEGER,
+  last_error TEXT,
+  cancelled_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_ready
+  ON agent_jobs(state, available_at, priority DESC)
+  WHERE state IN ('queued', 'waiting');
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_lease
+  ON agent_jobs(state, lease_until)
+  WHERE state = 'running';
+
+CREATE TABLE IF NOT EXISTS agent_job_nodes (
+  job_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  state TEXT NOT NULL
+    CHECK (state IN ('queued', 'running', 'waiting', 'paused', 'completed', 'failed', 'unknown')),
+  risk TEXT NOT NULL CHECK (risk IN ('L0', 'L1', 'L2', 'L3')),
+  idempotent INTEGER NOT NULL CHECK (idempotent IN (0, 1)),
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (job_id, node_id),
+  FOREIGN KEY (job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+);
+"#;

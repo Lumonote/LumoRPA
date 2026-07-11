@@ -18,3 +18,11 @@ test("maps approve reject evaluate and rollback to durable commands", async () =
   assert.equal(calls[1][1].patchHash, "h1");
 });
 
+test("renders shadow control comparison and blocks approval below sample gate", () => {
+  const html = renderImprovementProposals([{ id: "p2", target: "alias", rationale: "shadow candidate", patch: {}, status: "shadowing", patchHash: "h2", shadow: { samples: 4, minimumSamples: 20, controlSuccess: 0.81, candidateSuccess: 0.9, latencyDeltaMs: -32, permissionDelta: 0 }, rollbackHistory: [{ reason: "latency regression", version: "v3" }] }]);
+  assert.match(html, /SHADOW 4\/20/);
+  assert.match(html, /CONTROL 81\.0%/);
+  assert.match(html, /CANDIDATE 90\.0%/);
+  assert.match(html, /latency regression/);
+  assert.doesNotMatch(html, /批准并创建新版本/);
+});

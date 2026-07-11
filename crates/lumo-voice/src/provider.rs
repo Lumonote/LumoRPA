@@ -23,6 +23,10 @@ pub enum ProviderError {
     Timeout { timeout_ms: u64 },
     #[error("cloud speech recognition is disabled by privacy policy")]
     PrivacyDenied,
+    #[error("cloud speech duration budget exceeded ({limit_seconds}s)")]
+    CloudDurationExceeded { limit_seconds: u64 },
+    #[error("cloud speech cost budget exceeded ({limit_usd_micro} micro-USD)")]
+    CostBudgetExceeded { limit_usd_micro: u64 },
     #[error("no speech recognition provider is available")]
     Unavailable,
     #[error("native voice backend `{backend}` is unavailable in this build")]

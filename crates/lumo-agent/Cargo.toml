@@ -7,13 +7,21 @@ license.workspace = true
 description = "Unified capability descriptors for the LumoRPA agent platform"
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+cron.workspace = true
+lumo-actions.workspace = true
+lumo-core.workspace = true
+lumo-dsl.workspace = true
 lumo-skills.workspace = true
+lumo-storage.workspace = true
 json5 = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

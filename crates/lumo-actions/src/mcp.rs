@@ -1,5 +1,8 @@
 //! Reusable MCP client plus the built-in `mcp.call` and `mcp.discover` actions.
 
+#[path = "mcp/oauth.rs"]
+pub mod oauth;
+
 use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};

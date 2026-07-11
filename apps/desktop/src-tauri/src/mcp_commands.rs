@@ -1,19 +1,24 @@
+use super::mcp_supervisor::{
+    complete_oauth, refresh_oauth, McpOAuthStart, OAuthBrowser, OAuthTokenVault,
+    ReqwestOAuthTransport,
+};
 use super::{app_home, open_repo, DesktopState};
 use chrono::{DateTime, Utc};
+use lumo_actions::mcp::oauth::{
+    OAuthClientMetadata, StoredOAuthTokenRefs,
+};
 use lumo_actions::mcp::{McpClient, McpTool, McpTransportConfig};
 use lumo_agent::{
-    import_bytes, ConfigValue, ImportWarning, McpImportBatch, McpServerDraft, McpTransportDraft,
-    SecretCandidate,
+    import_bytes, ConfigValue, ImportWarning, McpImportBatch, McpPublisherMetadata, McpRelease,
+    McpServerDraft, McpToolDefinition, McpTransportDraft, SecretCandidate,
 };
 use lumo_storage::{McpServerRow, McpToolRow, Repo, Vault, VaultIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tauri::{State, Wry};
+use std::time::{Duration, Instant};
+use tauri::{Emitter, State, Wry};
 
 type AppHandle = tauri::AppHandle<Wry>;
 
@@ -90,6 +95,42 @@ enum SecretChoice {
     Existing { vault_ref: String },
 }
 
+struct TauriOAuthBrowser<'a> {
+    app: &'a AppHandle,
+}
+
+impl OAuthBrowser for TauriOAuthBrowser<'_> {
+    fn open(&self, url: &str) -> Result<(), String> {
+        self.app
+            .emit("lumo://mcp-oauth-open", serde_json::json!({ "url": url }))
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct RepoOAuthVault<'a> {
+    repo: &'a Repo,
+    identity: &'a VaultIdentity,
+}
+
+impl OAuthTokenVault for RepoOAuthVault<'_> {
+    fn put(&self, reference: &str, value: &str) -> Result<(), String> {
+        let (namespace, key) = split_vault_ref(reference)?;
+        let vault = Vault::new(self.repo, self.identity);
+        let mut fields = vault
+            .get(&namespace)
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        fields.insert(key, value.into());
+        vault
+            .put(&namespace, &fields)
+            .map_err(|error| error.to_string())
+    }
+
+    fn get(&self, reference: &str) -> Result<String, String> {
+        resolve_vault_ref(self.repo, Some(self.identity), reference)
+    }
+}
+
 #[tauri::command]
 pub(crate) fn list_mcp_servers(app: AppHandle) -> Result<Vec<McpServerDto>, String> {
     let repo = open_repo(&app)?;
@@ -98,6 +139,176 @@ pub(crate) fn list_mcp_servers(app: AppHandle) -> Result<Vec<McpServerDto>, Stri
         .into_iter()
         .map(|row| server_dto(&repo, row))
         .collect()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) fn mcp_oauth_start(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: String,
+    metadata: Option<OAuthClientMetadata>,
+) -> Result<McpOAuthStart, String> {
+    let repo = open_repo(&app)?;
+    let mut row = require_server(&repo, &id)?;
+    let metadata = metadata
+        .or_else(|| stored_config(&row).ok().and_then(|config| extension(&config, "oauthClient").ok()))
+        .ok_or_else(|| format!("MCP server `{id}` has no OAuth client metadata"))?;
+    let nonce = ulid::Ulid::new().to_string();
+    let verifier = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new());
+    let started = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
+        .oauth
+        .start(
+            &id,
+            metadata.clone(),
+            format!("state-{nonce}"),
+            verifier,
+            &TauriOAuthBrowser { app: &app },
+        )
+        .map_err(|error| error.to_string())?;
+    set_server_extension(
+        &mut row,
+        "oauthClient",
+        serde_json::to_value(metadata).map_err(|error| error.to_string())?,
+    )?;
+    row.updated_at = Utc::now();
+    repo.upsert_mcp_server(&row)
+        .map_err(|error| error.to_string())?;
+    Ok(started)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn mcp_oauth_callback(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: String,
+    returned_state: String,
+    code: String,
+) -> Result<StoredOAuthTokenRefs, String> {
+    let repo = open_repo(&app)?;
+    let mut row = require_server(&repo, &id)?;
+    let session = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
+        .oauth
+        .pending(&id)
+        .map_err(|error| error.to_string())?;
+    let identity = ensure_vault_identity(&app_home(&app)?)?;
+    let vault = RepoOAuthVault {
+        repo: &repo,
+        identity: &identity,
+    };
+    let transport = ReqwestOAuthTransport::new(session.metadata.clone());
+    let stored = complete_oauth(
+        &transport,
+        &session,
+        &returned_state,
+        &code,
+        &vault,
+        &id,
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    set_server_extension(
+        &mut row,
+        "oauth",
+        serde_json::to_value(&stored).map_err(|error| error.to_string())?,
+    )?;
+    row.updated_at = Utc::now();
+    repo.upsert_mcp_server(&row)
+        .map_err(|error| error.to_string())?;
+    state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
+        .oauth
+        .complete(&id, &session.state)
+        .map_err(|error| error.to_string())?;
+    Ok(stored)
+}
+
+#[tauri::command]
+pub(crate) async fn mcp_oauth_refresh(
+    app: AppHandle,
+    id: String,
+) -> Result<StoredOAuthTokenRefs, String> {
+    let repo = open_repo(&app)?;
+    let mut row = require_server(&repo, &id)?;
+    let stored_config = stored_config(&row)?;
+    let metadata: OAuthClientMetadata = extension(&stored_config, "oauthClient")?;
+    let stored: StoredOAuthTokenRefs = extension(&stored_config, "oauth")?;
+    let identity = ensure_vault_identity(&app_home(&app)?)?;
+    let vault = RepoOAuthVault {
+        repo: &repo,
+        identity: &identity,
+    };
+    let transport = ReqwestOAuthTransport::new(metadata);
+    let refreshed = refresh_oauth(&transport, &stored, &vault, &id, Utc::now())
+        .await
+        .map_err(|error| error.to_string())?;
+    set_server_extension(
+        &mut row,
+        "oauth",
+        serde_json::to_value(&refreshed).map_err(|error| error.to_string())?,
+    )?;
+    row.updated_at = Utc::now();
+    repo.upsert_mcp_server(&row)
+        .map_err(|error| error.to_string())?;
+    Ok(refreshed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) fn approve_mcp_schema_change(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    id: String,
+    tool: String,
+    release_version: Option<String>,
+    schema_hash: String,
+) -> Result<McpToolRow, String> {
+    let approved = {
+        let mut supervisor = state.mcp.lock().map_err(|_| "MCP supervisor state is unavailable".to_string())?;
+        let release_version = release_version.or_else(|| supervisor.schemas.registry().pending_tool(&id, &tool).map(|pending| pending.release_version)).ok_or_else(|| format!("no pending schema change for `{id}:{tool}`"))?;
+        supervisor.schemas.approve(&id, &tool, &release_version, &schema_hash).map_err(|error| error.to_string())?
+    };
+    let repo = open_repo(&app)?;
+    require_server(&repo, &id)?;
+    let now = Utc::now();
+    let mut tools = repo
+        .list_mcp_tools(&id)
+        .map_err(|error| error.to_string())?;
+    let row = McpToolRow {
+        server_id: id.clone(),
+        name: approved.name.clone(),
+        description: approved.description,
+        input_schema: approved.input_schema,
+        output_schema: tools
+            .iter()
+            .find(|candidate| candidate.name == approved.name)
+            .and_then(|candidate| candidate.output_schema.clone()),
+        risk: tools
+            .iter()
+            .find(|candidate| candidate.name == approved.name)
+            .map_or_else(|| "L1".into(), |candidate| candidate.risk.clone()),
+        enabled: true,
+        version_hash: approved.schema_hash,
+        discovered_at: now,
+    };
+    if let Some(existing) = tools
+        .iter_mut()
+        .find(|candidate| candidate.name == approved.name)
+    {
+        *existing = row.clone();
+    } else {
+        tools.push(row.clone());
+    }
+    repo.replace_mcp_tools(&id, &tools)
+        .map_err(|error| error.to_string())?;
+    Ok(row)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -197,13 +408,16 @@ pub(crate) fn apply_mcp_import(
 #[tauri::command]
 pub(crate) async fn test_mcp_server(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     id: String,
 ) -> Result<McpTestResultDto, String> {
     let repo = open_repo(&app)?;
     let mut row = require_server(&repo, &id)?;
+    supervisor_before_call(&state, &id)?;
     let identity = load_vault_identity(&app_home(&app)?)?;
     match connect_and_list(&repo, identity.as_ref(), &row).await {
         Ok(tools) => {
+            supervisor_record(&state, &id, true);
             update_health(&repo, &mut row, "healthy")?;
             Ok(McpTestResultDto {
                 id,
@@ -213,6 +427,7 @@ pub(crate) async fn test_mcp_server(
             })
         }
         Err(error) => {
+            supervisor_record(&state, &id, false);
             update_health(&repo, &mut row, "unhealthy")?;
             Ok(McpTestResultDto {
                 id,
@@ -227,6 +442,7 @@ pub(crate) async fn test_mcp_server(
 #[tauri::command]
 pub(crate) async fn discover_mcp_tools(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     id: String,
 ) -> Result<Vec<McpToolRow>, String> {
     let repo = open_repo(&app)?;
@@ -234,10 +450,15 @@ pub(crate) async fn discover_mcp_tools(
     if !row.enabled {
         return Err(format!("MCP server `{id}` is disabled"));
     }
+    supervisor_before_call(&state, &id)?;
     let identity = load_vault_identity(&app_home(&app)?)?;
     let tools = match connect_and_list(&repo, identity.as_ref(), &row).await {
-        Ok(tools) => tools,
+        Ok(tools) => {
+            supervisor_record(&state, &id, true);
+            tools
+        }
         Err(error) => {
+            supervisor_record(&state, &id, false);
             update_health(&repo, &mut row, "unhealthy")?;
             return Err(error);
         }
@@ -248,23 +469,65 @@ pub(crate) async fn discover_mcp_tools(
         .into_iter()
         .map(|tool| (tool.name.clone(), tool))
         .collect::<HashMap<_, _>>();
+    let release = registry_release(&row, &tools)?;
+    let event = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
+        .schemas
+        .discover(release)
+        .map_err(|error| error.to_string())?;
     let discovered_at = Utc::now();
+    let registry = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?;
     let rows = tools
         .into_iter()
         .map(|tool| {
             let previous = existing.get(&tool.name);
-            tool_row(&id, tool, previous, discovered_at)
+            let approved = registry.schemas.registry().visible_tool(&id, &tool.name);
+            let pending = registry.schemas.registry().pending_tool(&id, &tool.name);
+            match (approved, previous) {
+                (Some(approved), _) if approved.input_schema == tool.input_schema => {
+                    tool_row_with_hash(
+                        &id,
+                        tool,
+                        previous,
+                        discovered_at,
+                        approved.schema_hash,
+                        true,
+                    )
+                }
+                (_, Some(previous)) => Ok(previous.clone()),
+                _ => tool_row_with_hash(
+                    &id,
+                    tool,
+                    None,
+                    discovered_at,
+                    pending
+                        .map(|tool| tool.schema_hash)
+                        .ok_or_else(|| "discovered MCP tool is missing from registry".to_string())?,
+                    false,
+                ),
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
+    drop(registry);
     repo.replace_mcp_tools(&id, &rows)
         .map_err(|error| error.to_string())?;
     update_health(&repo, &mut row, "healthy")?;
+    if !event.changes.is_empty() {
+        app.emit("lumo://mcp-schema-drift", &event)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(rows)
 }
 
 #[tauri::command]
 pub(crate) async fn call_mcp_tool(
     app: AppHandle,
+    state: State<'_, DesktopState>,
     id: String,
     tool: String,
     arguments: Value,
@@ -283,6 +546,7 @@ pub(crate) async fn call_mcp_tool(
     if !stored_tool.enabled {
         return Err(format!("MCP tool `{id}:{tool}` is disabled"));
     }
+    supervisor_before_call(&state, &id)?;
     let identity = load_vault_identity(&app_home(&app)?)?;
     let config = runtime_transport(&repo, identity.as_ref(), &row)?;
     let mut client = McpClient::connect(config, MCP_OPERATION_TIMEOUT)
@@ -293,6 +557,7 @@ pub(crate) async fn call_mcp_tool(
         .await
         .map_err(|error| error.to_string());
     client.close().await;
+    supervisor_record(&state, &id, result.is_ok());
     result
 }
 
@@ -393,6 +658,34 @@ fn server_row_from_draft(
         created_at: now,
         updated_at: now,
     })
+}
+
+fn stored_config(row: &McpServerRow) -> Result<StoredMcpConfig, String> {
+    serde_json::from_value(row.config.clone())
+        .map_err(|error| format!("MCP server `{}` has invalid stored config: {error}", row.id))
+}
+
+fn set_server_extension(
+    row: &mut McpServerRow,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    let mut stored = stored_config(row)?;
+    stored.extensions.insert(key.into(), value);
+    row.config = serde_json::to_value(stored).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn extension<T: for<'de> Deserialize<'de>>(
+    stored: &StoredMcpConfig,
+    key: &str,
+) -> Result<T, String> {
+    let value = stored
+        .extensions
+        .get(key)
+        .cloned()
+        .ok_or_else(|| format!("MCP configuration extension `{key}` is missing"))?;
+    serde_json::from_value(value).map_err(|error| format!("invalid MCP `{key}` metadata: {error}"))
 }
 
 fn require_server(repo: &Repo, id: &str) -> Result<McpServerRow, String> {
@@ -547,7 +840,18 @@ fn persist_secret_choices(
     Ok(())
 }
 
-fn runtime_transport(
+fn ensure_vault_identity(home: &Path) -> Result<VaultIdentity, String> {
+    let path = vault_identity_path(home);
+    if path.exists() {
+        VaultIdentity::load(&path).map_err(|error| error.to_string())
+    } else {
+        let identity = VaultIdentity::generate();
+        identity.save(&path).map_err(|error| error.to_string())?;
+        Ok(identity)
+    }
+}
+
+pub(super) fn runtime_transport(
     repo: &Repo,
     identity: Option<&VaultIdentity>,
     row: &McpServerRow,
@@ -648,7 +952,7 @@ fn vault_identity_path(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join("age-identity.txt"))
 }
 
-fn load_vault_identity(home: &Path) -> Result<Option<VaultIdentity>, String> {
+pub(super) fn load_vault_identity(home: &Path) -> Result<Option<VaultIdentity>, String> {
     let path = vault_identity_path(home);
     if path.exists() {
         VaultIdentity::load(&path)
@@ -680,13 +984,75 @@ fn update_health(repo: &Repo, row: &mut McpServerRow, health: &str) -> Result<()
         .map_err(|error| error.to_string())
 }
 
-fn tool_row(
+fn supervisor_before_call(state: &State<'_, DesktopState>, id: &str) -> Result<(), String> {
+    let now = Instant::now();
+    state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
+        .health_mut(id, now)
+        .before_call(now)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn supervisor_record(state: &State<'_, DesktopState>, id: &str, success: bool) {
+    let now = Instant::now();
+    let Ok(mut runtime) = state.mcp.lock() else {
+        return;
+    };
+    let health = runtime.health_mut(id, now);
+    if success {
+        health.record_success();
+    } else {
+        health.record_failure(now);
+    }
+}
+
+fn registry_release(row: &McpServerRow, tools: &[McpTool]) -> Result<McpRelease, String> {
+    let stored = stored_config(row)?;
+    let version = stored
+        .extensions
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("unversioned")
+        .to_string();
+    let publisher = stored
+        .extensions
+        .get("publisher")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid MCP publisher metadata: {error}"))?
+        .unwrap_or_else(|| McpPublisherMetadata {
+            id: format!("local.{}", row.id),
+            display_name: row.name.clone(),
+            website: None,
+            signature: None,
+        });
+    Ok(McpRelease {
+        server_id: row.id.clone(),
+        version,
+        publisher,
+        tools: tools
+            .iter()
+            .map(|tool| McpToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+            .collect(),
+    })
+}
+
+fn tool_row_with_hash(
     server_id: &str,
     tool: McpTool,
     existing: Option<&McpToolRow>,
     discovered_at: DateTime<Utc>,
+    version_hash: String,
+    enabled: bool,
 ) -> Result<McpToolRow, String> {
-    let version_hash = schema_hash(&tool.input_schema, tool.output_schema.as_ref())?;
     Ok(McpToolRow {
         server_id: server_id.to_string(),
         name: tool.name,
@@ -694,20 +1060,10 @@ fn tool_row(
         input_schema: tool.input_schema,
         output_schema: tool.output_schema,
         risk: existing.map_or_else(|| "L1".to_string(), |row| row.risk.clone()),
-        enabled: existing.is_none_or(|row| row.enabled),
+        enabled,
         version_hash,
         discovered_at,
     })
-}
-
-fn schema_hash(input: &Value, output: Option<&Value>) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&(input, output)).map_err(|error| error.to_string())?;
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    Ok(encoded)
 }
 
 #[cfg(test)]

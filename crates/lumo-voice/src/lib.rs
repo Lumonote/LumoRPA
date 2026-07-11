@@ -1,8 +1,11 @@
 pub mod audio;
+pub mod cloud_stt;
+pub mod cpal_capture;
 pub mod macos_tts;
 pub mod model_installer;
 pub mod provider;
 pub mod sherpa;
+pub mod sherpa_native;
 pub mod state;
 pub mod stt_router;
 

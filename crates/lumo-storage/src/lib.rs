@@ -5,6 +5,7 @@
 //! without touching call sites.
 
 mod agent_store;
+mod job_store;
 pub mod error;
 pub mod repo;
 pub mod schema;

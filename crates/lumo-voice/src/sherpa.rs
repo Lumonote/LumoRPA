@@ -86,9 +86,7 @@ pub trait SherpaBackend: Send + Sync {
 }
 
 pub fn native_sherpa_backend() -> Result<Arc<dyn SherpaBackend>, ProviderError> {
-    Err(ProviderError::NativeUnavailable {
-        backend: "sherpa-onnx".into(),
-    })
+    crate::sherpa_native::native_sherpa_backend_from_environment()
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +160,7 @@ impl SherpaBackend for DeterministicSherpaBackend {
     }
 }
 
-async fn send_event(
+pub(crate) async fn send_event(
     events: &mpsc::Sender<SttEvent>,
     event: SttEvent,
     cancel: &CancellationToken,
