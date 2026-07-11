@@ -33,6 +33,7 @@ import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
 import { mountCapabilityHub } from "./capability-hub.js";
+import { mountMissionControl } from "./mission-control.js";
 
 let bootStarted = false;
 
@@ -57,9 +58,15 @@ function bindEvents() {
     switchTopView(b.dataset.view);
     const hub = $("capabilityHubView");
     hub.style.display = b.dataset.view === "capability-hub" ? "" : "none";
+    const mission = $("missionControlView");
+    mission.style.display = b.dataset.view === "mission-control" ? "" : "none";
     if (b.dataset.view === "capability-hub" && !state.capabilityHubMounted) {
       mountCapabilityHub({ call, root: hub });
       state.capabilityHubMounted = true;
+    }
+    if (b.dataset.view === "mission-control" && !state.missionControlMounted) {
+      mountMissionControl(mission, state.agentProjection);
+      state.missionControlMounted = true;
     }
   }));
   // Editor mode switch

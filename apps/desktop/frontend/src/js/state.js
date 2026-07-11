@@ -46,6 +46,8 @@ export const state = {
   viewMode: "steps",
   currentView: "design",
   capabilityHubMounted: false,
+  missionControlMounted: false,
+  agentProjection: { runId: "preview", seq: 0, status: "idle", nodes: {}, edges: [], events: [], replans: [], activeNodeId: null },
   rightSection: "inspector",
   windowAlpha: loadAlpha("lumo.win", 0, 18),
   panelAlpha: loadAlpha("lumo.panel", 14, [18, 38, 62]),

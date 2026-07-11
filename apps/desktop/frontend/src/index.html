@@ -6,6 +6,7 @@
     <title>LumoRPA Studio</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./styles/capability-hub.css" />
+    <link rel="stylesheet" href="./styles/mission-control.css" />
   </head>
   <body>
     <div class="shell">
@@ -23,6 +24,7 @@
           <button class="tab is-active" data-view="design">设计</button>
           <button class="tab" data-view="recorder">录制</button>
           <button class="tab" data-view="runs">运行</button>
+          <button class="tab" data-view="mission-control">Mission Control</button>
           <button class="tab" data-view="models">模型</button>
           <button class="tab" data-view="features">能力地图</button>
           <button class="tab" data-view="capability-hub">Capability Hub</button>
@@ -413,6 +415,10 @@
           </nav>
           <div data-hub-content aria-live="polite"></div>
           <section class="hub-card hub-import" data-import-wizard><header><div><span class="hub-eyebrow">Secure ingestion</span><h3>Import MCP configuration</h3><p>Secrets are detected locally and routed to Vault; raw values are never previewed.</p></div></header><div class="hub-import-modes"><button data-import-mode="auto-discover">Auto-discover</button><button data-import-mode="file">File</button><button data-import-mode="paste">Paste</button><button data-import-mode="manual">Manual</button></div><div class="hub-import-stage"><div><span>Preview</span><strong data-import-state>Choose an import source</strong></div><div><span>Conflicts</span><strong>No scan yet</strong></div><div><span>Connection test</span><strong>Waiting</strong></div></div></section>
+        </section>
+        <section id="missionControlView" class="mission-control" style="display:none" aria-label="Mission Control">
+          <header class="mc-head"><div><span class="mc-kicker">LUMO MISSION CONTROL / LIVE DAG</span><h1>Agent Execution</h1></div><div class="mc-metrics" data-mc-metrics></div></header>
+          <div class="mc-grid"><div class="mc-stage" data-mc-topology></div><aside class="mc-detail" data-mc-detail></aside><div class="mc-log" data-mc-log></div></div>
         </section>
       </main>
 
