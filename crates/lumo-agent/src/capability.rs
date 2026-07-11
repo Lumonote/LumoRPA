@@ -17,7 +17,7 @@ pub enum RiskLevel {
     L3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityDescriptor {
     pub id: String,
@@ -57,24 +57,87 @@ impl CapabilityDescriptor {
             enabled: true,
             version_hash: String::new(),
         };
-        descriptor.version_hash = descriptor.compute_version_hash();
+        descriptor.refresh_version_hash();
         descriptor
     }
 
+    pub fn refresh_version_hash(&mut self) {
+        self.version_hash = self.compute_version_hash();
+    }
+
+    pub fn has_valid_version_hash(&self) -> bool {
+        self.version_hash == self.compute_version_hash()
+    }
+
     fn compute_version_hash(&self) -> String {
-        let fields = (
-            &self.id,
-            &self.source,
-            &self.name,
-            &self.description,
-            &self.input_schema,
-            &self.output_schema,
-            &self.aliases,
-            &self.examples,
-            self.risk,
-            self.enabled,
-        );
-        let bytes = serde_json::to_vec(&fields).expect("capability fields are JSON serializable");
-        format!("{:x}", Sha256::digest(bytes))
+        let fields = serde_json::Value::Array(vec![
+            self.id.clone().into(),
+            capability_source_value(&self.source),
+            self.name.clone().into(),
+            self.description.clone().into(),
+            canonicalize_json(&self.input_schema),
+            self.output_schema
+                .as_ref()
+                .map(canonicalize_json)
+                .unwrap_or(serde_json::Value::Null),
+            self.aliases
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect::<Vec<_>>()
+                .into(),
+            self.examples
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect::<Vec<_>>()
+                .into(),
+            risk_level_value(self.risk).into(),
+            self.enabled.into(),
+        ]);
+        let canonical = canonicalize_json(&fields).to_string();
+        format!("{:x}", Sha256::digest(canonical.as_bytes()))
+    }
+}
+
+fn capability_source_value(source: &CapabilitySource) -> serde_json::Value {
+    let fields = match source {
+        CapabilitySource::Flow { path } => vec!["flow".into(), path.clone().into()],
+        CapabilitySource::Skill { name, source } => {
+            vec!["skill".into(), name.clone().into(), source.clone().into()]
+        }
+        CapabilitySource::Mcp { server, tool } => {
+            vec!["mcp".into(), server.clone().into(), tool.clone().into()]
+        }
+    };
+    serde_json::Value::Array(fields)
+}
+
+fn risk_level_value(risk: RiskLevel) -> &'static str {
+    match risk {
+        RiskLevel::L0 => "L0",
+        RiskLevel::L1 => "L1",
+        RiskLevel::L2 => "L2",
+        RiskLevel::L3 => "L3",
+    }
+}
+
+fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(canonicalize_json)
+            .collect::<Vec<_>>()
+            .into(),
+        serde_json::Value::Object(values) => {
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let canonical = entries
+                .into_iter()
+                .map(|(key, value)| (key.clone(), canonicalize_json(value)))
+                .collect();
+            serde_json::Value::Object(canonical)
+        }
+        scalar => scalar.clone(),
     }
 }

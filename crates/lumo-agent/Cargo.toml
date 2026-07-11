@@ -10,3 +10,6 @@ description = "Unified capability descriptors for the LumoRPA agent platform"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["preserve_order"] }
