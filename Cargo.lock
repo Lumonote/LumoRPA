@@ -3966,6 +3966,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumo-voice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "lumorpa-desktop"
 version = "0.1.0"
 dependencies = [

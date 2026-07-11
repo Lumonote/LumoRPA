@@ -9,6 +9,7 @@ members = [
     "crates/lumo-recorder",
     "crates/lumo-skills",
     "crates/lumo-agent",
+    "crates/lumo-voice",
     "crates/lumo-cli",
     "apps/desktop/src-tauri",
 ]
@@ -37,6 +38,7 @@ lumo-ai        = { path = "crates/lumo-ai",        version = "0.1.0" }
 lumo-recorder  = { path = "crates/lumo-recorder",  version = "0.1.0" }
 lumo-skills    = { path = "crates/lumo-skills",    version = "0.1.0" }
 lumo-agent     = { path = "crates/lumo-agent",     version = "0.1.0" }
+lumo-voice     = { path = "crates/lumo-voice",     version = "0.1.0" }
 
 # async + runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std", "sync", "time", "process", "signal"] }
