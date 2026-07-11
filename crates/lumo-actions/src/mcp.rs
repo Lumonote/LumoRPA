@@ -1,8 +1,4 @@
-//! `mcp.call` — invoke a tool on an external MCP (Model Context Protocol) server.
-//!
-//! Spawns the server as a child process, performs the JSON-RPC 2.0 handshake
-//! over stdio (`initialize` → `notifications/initialized` → `tools/call`), and
-//! returns the tool's content array.
+//! Reusable MCP client plus the built-in `mcp.call` and `mcp.discover` actions.
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
@@ -11,12 +7,505 @@ use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransportConfig {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+    StreamableHttp {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+}
+
+#[derive(Debug, Error)]
+pub enum McpError {
+    #[error("failed to spawn MCP server: {message}")]
+    Spawn { message: String },
+    #[error("MCP transport error: {message}")]
+    Transport { message: String },
+    #[error("MCP protocol error: {message}")]
+    Protocol { message: String },
+    #[error("MCP server error {code}: {message}")]
+    Server {
+        code: i64,
+        message: String,
+        data: Option<Value>,
+    },
+    #[error("MCP operation timed out after {duration_ms}ms")]
+    Timeout { duration_ms: u64 },
+    #[error("MCP tool arguments must be an object or null")]
+    InvalidArguments,
+}
+
+enum McpTransport {
+    Stdio {
+        child: Child,
+        stdin: ChildStdin,
+        reader: BufReader<ChildStdout>,
+    },
+    StreamableHttp {
+        client: reqwest::Client,
+        url: String,
+        headers: reqwest::header::HeaderMap,
+        session_id: Option<String>,
+    },
+}
+
+pub struct McpClient {
+    transport: Option<McpTransport>,
+    timeout: Duration,
+    next_id: u64,
+}
+
+impl McpClient {
+    pub async fn connect(
+        config: McpTransportConfig,
+        operation_timeout: Duration,
+    ) -> Result<Self, McpError> {
+        let transport = match config {
+            McpTransportConfig::Stdio { command, args, env } => {
+                let mut child = Command::new(&command)
+                    .args(args)
+                    .envs(env)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|error| McpError::Spawn {
+                        message: format!("`{command}`: {error}"),
+                    })?;
+                let stdin = child.stdin.take().ok_or_else(|| McpError::Transport {
+                    message: "spawned server has no stdin".to_string(),
+                })?;
+                let stdout = child.stdout.take().ok_or_else(|| McpError::Transport {
+                    message: "spawned server has no stdout".to_string(),
+                })?;
+                McpTransport::Stdio {
+                    child,
+                    stdin,
+                    reader: BufReader::new(stdout),
+                }
+            }
+            McpTransportConfig::StreamableHttp { url, headers } => {
+                let mut parsed_headers = reqwest::header::HeaderMap::new();
+                for (name, value) in headers {
+                    let name =
+                        reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                            McpError::Transport {
+                                message: "invalid caller header name".to_string(),
+                            }
+                        })?;
+                    let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+                        McpError::Transport {
+                            message: "invalid caller header value".to_string(),
+                        }
+                    })?;
+                    parsed_headers.insert(name, value);
+                }
+                McpTransport::StreamableHttp {
+                    client: reqwest::Client::new(),
+                    url,
+                    headers: parsed_headers,
+                    session_id: None,
+                }
+            }
+        };
+
+        let mut client = Self {
+            transport: Some(transport),
+            timeout: operation_timeout,
+            next_id: 1,
+        };
+        let initialized = async {
+            client
+                .request(
+                    "initialize",
+                    Some(json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "lumo-rpa",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    })),
+                )
+                .await?;
+            client.notification("notifications/initialized", None).await
+        };
+        match timeout(operation_timeout, initialized).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                client.abort_stdio().await;
+                return Err(error);
+            }
+            Err(_) => {
+                client.abort_stdio().await;
+                return Err(McpError::Timeout {
+                    duration_ms: duration_millis(operation_timeout),
+                });
+            }
+        }
+
+        Ok(client)
+    }
+
+    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+        let response = self.request_with_timeout("tools/list", None).await?;
+        let parsed: Result<Vec<McpTool>, McpError> = (|| {
+            let tools = response
+                .as_object()
+                .and_then(|result| result.get("tools"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| McpError::Protocol {
+                    message: "tools/list result must contain a tools array".to_string(),
+                })?;
+
+            tools
+                .iter()
+                .map(|tool| {
+                    let tool = tool.as_object().ok_or_else(|| McpError::Protocol {
+                        message: "tool descriptor must be an object".to_string(),
+                    })?;
+                    let name = tool.get("name").and_then(Value::as_str).ok_or_else(|| {
+                        McpError::Protocol {
+                            message: "tool descriptor name must be a string".to_string(),
+                        }
+                    })?;
+                    let description = match tool.get("description") {
+                        None => "",
+                        Some(Value::String(description)) => description,
+                        Some(_) => {
+                            return Err(McpError::Protocol {
+                                message: "tool descriptor description must be a string".to_string(),
+                            });
+                        }
+                    };
+                    let input_schema =
+                        tool.get("inputSchema")
+                            .cloned()
+                            .ok_or_else(|| McpError::Protocol {
+                                message: "tool descriptor inputSchema is required".to_string(),
+                            })?;
+                    Ok(McpTool {
+                        name: name.to_string(),
+                        description: description.to_string(),
+                        input_schema,
+                        output_schema: tool.get("outputSchema").cloned(),
+                    })
+                })
+                .collect()
+        })();
+        if parsed.is_err() {
+            self.abort_stdio().await;
+        }
+        parsed
+    }
+
+    pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, McpError> {
+        let arguments = match arguments {
+            Value::Null => json!({}),
+            Value::Object(_) => arguments,
+            _ => return Err(McpError::InvalidArguments),
+        };
+        self.request_with_timeout(
+            "tools/call",
+            Some(json!({ "name": name, "arguments": arguments })),
+        )
+        .await
+    }
+
+    pub async fn close(&mut self) {
+        self.abort_stdio().await;
+        self.transport = None;
+    }
+
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, McpError> {
+        match timeout(self.timeout, self.request(method, params)).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => {
+                self.abort_stdio().await;
+                Err(error)
+            }
+            Err(_) => {
+                self.abort_stdio().await;
+                Err(McpError::Timeout {
+                    duration_ms: duration_millis(self.timeout),
+                })
+            }
+        }
+    }
+
+    async fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| McpError::Protocol {
+                message: "JSON-RPC request id overflow".to_string(),
+            })?;
+        let mut request = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        let response =
+            self.exchange(request, Some(id))
+                .await?
+                .ok_or_else(|| McpError::Protocol {
+                    message: "request returned no JSON-RPC response".to_string(),
+                })?;
+        parse_response(response)
+    }
+
+    async fn notification(&mut self, method: &str, params: Option<Value>) -> Result<(), McpError> {
+        let mut notification = json!({ "jsonrpc": "2.0", "method": method });
+        if let Some(params) = params {
+            notification["params"] = params;
+        }
+        self.exchange(notification, None).await?;
+        Ok(())
+    }
+
+    async fn exchange(
+        &mut self,
+        message: Value,
+        response_id: Option<u64>,
+    ) -> Result<Option<Value>, McpError> {
+        match self.transport.as_mut().ok_or_else(|| McpError::Transport {
+            message: "client is closed".to_string(),
+        })? {
+            McpTransport::Stdio { stdin, reader, .. } => {
+                write_stdio_message(stdin, &message).await?;
+                match response_id {
+                    Some(id) => read_stdio_response(reader, id).await.map(Some),
+                    None => Ok(None),
+                }
+            }
+            McpTransport::StreamableHttp {
+                client,
+                url,
+                headers,
+                session_id,
+            } => {
+                let mut request = client
+                    .post(url.as_str())
+                    .headers(headers.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "application/json, text/event-stream",
+                    );
+                if let Some(session_id) = session_id.as_deref() {
+                    request = request.header("Mcp-Session-Id", session_id);
+                }
+                let response =
+                    request
+                        .json(&message)
+                        .send()
+                        .await
+                        .map_err(|error| McpError::Transport {
+                            message: format!("HTTP request failed: {error}"),
+                        })?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(McpError::Transport {
+                        message: format!("HTTP server returned status {}", status.as_u16()),
+                    });
+                }
+                if session_id.is_none() {
+                    if let Some(value) = response.headers().get("Mcp-Session-Id") {
+                        let value = value.to_str().map_err(|_| McpError::Protocol {
+                            message: "Mcp-Session-Id is not valid text".to_string(),
+                        })?;
+                        *session_id = Some(value.to_string());
+                    }
+                }
+                if response_id.is_none() || status == reqwest::StatusCode::NO_CONTENT {
+                    return Ok(None);
+                }
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let body = response.text().await.map_err(|error| McpError::Transport {
+                    message: format!("failed to read HTTP response: {error}"),
+                })?;
+                let id = response_id.expect("checked above");
+                if content_type.starts_with("text/event-stream") {
+                    parse_sse_response(&body, id).map(Some)
+                } else {
+                    let value =
+                        serde_json::from_str(&body).map_err(|error| McpError::Protocol {
+                            message: format!("invalid JSON HTTP response: {error}"),
+                        })?;
+                    if response_matches_id(&value, id) {
+                        Ok(Some(value))
+                    } else {
+                        Err(McpError::Protocol {
+                            message: format!("HTTP response did not contain request id {id}"),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    async fn abort_stdio(&mut self) {
+        if let Some(McpTransport::Stdio { child, .. }) = self.transport.as_mut() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        if let Some(McpTransport::Stdio { child, .. }) = self.transport.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+async fn write_stdio_message(stdin: &mut ChildStdin, value: &Value) -> Result<(), McpError> {
+    let mut line = serde_json::to_vec(value).map_err(|error| McpError::Protocol {
+        message: format!("failed to encode JSON-RPC message: {error}"),
+    })?;
+    line.push(b'\n');
+    stdin
+        .write_all(&line)
+        .await
+        .map_err(|error| McpError::Transport {
+            message: format!("failed to write to MCP server: {error}"),
+        })?;
+    stdin.flush().await.map_err(|error| McpError::Transport {
+        message: format!("failed to flush MCP server input: {error}"),
+    })
+}
+
+async fn read_stdio_response(
+    reader: &mut BufReader<ChildStdout>,
+    wanted_id: u64,
+) -> Result<Value, McpError> {
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|error| McpError::Transport {
+                message: format!("failed to read MCP server response: {error}"),
+            })?;
+        if bytes == 0 {
+            return Err(McpError::Transport {
+                message: "MCP server closed stdout".to_string(),
+            });
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str(line.trim()).map_err(|error| McpError::Protocol {
+            message: format!("invalid JSON-RPC response: {error}"),
+        })?;
+        if response_matches_id(&value, wanted_id) {
+            return Ok(value);
+        }
+    }
+}
+
+fn response_matches_id(value: &Value, wanted_id: u64) -> bool {
+    value.get("id").and_then(Value::as_u64) == Some(wanted_id)
+}
+
+fn parse_response(response: Value) -> Result<Value, McpError> {
+    let object = response.as_object().ok_or_else(|| McpError::Protocol {
+        message: "JSON-RPC response must be an object".to_string(),
+    })?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(McpError::Protocol {
+            message: "JSON-RPC response version must be 2.0".to_string(),
+        });
+    }
+    if let Some(error) = object.get("error") {
+        let error = error.as_object().ok_or_else(|| McpError::Protocol {
+            message: "JSON-RPC error must be an object".to_string(),
+        })?;
+        let code = error
+            .get("code")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| McpError::Protocol {
+                message: "JSON-RPC error code must be an integer".to_string(),
+            })?;
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::Protocol {
+                message: "JSON-RPC error message must be a string".to_string(),
+            })?;
+        return Err(McpError::Server {
+            code,
+            message: message.to_string(),
+            data: error.get("data").cloned(),
+        });
+    }
+    object
+        .get("result")
+        .cloned()
+        .ok_or_else(|| McpError::Protocol {
+            message: "JSON-RPC response must contain result or error".to_string(),
+        })
+}
+
+fn parse_sse_response(body: &str, wanted_id: u64) -> Result<Value, McpError> {
+    let mut data = Vec::new();
+    for line in body.lines().chain(std::iter::once("")) {
+        if let Some(value) = line.strip_prefix("data:") {
+            data.push(value.strip_prefix(' ').unwrap_or(value));
+        } else if line.is_empty() && !data.is_empty() {
+            let payload = data.join("\n");
+            data.clear();
+            let value: Value =
+                serde_json::from_str(&payload).map_err(|error| McpError::Protocol {
+                    message: format!("invalid SSE JSON-RPC event: {error}"),
+                })?;
+            if response_matches_id(&value, wanted_id) {
+                return Ok(value);
+            }
+        }
+    }
+    Err(McpError::Protocol {
+        message: format!("SSE response did not contain request id {wanted_id}"),
+    })
+}
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(McpCallAction);
@@ -75,85 +564,26 @@ impl Action for McpCallAction {
         let cfg: CallIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("mcp.call input invalid: {e}")))?;
         ctx.ensure_mcp_tool(&cfg.server, &cfg.tool)?;
-
-        let arguments = if cfg.arguments.is_null() {
-            json!({})
-        } else if cfg.arguments.is_object() {
-            cfg.arguments.clone()
-        } else {
-            return Err(StepError::msg(
-                "mcp.call `arguments` must be an object or omitted",
-            ));
-        };
-
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
-            .envs(&cfg.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| StepError::msg(format!("mcp.call spawn `{}`: {e}", cfg.command)))?;
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| StepError::msg("mcp.call: child stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| StepError::msg("mcp.call: child stdout missing"))?;
-        let mut reader = BufReader::new(stdout);
-
-        let deadline = Duration::from_millis(cfg.timeout_ms);
-        let result = timeout(deadline, async {
-            // initialize
-            let init = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "lumo-rpa", "version": env!("CARGO_PKG_VERSION") }
-                }
-            });
-            write_line(&mut stdin, &init).await?;
-            let _ = read_response_for(&mut reader, 1).await?;
-
-            // initialized notification (no response expected)
-            let notif = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            });
-            write_line(&mut stdin, &notif).await?;
-
-            // tools/call
-            let call = json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": { "name": cfg.tool, "arguments": arguments }
-            });
-            write_line(&mut stdin, &call).await?;
-            read_response_for(&mut reader, 2).await
-        })
-        .await;
-
-        let _ = child.kill().await;
-
-        let resp = result.map_err(|_| {
-            StepError::msg(format!("mcp.call timed out after {}ms", cfg.timeout_ms))
-        })??;
-
-        if let Some(err) = resp.get("error") {
-            return Err(StepError::msg(format!("mcp.call server error: {err}")));
+        if !cfg.arguments.is_null() && !cfg.arguments.is_object() {
+            return Err(action_error("mcp.call", McpError::InvalidArguments));
         }
-        let result = resp
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| json!({ "content": [] }));
+
+        let mut client = McpClient::connect(
+            McpTransportConfig::Stdio {
+                command: cfg.command,
+                args: cfg.args,
+                env: cfg.env.into_iter().collect(),
+            },
+            Duration::from_millis(cfg.timeout_ms),
+        )
+        .await
+        .map_err(|error| action_error("mcp.call", error))?;
+        let result = client
+            .call_tool(&cfg.tool, cfg.arguments)
+            .await
+            .map_err(|error| action_error("mcp.call", error));
+        client.close().await;
+        let result = result?;
         Ok(ActionResult::from(result))
     }
 }
@@ -188,95 +618,35 @@ impl Action for McpDiscoverAction {
             .map_err(|e| StepError::msg(format!("mcp.discover input invalid: {e}")))?;
         ctx.ensure_mcp_server(&cfg.server)?;
 
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
-            .envs(&cfg.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| StepError::msg(format!("mcp.discover spawn `{}`: {e}", cfg.command)))?;
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| StepError::msg("mcp.discover: child stdin missing"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| StepError::msg("mcp.discover: child stdout missing"))?;
-        let mut reader = BufReader::new(stdout);
-
-        let deadline = Duration::from_millis(cfg.timeout_ms);
-        let result = timeout(deadline, async {
-            let init = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "lumo-rpa", "version": env!("CARGO_PKG_VERSION") }
-                }
-            });
-            write_line(&mut stdin, &init).await?;
-            let _ = read_response_for(&mut reader, 1).await?;
-
-            let notif = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            });
-            write_line(&mut stdin, &notif).await?;
-
-            let list = json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/list"
-            });
-            write_line(&mut stdin, &list).await?;
-            read_response_for(&mut reader, 2).await
-        })
-        .await;
-
-        let _ = child.kill().await;
-
-        let resp = result.map_err(|_| {
-            StepError::msg(format!("mcp.discover timed out after {}ms", cfg.timeout_ms))
-        })??;
-
-        if let Some(err) = resp.get("error") {
-            return Err(StepError::msg(format!("mcp.discover server error: {err}")));
-        }
-        let tools = resp
-            .get("result")
-            .and_then(|r| r.get("tools"))
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        let descriptors = tools
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        let name = t.get("name").and_then(|n| n.as_str())?.to_string();
-                        let description = t
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let proposed_grant = format!("{}:{name}", cfg.server);
-                        let already_allowed = ctx.ensure_mcp_tool(&cfg.server, &name).is_ok();
-                        Some(json!({
-                            "name": name,
-                            "description": description,
-                            "input_schema": t.get("inputSchema").cloned().unwrap_or(Value::Null),
-                            "proposed_grant": proposed_grant,
-                            "already_allowed": already_allowed
-                        }))
-                    })
-                    .collect::<Vec<_>>()
+        let mut client = McpClient::connect(
+            McpTransportConfig::Stdio {
+                command: cfg.command,
+                args: cfg.args,
+                env: cfg.env.into_iter().collect(),
+            },
+            Duration::from_millis(cfg.timeout_ms),
+        )
+        .await
+        .map_err(|error| action_error("mcp.discover", error))?;
+        let tools = client
+            .list_tools()
+            .await
+            .map_err(|error| action_error("mcp.discover", error));
+        client.close().await;
+        let descriptors = tools?
+            .into_iter()
+            .map(|tool| {
+                let proposed_grant = format!("{}:{}", cfg.server, tool.name);
+                let already_allowed = ctx.ensure_mcp_tool(&cfg.server, &tool.name).is_ok();
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                    "proposed_grant": proposed_grant,
+                    "already_allowed": already_allowed
+                })
             })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
 
         Ok(ActionResult::from(json!({
             "server": cfg.server,
@@ -286,43 +656,24 @@ impl Action for McpDiscoverAction {
     }
 }
 
-async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, value: &Value) -> Result<(), StepError> {
-    let mut line = serde_json::to_string(value)
-        .map_err(|e| StepError::msg(format!("mcp.call encode: {e}")))?;
-    line.push('\n');
-    w.write_all(line.as_bytes())
-        .await
-        .map_err(|e| StepError::msg(format!("mcp.call write: {e}")))?;
-    w.flush()
-        .await
-        .map_err(|e| StepError::msg(format!("mcp.call flush: {e}")))?;
-    Ok(())
-}
-
-async fn read_response_for<R: AsyncBufReadExt + Unpin>(
-    r: &mut R,
-    want_id: u64,
-) -> Result<Value, StepError> {
-    loop {
-        let mut buf = String::new();
-        let n = r
-            .read_line(&mut buf)
-            .await
-            .map_err(|e| StepError::msg(format!("mcp.call read: {e}")))?;
-        if n == 0 {
-            return Err(StepError::msg("mcp.call: server closed stdout"));
+fn action_error(action: &str, error: McpError) -> StepError {
+    let message = match error {
+        McpError::Spawn { message } => format!("{action} spawn: {message}"),
+        McpError::Timeout { duration_ms } => {
+            format!("{action} timed out after {duration_ms}ms")
         }
-        let line = buf.trim();
-        if line.is_empty() {
-            continue;
+        McpError::Server {
+            code,
+            message,
+            data,
+        } => format!("{action} server error {code}: {message}; data={data:?}"),
+        McpError::InvalidArguments => {
+            format!("{action} `arguments` must be an object or omitted")
         }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| StepError::msg(format!("mcp.call decode `{line}`: {e}")))?;
-        // Ignore notifications and unrelated ids; only match the request id.
-        if value.get("id").and_then(|v| v.as_u64()) == Some(want_id) {
-            return Ok(value);
-        }
-    }
+        McpError::Transport { message } => format!("{action} transport: {message}"),
+        McpError::Protocol { message } => format!("{action} protocol: {message}"),
+    };
+    StepError::msg(message)
 }
 
 #[cfg(test)]
