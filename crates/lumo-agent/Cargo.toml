@@ -7,9 +7,13 @@ license.workspace = true
 description = "Unified capability descriptors for the LumoRPA agent platform"
 
 [dependencies]
+json5 = "0.4"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true, features = ["preserve_order"] }

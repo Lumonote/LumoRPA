@@ -1,0 +1,11 @@
+mcpServers:
+  modern-http:
+    url: https://mcp.example.test/v1
+    http_headers:
+      Authorization: Bearer yaml_fixture_secret
+      X-Retry-Count: 3
+  legacy-events:
+    url: https://events.example.test/sse
+    transport: sse
+    headers:
+      Accept: text/event-stream

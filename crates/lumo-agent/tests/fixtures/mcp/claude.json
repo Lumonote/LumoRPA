@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "GitHub MCP": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_claude_fixture_secret",
+        "LOG_LEVEL": "info"
+      },
+      "timeout": 30
+    }
+  }
+}

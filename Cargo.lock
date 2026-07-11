@@ -3406,6 +3406,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "serde",
+]
+
+[[package]]
 name = "jsonptr"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3786,9 +3797,13 @@ dependencies = [
 name = "lumo-agent"
 version = "0.1.0"
 dependencies = [
+ "json5",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
 ]
 
 [[package]]

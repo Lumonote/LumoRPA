@@ -1,0 +1,11 @@
+[mcp_servers.zeta]
+command = "zeta-mcp"
+args = ["--stdio"]
+enabled = false
+
+[mcp_servers.zeta.env]
+API_KEY = "codex_fixture_secret"
+PORT = 4312
+
+[mcp_servers.alpha]
+command = "alpha-mcp"

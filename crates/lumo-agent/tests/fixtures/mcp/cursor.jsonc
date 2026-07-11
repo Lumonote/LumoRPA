@@ -1,0 +1,9 @@
+{
+  // Cursor accepts comments in its MCP configuration.
+  "mcpServers": {
+    "browser-tools": {
+      "command": "node",
+      "args": ["server.js",],
+    },
+  },
+}
