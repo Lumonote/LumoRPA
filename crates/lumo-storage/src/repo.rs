@@ -477,6 +477,8 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         return Ok(());
     }
 
+    let tx = conn.unchecked_transaction()?;
+
     // Ordered list of (target_version, step). Append new steps here; never
     // renumber or mutate an already-shipped step. The legacy step_runs rebuild
     // runs first so the baseline DDL's index on `path` lands on the rebuilt
@@ -490,13 +492,14 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 
     for &(version, step) in steps {
         if version > current {
-            step(conn)?;
+            step(&tx)?;
         }
     }
 
     // PRAGMA user_version does not accept bound parameters; the value is a
     // compile-time constant so formatting it is safe.
-    conn.execute_batch(&format!("PRAGMA user_version = {LATEST_USER_VERSION};"))?;
+    tx.execute_batch(&format!("PRAGMA user_version = {LATEST_USER_VERSION};"))?;
+    tx.commit()?;
     Ok(())
 }
 

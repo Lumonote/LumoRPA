@@ -81,7 +81,17 @@ fn version_three_db_is_upgraded_to_v4() {
     let path = tmp.path().join("v3.db");
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE flow_runs (
+              id TEXT PRIMARY KEY,
+              state TEXT NOT NULL
+            );
+            INSERT INTO flow_runs(id, state) VALUES ('legacy-run', 'ok');
+            PRAGMA user_version = 3;
+            "#,
+        )
+        .unwrap();
     }
 
     let repo = Repo::open(&path).unwrap();
@@ -95,8 +105,146 @@ fn version_three_db_is_upgraded_to_v4() {
         })
         .unwrap();
     assert!(has_agent_runs);
+    let legacy_state: String = repo
+        .with_raw(|conn| {
+            conn.query_row(
+                "SELECT state FROM flow_runs WHERE id='legacy-run'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(legacy_state, "ok");
     drop(repo);
     assert_eq!(user_version(&path), EXPECTED_USER_VERSION);
+}
+
+#[test]
+fn failed_v4_migration_rolls_back_schema_and_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("broken-v4.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE VIEW mcp_tools AS SELECT 1 AS placeholder;
+            PRAGMA user_version = 3;
+            "#,
+        )
+        .unwrap();
+    }
+
+    assert!(Repo::open(&path).is_err());
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3, "failed migration must not stamp v4");
+    let voice_profiles_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='voice_profiles')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !voice_profiles_exists,
+        "earlier v4 DDL must roll back when a later statement fails"
+    );
+}
+
+#[test]
+fn v4_boolean_columns_reject_values_outside_zero_and_one() {
+    let repo = Repo::open_in_memory().unwrap();
+
+    assert!(repo
+        .with_raw(|conn| conn.execute(
+            "INSERT INTO mcp_servers(id,name,transport,config_json,enabled,created_at,updated_at) \
+             VALUES ('bad-server','Bad','stdio','{}',2,0,0)",
+            [],
+        ))
+        .is_err());
+
+    repo.with_raw(|conn| {
+        conn.execute(
+            "INSERT INTO mcp_servers(id,name,transport,config_json,enabled,created_at,updated_at) \
+             VALUES ('server','Good','stdio','{}',1,0,0)",
+            [],
+        )
+    })
+    .unwrap();
+    assert!(repo
+        .with_raw(|conn| {
+            conn.execute(
+            "INSERT INTO mcp_tools(server_id,name,input_schema,enabled,version_hash,discovered_at) \
+             VALUES ('server','bad-tool','{}',-1,'v1',0)",
+            [],
+        )
+        })
+        .is_err());
+
+    assert!(repo
+        .with_raw(|conn| conn.execute(
+            "INSERT INTO capability_aliases(capability_id,alias,enabled,updated_at) \
+             VALUES ('cap','alias',2,0)",
+            [],
+        ))
+        .is_err());
+    assert!(repo
+        .with_raw(|conn| conn.execute(
+            "INSERT INTO agent_profiles(id,name,config_json,is_default,updated_at) \
+             VALUES ('profile','Profile','{}',-1,0)",
+            [],
+        ))
+        .is_err());
+}
+
+#[test]
+fn agent_run_delete_cascades_to_events() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.with_raw(|conn| {
+        conn.execute_batch(
+            r#"
+            INSERT INTO agent_runs(id,state,started_at) VALUES ('run','running',0);
+            INSERT INTO agent_events(run_id,seq,kind,payload,created_at)
+              VALUES ('run',1,'started','{}',0);
+            DELETE FROM agent_runs WHERE id='run';
+            "#,
+        )
+    })
+    .unwrap();
+    let count: i64 = repo
+        .with_raw(|conn| conn.query_row("SELECT COUNT(*) FROM agent_events", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn improvement_proposal_delete_cascades_to_approvals() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.with_raw(|conn| {
+        conn.execute_batch(
+            r#"
+            INSERT INTO improvement_proposals(
+              id,target_kind,target_id,patch_json,rationale,status,base_version_hash,created_at,updated_at
+            ) VALUES ('proposal','tool','tool-1','{}','reason','pending','base',0,0);
+            INSERT INTO improvement_approvals(
+              proposal_id,patch_hash,base_version_hash,approver,decision,created_at
+            ) VALUES ('proposal','patch','base','reviewer','approved',0);
+            DELETE FROM improvement_proposals WHERE id='proposal';
+            "#,
+        )
+    })
+    .unwrap();
+    let count: i64 = repo
+        .with_raw(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM improvement_approvals", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]

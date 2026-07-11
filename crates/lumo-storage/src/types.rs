@@ -10,7 +10,9 @@ pub struct AgentRunRow {
     pub plan_json: Option<Value>,
     pub approval_json: Option<Value>,
     pub state: String,
+    /// Run start time, stored as Unix milliseconds.
     pub started_at: DateTime<Utc>,
+    /// Run finish time, stored as Unix milliseconds when present.
     pub finished_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }
@@ -23,6 +25,7 @@ pub struct AgentEventRow {
     pub node_id: Option<String>,
     pub parent_node_id: Option<String>,
     pub payload: Value,
+    /// Event creation time, stored as Unix milliseconds.
     pub created_at: DateTime<Utc>,
 }
 
@@ -44,7 +47,9 @@ pub struct McpServerRow {
     pub config: Value,
     pub enabled: bool,
     pub health: String,
+    /// Server creation time, stored as Unix milliseconds.
     pub created_at: DateTime<Utc>,
+    /// Last server update time, stored as Unix milliseconds.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -58,6 +63,7 @@ pub struct McpToolRow {
     pub risk: String,
     pub enabled: bool,
     pub version_hash: String,
+    /// Tool discovery time, stored as Unix milliseconds.
     pub discovered_at: DateTime<Utc>,
 }
 

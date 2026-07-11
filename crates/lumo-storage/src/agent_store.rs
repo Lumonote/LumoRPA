@@ -129,6 +129,14 @@ impl Repo {
         server_id: &str,
         tools: &[McpToolRow],
     ) -> Result<(), StorageError> {
+        if let Some(tool) = tools.iter().find(|tool| tool.server_id != server_id) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "tool {} belongs to server {}, expected {server_id}",
+                tool.name, tool.server_id
+            ))
+            .into());
+        }
+
         let mut conn = self.inner.lock();
         let tx = conn.transaction()?;
         let server_exists = tx.query_row(
@@ -148,7 +156,7 @@ impl Repo {
             )?;
             for tool in tools {
                 insert.execute(params![
-                    server_id,
+                    tool.server_id,
                     tool.name,
                     tool.description,
                     serde_json::to_string(&tool.input_schema)?,

@@ -129,20 +129,20 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   name TEXT NOT NULL,
   transport TEXT NOT NULL,
   config_json TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   health TEXT NOT NULL DEFAULT 'unknown',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS mcp_tools (
+CREATE TABLE mcp_tools (
   server_id TEXT NOT NULL,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   input_schema TEXT NOT NULL,
   output_schema TEXT,
   risk TEXT NOT NULL DEFAULT 'L0',
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   version_hash TEXT NOT NULL,
   discovered_at INTEGER NOT NULL,
   PRIMARY KEY (server_id, name),
@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS capability_aliases (
   capability_id TEXT NOT NULL,
   alias TEXT NOT NULL,
   examples_json TEXT NOT NULL DEFAULT '[]',
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (capability_id, alias)
 );
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   config_json TEXT NOT NULL,
-  is_default INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
   updated_at INTEGER NOT NULL
 );
 

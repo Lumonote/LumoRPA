@@ -176,6 +176,24 @@ fn replace_mcp_tools_rejects_missing_server_without_rows() {
 }
 
 #[test]
+fn replace_mcp_tools_rejects_mismatched_server_id_and_preserves_existing_tools() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.upsert_mcp_server(&server("Server", "healthy"))
+        .unwrap();
+    repo.replace_mcp_tools("server-1", &[tool("original", "v1")])
+        .unwrap();
+
+    let mut mismatched = tool("replacement", "v2");
+    mismatched.server_id = "server-2".into();
+    assert!(repo.replace_mcp_tools("server-1", &[mismatched]).is_err());
+
+    let preserved = repo.list_mcp_tools("server-1").unwrap();
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(preserved[0].name, "original");
+    assert_eq!(preserved[0].server_id, "server-1");
+}
+
+#[test]
 fn deleting_mcp_server_cascades_to_tools() {
     let repo = Repo::open_in_memory().unwrap();
     repo.upsert_mcp_server(&server("Server", "healthy"))
@@ -216,4 +234,51 @@ fn repository_reopen_preserves_agent_and_mcp_rows() {
     assert_eq!(reopened.list_agent_events("run-1", 0).unwrap().len(), 1);
     assert!(reopened.get_mcp_server("server-1").unwrap().is_some());
     assert_eq!(reopened.list_mcp_tools("server-1").unwrap().len(), 1);
+}
+
+#[test]
+fn malformed_mcp_server_config_returns_storage_error() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.upsert_mcp_server(&server("Server", "healthy"))
+        .unwrap();
+    repo.with_raw(|conn| {
+        conn.execute(
+            "UPDATE mcp_servers SET config_json='{' WHERE id='server-1'",
+            [],
+        )
+    })
+    .unwrap();
+
+    assert!(matches!(
+        repo.get_mcp_server("server-1"),
+        Err(StorageError::Sqlite(_))
+    ));
+}
+
+#[test]
+fn malformed_agent_event_payload_returns_storage_error() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.create_agent_run(&run("run-1")).unwrap();
+    let payload = json!({"valid": true});
+    repo.append_agent_event(AgentEventInsert {
+        run_id: "run-1",
+        seq: 1,
+        kind: "checkpoint",
+        node_id: None,
+        parent_node_id: None,
+        payload: &payload,
+    })
+    .unwrap();
+    repo.with_raw(|conn| {
+        conn.execute(
+            "UPDATE agent_events SET payload='{' WHERE run_id='run-1' AND seq=1",
+            [],
+        )
+    })
+    .unwrap();
+
+    assert!(matches!(
+        repo.list_agent_events("run-1", 0),
+        Err(StorageError::Sqlite(_))
+    ));
 }
