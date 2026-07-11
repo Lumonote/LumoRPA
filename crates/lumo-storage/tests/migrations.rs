@@ -6,8 +6,8 @@ use rusqlite::Connection;
 
 /// Must match `lumo_storage::repo::LATEST_USER_VERSION`. Hard-coded here on
 /// purpose so an accidental change to the migration list trips the test.
-/// v3 (F-19): adds `step_runs.vars_json` for the variable-watch snapshot.
-const EXPECTED_USER_VERSION: i64 = 3;
+/// v4: adds durable agent, MCP, voice, capability, and improvement tables.
+const EXPECTED_USER_VERSION: i64 = 4;
 
 fn make_run(id: &str) -> FlowRunRow {
     FlowRunRow {
@@ -43,6 +43,59 @@ fn fresh_db_is_at_latest_user_version() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lumo.db");
     let _repo = Repo::open(&path).unwrap();
+    assert_eq!(user_version(&path), EXPECTED_USER_VERSION);
+}
+
+#[test]
+fn fresh_db_contains_v4_tables() {
+    let repo = Repo::open_in_memory().unwrap();
+    let expected = [
+        "voice_profiles",
+        "mcp_servers",
+        "mcp_tools",
+        "capability_aliases",
+        "agent_profiles",
+        "agent_runs",
+        "agent_events",
+        "improvement_proposals",
+        "improvement_approvals",
+    ];
+
+    for table in expected {
+        let exists = repo
+            .with_raw(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .unwrap();
+        assert!(exists, "missing v4 table {table}");
+    }
+}
+
+#[test]
+fn version_three_db_is_upgraded_to_v4() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("v3.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+    }
+
+    let repo = Repo::open(&path).unwrap();
+    let has_agent_runs = repo
+        .with_raw(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+        .unwrap();
+    assert!(has_agent_runs);
+    drop(repo);
     assert_eq!(user_version(&path), EXPECTED_USER_VERSION);
 }
 

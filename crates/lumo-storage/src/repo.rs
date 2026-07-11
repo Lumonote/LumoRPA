@@ -26,11 +26,12 @@ use std::{path::Path, sync::Arc};
 ///   2 -> 3: add `step_runs.vars_json` (F-19 variable watch). Guarded ALTER —
 ///           fresh DBs already get the column from the v2 baseline DDL, so the
 ///           ALTER only fires on older v2 DBs that predate it.
-pub const LATEST_USER_VERSION: i64 = 3;
+///   3 -> 4: add durable voice, MCP, capability, agent, and improvement tables.
+pub const LATEST_USER_VERSION: i64 = 4;
 
 #[derive(Clone)]
 pub struct Repo {
-    inner: Arc<Mutex<Connection>>,
+    pub(crate) inner: Arc<Mutex<Connection>>,
 }
 
 impl Repo {
@@ -484,6 +485,7 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         (1, migrate_v1_step_runs_paths),
         (2, migrate_v2_baseline),
         (3, migrate_v3_step_vars),
+        (4, migrate_v4_agent_storage),
     ];
 
     for &(version, step) in steps {
@@ -519,6 +521,11 @@ fn migrate_v3_step_vars(conn: &Connection) -> Result<(), StorageError> {
     if !has_col {
         conn.execute_batch("ALTER TABLE step_runs ADD COLUMN vars_json TEXT;")?;
     }
+    Ok(())
+}
+
+fn migrate_v4_agent_storage(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(schema::V4_DDL)?;
     Ok(())
 }
 

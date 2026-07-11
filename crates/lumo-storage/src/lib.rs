@@ -4,6 +4,7 @@
 //! A `Repo` trait abstracts the backend so libSQL can be plugged in later
 //! without touching call sites.
 
+mod agent_store;
 pub mod error;
 pub mod repo;
 pub mod schema;

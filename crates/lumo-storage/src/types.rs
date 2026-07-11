@@ -1,5 +1,65 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunRow {
+    pub id: String,
+    pub profile_id: Option<String>,
+    pub utterance: Option<String>,
+    pub plan_json: Option<Value>,
+    pub approval_json: Option<Value>,
+    pub state: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEventRow {
+    pub run_id: String,
+    pub seq: i64,
+    pub kind: String,
+    pub node_id: Option<String>,
+    pub parent_node_id: Option<String>,
+    pub payload: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentEventInsert<'a> {
+    pub run_id: &'a str,
+    pub seq: i64,
+    pub kind: &'a str,
+    pub node_id: Option<&'a str>,
+    pub parent_node_id: Option<&'a str>,
+    pub payload: &'a Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerRow {
+    pub id: String,
+    pub name: String,
+    pub transport: String,
+    pub config: Value,
+    pub enabled: bool,
+    pub health: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolRow {
+    pub server_id: String,
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+    pub risk: String,
+    pub enabled: bool,
+    pub version_hash: String,
+    pub discovered_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowRunRow {

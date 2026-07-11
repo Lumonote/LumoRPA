@@ -114,3 +114,105 @@ CREATE TABLE IF NOT EXISTS ai_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_calls_run ON ai_calls(flow_run_id, created_at);
 "#;
+
+/// Schema additions introduced by migration v4. Kept separate from the v2
+/// baseline so existing migration semantics remain unchanged.
+pub const V4_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS voice_profiles (
+  id TEXT PRIMARY KEY,
+  config_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  transport TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  health TEXT NOT NULL DEFAULT 'unknown',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_tools (
+  server_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  input_schema TEXT NOT NULL,
+  output_schema TEXT,
+  risk TEXT NOT NULL DEFAULT 'L0',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  version_hash TEXT NOT NULL,
+  discovered_at INTEGER NOT NULL,
+  PRIMARY KEY (server_id, name),
+  FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS capability_aliases (
+  capability_id TEXT NOT NULL,
+  alias TEXT NOT NULL,
+  examples_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (capability_id, alias)
+);
+
+CREATE TABLE IF NOT EXISTS agent_profiles (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT,
+  utterance TEXT,
+  plan_json TEXT,
+  approval_json TEXT,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_state_started
+  ON agent_runs(state, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_events (
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  node_id TEXT,
+  parent_node_id TEXT,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, seq),
+  FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS improvement_proposals (
+  id TEXT PRIMARY KEY,
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  patch_json TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  status TEXT NOT NULL,
+  base_version_hash TEXT NOT NULL,
+  evaluation_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS improvement_approvals (
+  proposal_id TEXT NOT NULL,
+  patch_hash TEXT NOT NULL,
+  base_version_hash TEXT NOT NULL,
+  approver TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (proposal_id, created_at),
+  FOREIGN KEY (proposal_id) REFERENCES improvement_proposals(id) ON DELETE CASCADE
+);
+"#;
