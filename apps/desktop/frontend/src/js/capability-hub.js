@@ -1,4 +1,5 @@
 import { renderImprovementProposals, runImprovementAction } from "./improvements.js";
+import { buildMcpApplyRequest, renderMcpImportWorkspace } from "./mcp-manager.js";
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -17,7 +18,8 @@ export function renderServerRows(servers = []) {
   if (!servers.length) return emptyRow("No MCP servers configured");
   return servers.map((server) => {
     const health = server.health || server.status || "unknown";
-    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(server.description || `${server.tools ?? 0} tools available`)}</span></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(label(health))}</span></div></article>`;
+    const tools = Array.isArray(server.tools) ? server.tools : [];
+    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(server.description || `${tools.length || server.tools || 0} tools available`)}</span><div class="hub-tool-chips">${tools.slice(0, 6).map((tool) => `<button data-mcp-tool="${escapeHtml(tool.name)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(tool.name)}</button>`).join("")}</div></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(label(health))}</span><button data-mcp-action="test" data-server-id="${escapeHtml(server.id)}">Test</button><button data-mcp-action="discover" data-server-id="${escapeHtml(server.id)}">Discover</button><button data-mcp-action="toggle" data-enabled="${Boolean(server.enabled)}" data-server-id="${escapeHtml(server.id)}">${server.enabled === false ? "Enable" : "Disable"}</button><button data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">Delete</button></div></article>`;
   }).join("");
 }
 
@@ -80,6 +82,29 @@ export function mountCapabilityHub({ call, root }) {
     const importButton = event.target.closest("[data-import-mode]");
     if (importButton) root.querySelector("[data-import-state]").textContent = `${label(importButton.dataset.importMode)} selected — awaiting source input.`;
     if (event.target.closest("[data-open-import]")) root.querySelector("[data-import-wizard]")?.scrollIntoView({ behavior: "smooth" });
+    if (event.target.closest("[data-preview-mcp-import]")) {
+      const preview = await call("preview_mcp_import", { sourceName: root.querySelector("[data-mcp-source-name]").value, content: root.querySelector("[data-mcp-import-content]").value });
+      root.querySelector("[data-mcp-import-preview]").innerHTML = renderMcpImportWorkspace(preview);
+      root.querySelector("[data-import-state]").textContent = `${preview.servers?.length || 0} servers · ${preview.secrets?.length || 0} secrets`;
+    }
+    if (event.target.closest("[data-apply-mcp-import]")) {
+      const previewRoot = root.querySelector("[data-import-token]");
+      const vaultKeys = [...previewRoot.querySelectorAll("[data-secret-vault-key]")];
+      const request = buildMcpApplyRequest({ token: previewRoot.dataset.importToken, serverInputs: [...previewRoot.querySelectorAll("[data-import-server]")].map((input) => ({ id: input.dataset.importServer, checked: input.checked })), secretInputs: vaultKeys.map((input) => ({ serverId: input.dataset.serverId, fieldPath: input.dataset.fieldPath, vaultKey: input.value, value: previewRoot.querySelector(`[data-secret-value][data-server-id="${CSS.escape(input.dataset.serverId)}"][data-field-path="${CSS.escape(input.dataset.fieldPath)}"]`)?.value })) });
+      data.servers = await call("apply_mcp_import", request);
+      active = "servers"; render();
+    }
+    const mcpAction = event.target.closest("[data-mcp-action]");
+    if (mcpAction) {
+      const id = mcpAction.dataset.serverId;
+      if (mcpAction.dataset.mcpAction === "test") await call("test_mcp_server", { id });
+      if (mcpAction.dataset.mcpAction === "discover") await call("discover_mcp_tools", { id });
+      if (mcpAction.dataset.mcpAction === "toggle") await call("set_mcp_server_enabled", { id, enabled: mcpAction.dataset.enabled !== "true" });
+      if (mcpAction.dataset.mcpAction === "delete") await call("delete_mcp_server", { id });
+      data.servers = await call("list_mcp_servers"); render();
+    }
+    const tool = event.target.closest("[data-mcp-tool]");
+    if (tool) await call("call_mcp_tool", { id: tool.dataset.serverId, tool: tool.dataset.mcpTool, arguments: {} });
     const improvement = event.target.closest("[data-improvement-action]");
     if (improvement) {
       improvement.disabled = true;
