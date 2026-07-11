@@ -472,6 +472,10 @@ type MigrationStep = fn(&Connection) -> Result<(), StorageError>;
 /// applies every step with `version > current` in order, then stamps the DB to
 /// the highest applied version. Fresh DBs start at 0 and get the full chain.
 fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
+    run_migrations_with_v4_ddl(conn, schema::V4_DDL)
+}
+
+fn run_migrations_with_v4_ddl(conn: &Connection, v4_ddl: &str) -> Result<(), StorageError> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current >= LATEST_USER_VERSION {
         return Ok(());
@@ -487,13 +491,15 @@ fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
         (1, migrate_v1_step_runs_paths),
         (2, migrate_v2_baseline),
         (3, migrate_v3_step_vars),
-        (4, migrate_v4_agent_storage),
     ];
 
     for &(version, step) in steps {
         if version > current {
             step(&tx)?;
         }
+    }
+    if current < 4 {
+        migrate_v4_agent_storage(&tx, v4_ddl)?;
     }
 
     // PRAGMA user_version does not accept bound parameters; the value is a
@@ -527,8 +533,8 @@ fn migrate_v3_step_vars(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn migrate_v4_agent_storage(conn: &Connection) -> Result<(), StorageError> {
-    conn.execute_batch(schema::V4_DDL)?;
+fn migrate_v4_agent_storage(conn: &Connection, ddl: &str) -> Result<(), StorageError> {
+    conn.execute_batch(ddl)?;
     Ok(())
 }
 
@@ -612,4 +618,34 @@ fn json_opt(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<serd
 fn ts_opt(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<DateTime<Utc>>> {
     let v: Option<i64> = row.get(idx)?;
     Ok(v.and_then(|ms| Utc.timestamp_millis_opt(ms).single()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_v4_batch_rolls_back_schema_and_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+
+        let failing_v4 = r#"
+            CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY);
+            CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY);
+        "#;
+        assert!(run_migrations_with_v4_ddl(&conn, failing_v4).is_err());
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let probe_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='rollback_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!probe_exists);
+    }
 }

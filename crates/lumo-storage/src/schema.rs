@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE mcp_tools (
+CREATE TABLE IF NOT EXISTS mcp_tools (
   server_id TEXT NOT NULL,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',

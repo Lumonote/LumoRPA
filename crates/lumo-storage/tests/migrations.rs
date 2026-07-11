@@ -84,10 +84,28 @@ fn version_three_db_is_upgraded_to_v4() {
         conn.execute_batch(
             r#"
             CREATE TABLE flow_runs (
-              id TEXT PRIMARY KEY,
-              state TEXT NOT NULL
+              id              TEXT PRIMARY KEY,
+              flow_id         TEXT NOT NULL,
+              flow_version    TEXT NOT NULL,
+              trigger_kind    TEXT NOT NULL,
+              inputs          TEXT NOT NULL,
+              outputs         TEXT,
+              state           TEXT NOT NULL,
+              worker_id       TEXT,
+              started_at      INTEGER,
+              finished_at     INTEGER,
+              cost_token      INTEGER NOT NULL DEFAULT 0,
+              cost_usd_micro  INTEGER NOT NULL DEFAULT 0,
+              trace_id        TEXT
             );
-            INSERT INTO flow_runs(id, state) VALUES ('legacy-run', 'ok');
+            INSERT INTO flow_runs(
+              id,flow_id,flow_version,trigger_kind,inputs,outputs,state,worker_id,
+              started_at,finished_at,cost_token,cost_usd_micro,trace_id
+            ) VALUES (
+              'legacy-run','legacy-flow','1.2.3','manual','{"legacy":true}',
+              '{"done":true}','ok','worker-1',1720000000123,1720000001123,
+              17,23,'trace-1'
+            );
             PRAGMA user_version = 3;
             "#,
         )
@@ -102,56 +120,31 @@ fn version_three_db_is_upgraded_to_v4() {
                 [],
                 |row| row.get::<_, bool>(0),
             )
-        })
-        .unwrap();
+    })
+    .unwrap();
     assert!(has_agent_runs);
-    let legacy_state: String = repo
-        .with_raw(|conn| {
-            conn.query_row(
-                "SELECT state FROM flow_runs WHERE id='legacy-run'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .unwrap();
-    assert_eq!(legacy_state, "ok");
+    let legacy = repo.get_run("legacy-run").unwrap().unwrap();
+    assert_eq!(legacy.id, "legacy-run");
+    assert_eq!(legacy.flow_id, "legacy-flow");
+    assert_eq!(legacy.flow_version, "1.2.3");
+    assert_eq!(legacy.trigger_kind, "manual");
+    assert_eq!(legacy.inputs, serde_json::json!({"legacy": true}));
+    assert_eq!(legacy.outputs, Some(serde_json::json!({"done": true})));
+    assert_eq!(legacy.state, "ok");
+    assert_eq!(legacy.worker_id.as_deref(), Some("worker-1"));
+    assert_eq!(
+        legacy.started_at.unwrap().timestamp_millis(),
+        1_720_000_000_123
+    );
+    assert_eq!(
+        legacy.finished_at.unwrap().timestamp_millis(),
+        1_720_000_001_123
+    );
+    assert_eq!(legacy.cost_token, 17);
+    assert_eq!(legacy.cost_usd_micro, 23);
+    assert_eq!(legacy.trace_id.as_deref(), Some("trace-1"));
     drop(repo);
     assert_eq!(user_version(&path), EXPECTED_USER_VERSION);
-}
-
-#[test]
-fn failed_v4_migration_rolls_back_schema_and_version() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("broken-v4.db");
-    {
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE VIEW mcp_tools AS SELECT 1 AS placeholder;
-            PRAGMA user_version = 3;
-            "#,
-        )
-        .unwrap();
-    }
-
-    assert!(Repo::open(&path).is_err());
-
-    let conn = Connection::open(&path).unwrap();
-    let version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 3, "failed migration must not stamp v4");
-    let voice_profiles_exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='voice_profiles')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        !voice_profiles_exists,
-        "earlier v4 DDL must roll back when a later statement fails"
-    );
 }
 
 #[test]
