@@ -1,0 +1,12 @@
+[package]
+name = "lumo-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Unified capability descriptors for the LumoRPA agent platform"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

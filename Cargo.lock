@@ -3783,6 +3783,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumo-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "lumo-ai"
 version = "0.1.0"
 dependencies = [
