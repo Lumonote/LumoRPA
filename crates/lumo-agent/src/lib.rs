@@ -3,6 +3,7 @@ mod catalog;
 mod mcp_import;
 mod mcp_profile;
 mod profile;
+mod skill_manager;
 
 pub use capability::{CapabilityDescriptor, CapabilitySource, RiskLevel};
 pub use catalog::{
@@ -17,3 +18,4 @@ pub use profile::{
     validate as validate_profile, AgentProfile, AgentProfileDraft, PermissionDecision,
     PermissionRule, ProfileError,
 };
+pub use skill_manager::{SkillManager, SkillManagerError, SkillValidationReport, SkillVersion};
