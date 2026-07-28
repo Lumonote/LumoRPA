@@ -31,6 +31,46 @@ async fn zip_then_unzip_round_trips_content() {
 }
 
 #[tokio::test]
+async fn password_protected_zip_round_trips_and_rejects_wrong_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("secret.txt");
+    std::fs::write(&src, "classified").unwrap();
+    let archive = dir.path().join("secret.zip");
+    let caps = fs_caps(dir.path());
+    ok_with(
+        "archive.zip",
+        json!({"paths": [src], "dest": archive, "password": "correct horse"}),
+        caps.clone(),
+    )
+    .await;
+
+    let wrong = dir.path().join("wrong");
+    let err = run_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": wrong, "password": "wrong"}),
+        caps.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("password") || err.contains("decrypt"),
+        "got: {err}"
+    );
+
+    let out = dir.path().join("correct");
+    ok_with(
+        "archive.unzip",
+        json!({"src": archive, "dest": out, "password": "correct horse"}),
+        caps,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(out.join("secret.txt")).unwrap(),
+        "classified"
+    );
+}
+
+#[tokio::test]
 async fn zip_requires_at_least_one_path() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("empty.zip");

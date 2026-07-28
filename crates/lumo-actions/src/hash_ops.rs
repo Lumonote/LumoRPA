@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
+use std::path::PathBuf;
 
 pub fn register(r: &mut ActionRegistry) {
     r.register(Sha256Action);
@@ -30,10 +31,41 @@ fn text_schema() -> &'static Value {
     &S
 }
 
+fn hash_schema() -> &'static Value {
+    static S: Lazy<Value> = Lazy::new(crate::schema::derive::<HashIn>);
+    &S
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TextIn {
     text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct HashIn {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
+async fn hash_input(ctx: &StepCtx, action: &str, input: Value) -> Result<Vec<u8>, StepError> {
+    let HashIn { text, path } = serde_json::from_value(input)
+        .map_err(|e| StepError::msg(format!("{action} invalid: {e}")))?;
+    match (text, path) {
+        (Some(text), None) => Ok(text.into_bytes()),
+        (None, Some(path)) => {
+            ctx.ensure_fs_read(&path)?;
+            tokio::fs::read(&path)
+                .await
+                .map_err(|e| StepError::io(format!("{action} read {}: {e}", path.display())))
+        }
+        _ => Err(StepError::msg(format!(
+            "{action}: provide exactly one of `text` or `path`"
+        ))),
+    }
 }
 
 pub struct Sha256Action;
@@ -46,13 +78,12 @@ impl Action for Sha256Action {
         "SHA-256 hex digest of `text`"
     }
     fn schema(&self) -> &'static Value {
-        text_schema()
+        hash_schema()
     }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let TextIn { text } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("hash.sha256 invalid: {e}")))?;
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let bytes = hash_input(ctx, self.id(), input).await?;
         let mut h = <Sha256 as sha2::Digest>::new();
-        sha2::Digest::update(&mut h, text.as_bytes());
+        sha2::Digest::update(&mut h, &bytes);
         let bytes = sha2::Digest::finalize(h);
         Ok(ActionResult::from(Value::String(hex(&bytes))))
     }
@@ -68,13 +99,12 @@ impl Action for Sha512Action {
         "SHA-512 hex digest of `text`"
     }
     fn schema(&self) -> &'static Value {
-        text_schema()
+        hash_schema()
     }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let TextIn { text } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("hash.sha512 invalid: {e}")))?;
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let bytes = hash_input(ctx, self.id(), input).await?;
         let mut h = <Sha512 as sha2::Digest>::new();
-        sha2::Digest::update(&mut h, text.as_bytes());
+        sha2::Digest::update(&mut h, &bytes);
         let bytes = sha2::Digest::finalize(h);
         Ok(ActionResult::from(Value::String(hex(&bytes))))
     }
@@ -90,13 +120,12 @@ impl Action for Sha1Action {
         "SHA-1 hex digest of `text` (legacy)"
     }
     fn schema(&self) -> &'static Value {
-        text_schema()
+        hash_schema()
     }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let TextIn { text } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("hash.sha1 invalid: {e}")))?;
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let bytes = hash_input(ctx, self.id(), input).await?;
         let mut h = <Sha1 as sha1::Digest>::new();
-        sha1::Digest::update(&mut h, text.as_bytes());
+        sha1::Digest::update(&mut h, &bytes);
         let bytes = sha1::Digest::finalize(h);
         Ok(ActionResult::from(Value::String(hex(&bytes))))
     }
@@ -112,13 +141,12 @@ impl Action for Md5Action {
         "MD5 hex digest of `text` (legacy)"
     }
     fn schema(&self) -> &'static Value {
-        text_schema()
+        hash_schema()
     }
-    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let TextIn { text } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("hash.md5 invalid: {e}")))?;
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let bytes = hash_input(ctx, self.id(), input).await?;
         let mut h = md5::Md5::new();
-        h.update(text.as_bytes());
+        h.update(&bytes);
         let bytes = h.finalize();
         Ok(ActionResult::from(Value::String(hex(&bytes))))
     }

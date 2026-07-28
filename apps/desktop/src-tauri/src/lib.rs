@@ -18,11 +18,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap, HashMap},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -31,22 +31,46 @@ use tauri::{
 };
 
 mod agent_commands;
+mod agent_management_commands;
 mod agent_service;
+mod desktop_update_commands;
+mod dto;
+mod element_library;
+mod execution;
+mod features_data;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
+mod paths;
+mod prompter;
+mod registry;
+mod recording;
+mod run_progress;
 mod security_commands;
+mod skill_commands;
+mod state;
 #[allow(dead_code)]
 mod update_commands;
 mod voice_commands;
 mod voice_daemon;
+mod voice_intents;
 mod voice_model_commands;
+mod voice_persona;
 
 use agent_commands::{
     agent_approve, agent_cancel, agent_events, agent_pause, agent_restore, agent_resume,
-    agent_start, setup_agent_service, DesktopAgentRuntime,
+    agent_run_list, agent_start, setup_agent_service, DesktopAgentRuntime,
+};
+use agent_management_commands::{
+    approve_improvement, evaluate_improvement, list_agent_profiles, list_improvement_proposals,
+    reject_improvement, rollback_improvement,
 };
 use agent_service::DesktopAgentService;
+use desktop_update_commands::{
+    desktop_update_check, desktop_update_install, desktop_update_restart, desktop_update_status,
+};
+use execution::{execute_flow, DebugOpts};
+use features_data::{feature_map_data, FeatureSection};
 use job_commands::{
     job_cancel, job_list, job_pause, job_resume, job_schedule, setup_job_worker, JobRuntime,
 };
@@ -56,16 +80,27 @@ use mcp_commands::{
     preview_mcp_import, set_mcp_server_enabled, set_mcp_tool_enabled, test_mcp_server,
 };
 use mcp_supervisor::McpSupervisorRuntime;
+use dto::*;
+use element_library::*;
+use paths::*;
+use recording::*;
+use registry::*;
+use prompter::{desktop_prompter, human_respond};
 use security_commands::{
     security_biometric_challenge as security_biometric_challenge_at,
     security_export_audit as security_export_audit_at, security_list as security_list_at,
     security_revoke as security_revoke_at, DesktopSecurityRuntime, SecuritySnapshotDto,
 };
+use skill_commands::{
+    skill_activate, skill_import_git, skill_import_local, skill_rollback, skill_set_enabled,
+    skill_validate, skill_versions,
+};
+use state::{CancelMap, DesktopState, PromptMap, RecorderSession};
 use voice_commands::{
-    handle_global_shortcut, setup_voice_daemon, setup_voice_host, voice_configure,
-    voice_daemon_resume, voice_daemon_set_device, voice_daemon_set_enabled,
+    handle_global_shortcut, setup_voice_daemon, setup_voice_host, voice_command_history,
+    voice_configure, voice_daemon_resume, voice_daemon_set_device, voice_daemon_set_enabled,
     voice_daemon_set_muted, voice_daemon_status, voice_daemon_suspend, voice_devices,
-    voice_start_listening, voice_status, voice_stop, VoiceRuntime,
+    voice_start_listening, voice_status, voice_stop, voice_tts_preview, VoiceRuntime,
 };
 use voice_daemon::VoiceDaemon;
 use voice_model_commands::{
@@ -74,34 +109,10 @@ use voice_model_commands::{
 
 type AppHandle = tauri::AppHandle<Wry>;
 
-// ─── Shared mutable state ───────────────────────────────────────────────────
-
-#[derive(Default)]
-struct DesktopState {
-    recorder: Mutex<RecorderSlot>,
-    /// P0-1：运行中 flow 的取消句柄表，键为引擎落库的 run_id。每次运行由
-    /// `execute_flow` 自注册/自清理，`cancel_run` 只查表触发 —— 与
-    /// `RecorderSlot` 一样靠 Mutex 串行化并发访问。
-    cancels: CancelMap,
-    /// P1（人机交互）：等待前端回执的 human prompt 表，键为 prompt_id。
-    /// `TauriPrompter::prompt` 注册 oneshot 发送端并 emit `human-prompt`
-    /// 事件，`human_respond` 命令摘出发送端投递回执；等待方先行退出
-    /// （超时/取消，RAII 自清理）后，迟到的回执自然落到 ok=false。
-    prompts: PromptMap,
-    pending_mcp_imports: Mutex<HashMap<String, lumo_agent::McpImportBatch>>,
-    mcp: Mutex<McpSupervisorRuntime>,
-    security: DesktopSecurityRuntime,
-    voice: Mutex<VoiceRuntime>,
-    voice_daemon: Mutex<VoiceDaemon>,
-    agent: Mutex<DesktopAgentRuntime>,
-    agent_service: Mutex<Option<Arc<DesktopAgentService>>>,
-    jobs: Mutex<JobRuntime>,
-    voice_models: Mutex<VoiceModelRuntime>,
-}
-
-/// P0-1：跨命令共享的取消句柄表。包一层 Arc 是因为 `execute_flow` 在测试里
-/// 脱离 tauri `State` 直接驱动（见 `cancel_timeout_tests`），需要可独立持有。
-type CancelMap = Arc<Mutex<HashMap<String, CancelToken>>>;
+/// P2-3：进程级 AppHandle，setup 阶段注入一次。注册表缓存构建深处（无 tauri
+/// State 可拿）用它把 skills 加载失败以 `lumo://toast` 事件透给前端；测试
+/// 路径不经过 setup ⇒ 保持为空 ⇒ 静默跳过 emit。
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 #[tauri::command]
 fn security_list(state: State<'_, DesktopState>) -> Result<SecuritySnapshotDto, String> {
@@ -129,314 +140,7 @@ fn security_biometric_challenge(
     security_biometric_challenge_at(&state.security, request, chrono::Utc::now())
 }
 
-/// P1（人机交互）：跨命令共享的 human prompt 回执表（语义见 `DesktopState`）。
-type PromptMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>>;
 
-#[derive(Default)]
-struct RecorderSlot {
-    active: Option<RecorderSession>,
-}
-
-struct RecorderSession {
-    recorder: Arc<dyn Recorder>,
-    started_at: chrono::DateTime<chrono::Utc>,
-    target: String,
-    backend: String,
-    forwarder: Option<tokio::task::JoinHandle<()>>,
-}
-
-// ─── DTOs ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AppInfo {
-    version: String,
-    data_dir: String,
-    resource_dir: Option<String>,
-    examples_dir: Option<String>,
-    providers_path: String,
-    skills_path: String,
-    platform: String,
-    arch: String,
-    network_enabled: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IoDeclDto {
-    name: String,
-    #[serde(rename = "type")]
-    kind: String,
-    required: bool,
-    default: Option<Value>,
-    description: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FlowSummary {
-    path: String,
-    file_name: String,
-    id: Option<String>,
-    version: Option<String>,
-    name: Option<String>,
-    description: Option<String>,
-    tags: Vec<String>,
-    inputs: Vec<IoDeclDto>,
-    outputs: Vec<IoDeclDto>,
-    step_count: usize,
-    valid: bool,
-    error: Option<String>,
-    /// `"user"` (saved by the operator) / `"recording"` (recorder output)
-    /// / `"example"` (bundled). Defaults to `"user"` when scanned via the
-    /// bare flow_summary helper; the library scanner overrides per source.
-    #[serde(default)]
-    source: String,
-    /// File modification time as a unix-ms timestamp. Lets the library sort
-    /// recently-touched flows to the top.
-    #[serde(default)]
-    updated_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ValidationReport {
-    path: String,
-    id: String,
-    version: String,
-    name: Option<String>,
-    description: Option<String>,
-    tags: Vec<String>,
-    inputs: Vec<IoDeclDto>,
-    outputs: Vec<IoDeclDto>,
-    capabilities: Value,
-    step_count: usize,
-    warnings: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ActionDto {
-    id: String,
-    family: String,
-    summary: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunReportDto {
-    run_id: String,
-    success: bool,
-    steps_total: usize,
-    steps_ok: usize,
-    steps_executed: usize,
-    steps_failed: usize,
-    steps_skipped: usize,
-    steps_retried: usize,
-    steps_caught: usize,
-    duration_ms: u128,
-    outputs: Option<Value>,
-    /// F-20: when the run paused at a breakpoint / single-step, the path of the
-    /// step it paused before. `None` for runs that completed/failed/cancelled.
-    paused_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunDto {
-    id: String,
-    flow_id: String,
-    flow_version: String,
-    trigger_kind: String,
-    inputs: Value,
-    outputs: Option<Value>,
-    state: String,
-    started_at: Option<String>,
-    finished_at: Option<String>,
-    duration_ms: Option<i64>,
-    cost_token: i64,
-    cost_usd_micro: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StepRunDto {
-    seq: i64,
-    path: String,
-    parent_path: Option<String>,
-    depth: i64,
-    step_id: String,
-    idx: i64,
-    state: String,
-    attempt: i64,
-    output_json: Option<Value>,
-    vars_json: Option<Value>,
-    error: Option<String>,
-    started_at: Option<String>,
-    finished_at: Option<String>,
-    duration_ms: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunResponse {
-    report: RunReportDto,
-    run: Option<RunDto>,
-    steps: Vec<StepRunDto>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunDetail {
-    run: RunDto,
-    steps: Vec<StepRunDto>,
-}
-
-/// X-07 Time-Travel: a single artifact blob streamed back to the webview as a
-/// base64 data URL so `<img>` / `<iframe>` can render it directly.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ArtifactBlobDto {
-    id: String,
-    mime: String,
-    data_url: String,
-    size: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderProfileDto {
-    name: String,
-    kind: String,
-    wire_api: Option<String>,
-    default_model: Option<String>,
-    vision_model: Option<String>,
-    ocr_model: Option<String>,
-    base_url: Option<String>,
-    api_key_env: Option<String>,
-    has_inline_key: bool,
-    has_key: bool,
-    reasoning_effort: Option<String>,
-    models: Vec<String>,
-    headers: BTreeMap<String, String>,
-    notes: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderStatus {
-    path: String,
-    active: Option<String>,
-    profiles: Vec<ProviderProfileDto>,
-    network_enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderInput {
-    name: String,
-    kind: String,
-    #[serde(default)]
-    wire_api: Option<String>,
-    #[serde(default)]
-    base_url: Option<String>,
-    #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default)]
-    api_key_env: Option<String>,
-    #[serde(default)]
-    default_model: Option<String>,
-    vision_model: Option<String>,
-    ocr_model: Option<String>,
-    #[serde(default)]
-    models: Vec<String>,
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default)]
-    notes: Option<String>,
-    /// When true, mark this profile as active after upsert.
-    #[serde(default)]
-    activate: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderTestResult {
-    ok: bool,
-    provider: Option<String>,
-    model: Option<String>,
-    content: Option<String>,
-    input_tokens: u32,
-    output_tokens: u32,
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillDto {
-    name: String,
-    description: Option<String>,
-    version: Option<String>,
-    tags: Vec<String>,
-    source: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppearanceOptions {
-    /// Panel alpha (0-100, percentage applied to white).
-    opacity: u8,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WindowAlphaOptions {
-    /// 0..=255 alpha applied to the window background color. 0 = fully clear,
-    /// 255 = fully opaque. Sliders use the full range.
-    alpha: u8,
-    /// Optional tinted background color (RGB). Defaults to white-ish so the
-    /// platform vibrancy is preserved.
-    #[serde(default)]
-    rgb: Option<[u8; 3]>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RecorderStatus {
-    recording: bool,
-    target: Option<String>,
-    started_at: Option<String>,
-    backend: String,
-    note: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RecorderStopResult {
-    events: usize,
-    note: String,
-    yaml_hint: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FeatureStatus {
-    id: String,
-    title: String,
-    stage: String,
-    status: String, // "ready" | "partial" | "planned"
-    note: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FeatureSection {
-    id: String,
-    title: String,
-    items: Vec<FeatureStatus>,
-}
 
 // ─── Tauri commands ─────────────────────────────────────────────────────────
 
@@ -602,301 +306,6 @@ fn sanitize_flow_name(name: &str) -> String {
         .collect()
 }
 
-/// Wrap the recorder's `events_to_yaml_patch` fragment into a complete
-/// LumoFlow doc so the user can hit ▶ on the result without hand-editing.
-/// The fragment is parsed and sanitized instead of text-spliced so empty list
-/// entries and schema-unknown recorder notes cannot leak into saved flows.
-fn wrap_recording_fragment(name: &str, fragment: &str) -> Result<String, String> {
-    let id = sanitize_flow_name(name);
-    let id = if id.is_empty() {
-        "recording".into()
-    } else {
-        id
-    };
-    let steps = sanitize_recording_fragment_steps(fragment)?;
-    let doc = recording_flow_doc(&id, steps);
-    let _: Flow = serde_yaml::from_value(doc.clone())
-        .map_err(|e| format!("recording flow invalid after sanitize: {e}"))?;
-    serde_yaml::to_string(&doc).map_err(|e| format!("yaml serialize: {e}"))
-}
-
-fn sanitize_recording_fragment_steps(fragment: &str) -> Result<Vec<YamlValue>, String> {
-    let parsed: YamlValue =
-        serde_yaml::from_str(fragment).map_err(|e| format!("yaml parse: {e}"))?;
-    let seq = match parsed {
-        YamlValue::Sequence(seq) => seq,
-        YamlValue::Null => Vec::new(),
-        _ => return Ok(Vec::new()),
-    };
-    let mut seen = std::collections::BTreeSet::new();
-    Ok(seq
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, step)| sanitize_recording_step(step, idx, &mut seen))
-        .collect())
-}
-
-fn sanitize_recording_step(
-    value: YamlValue,
-    idx: usize,
-    seen: &mut std::collections::BTreeSet<String>,
-) -> Option<YamlValue> {
-    let raw = value.as_mapping()?;
-    let action = yaml_string(raw, "action")?;
-    let with = sanitize_recording_with(&action, raw.get(yaml_key("with")))?;
-    let fallback_id = format!(
-        "{}_{}",
-        action.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
-        idx + 1
-    );
-    let id = unique_recording_step_id(yaml_string(raw, "id").unwrap_or(fallback_id), seen);
-
-    let mut clean = YamlMapping::new();
-    clean.insert(yaml_key("id"), YamlValue::String(id));
-    clean.insert(yaml_key("action"), YamlValue::String(action));
-    if let Some(when) = yaml_string(raw, "when") {
-        clean.insert(yaml_key("when"), YamlValue::String(when));
-    }
-    if let Some(bind) = yaml_string(raw, "bind") {
-        clean.insert(yaml_key("bind"), YamlValue::String(bind));
-    }
-    if let Some(retry) = raw.get(yaml_key("retry")).and_then(prune_yaml_value) {
-        clean.insert(yaml_key("retry"), retry);
-    }
-    if let Some(ai) = raw.get(yaml_key("ai")).and_then(prune_yaml_value) {
-        clean.insert(yaml_key("ai"), ai);
-    }
-    if !with.is_empty() {
-        clean.insert(yaml_key("with"), YamlValue::Mapping(with));
-    }
-
-    let clean_value = YamlValue::Mapping(clean);
-    serde_yaml::from_value::<Step>(clean_value.clone()).ok()?;
-    Some(clean_value)
-}
-
-fn sanitize_recording_with(action: &str, raw: Option<&YamlValue>) -> Option<YamlMapping> {
-    let empty = YamlMapping::new();
-    let with = raw.and_then(YamlValue::as_mapping).unwrap_or(&empty);
-    match action {
-        "browser.open" => {
-            let url = yaml_string(with, "url")?;
-            let mut out = YamlMapping::new();
-            out.insert(yaml_key("url"), YamlValue::String(url));
-            copy_yaml_bool(&mut out, with, "headless");
-            copy_yaml_string(&mut out, with, "wait_for");
-            copy_yaml_number(&mut out, with, "timeout_ms");
-            Some(out)
-        }
-        "browser.click" => {
-            let mut out = selector_with(with)?;
-            copy_yaml_string(&mut out, with, "prompt");
-            copy_yaml_string(&mut out, with, "model");
-            copy_yaml_number(&mut out, with, "timeout_ms");
-            Some(out)
-        }
-        "browser.type" => {
-            let mut out = selector_with(with)?;
-            let text = yaml_string_preserve(with, "text")?;
-            if text.is_empty() {
-                return None;
-            }
-            out.insert(yaml_key("text"), YamlValue::String(text));
-            copy_yaml_bool(&mut out, with, "clear");
-            copy_yaml_string(&mut out, with, "prompt");
-            copy_yaml_string(&mut out, with, "model");
-            copy_yaml_number(&mut out, with, "timeout_ms");
-            Some(out)
-        }
-        "browser.extract" => {
-            let selector = yaml_string(with, "selector")?;
-            let mut out = YamlMapping::new();
-            out.insert(yaml_key("selector"), YamlValue::String(selector));
-            copy_yaml_bool(&mut out, with, "all");
-            copy_yaml_string(&mut out, with, "attr");
-            copy_yaml_number(&mut out, with, "timeout_ms");
-            if let Some(map) = with.get(yaml_key("map")).and_then(prune_yaml_value) {
-                out.insert(yaml_key("map"), map);
-            }
-            if let Some(frame) = with.get(yaml_key("frame")).and_then(prune_yaml_value) {
-                out.insert(yaml_key("frame"), frame);
-            }
-            Some(out)
-        }
-        _ => raw
-            .and_then(prune_yaml_value)
-            .and_then(|v| match v {
-                YamlValue::Mapping(map) => Some(map),
-                _ => None,
-            })
-            .or_else(|| Some(YamlMapping::new())),
-    }
-}
-
-fn selector_with(with: &YamlMapping) -> Option<YamlMapping> {
-    let mut out = YamlMapping::new();
-    copy_yaml_string(&mut out, with, "selector");
-    if let Some(selectors) = with
-        .get(yaml_key("selectors"))
-        .and_then(YamlValue::as_mapping)
-        .map(sanitize_selectors)
-        .filter(|m| !m.is_empty())
-    {
-        out.insert(yaml_key("selectors"), YamlValue::Mapping(selectors));
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-fn sanitize_selectors(selectors: &YamlMapping) -> YamlMapping {
-    let mut out = YamlMapping::new();
-    for key in [
-        "id",
-        "data_testid",
-        "css",
-        "aria_label",
-        "text_includes",
-        "xpath",
-    ] {
-        copy_yaml_string(&mut out, selectors, key);
-    }
-    out
-}
-
-fn prune_yaml_value(value: &YamlValue) -> Option<YamlValue> {
-    match value {
-        YamlValue::Null => None,
-        YamlValue::String(s) => {
-            if s.trim().is_empty() {
-                None
-            } else {
-                Some(YamlValue::String(s.clone()))
-            }
-        }
-        YamlValue::Sequence(seq) => {
-            let pruned: Vec<_> = seq.iter().filter_map(prune_yaml_value).collect();
-            if pruned.is_empty() {
-                None
-            } else {
-                Some(YamlValue::Sequence(pruned))
-            }
-        }
-        YamlValue::Mapping(map) => {
-            let mut pruned = YamlMapping::new();
-            for (key, value) in map {
-                if let Some(value) = prune_yaml_value(value) {
-                    pruned.insert(key.clone(), value);
-                }
-            }
-            if pruned.is_empty() {
-                None
-            } else {
-                Some(YamlValue::Mapping(pruned))
-            }
-        }
-        _ => Some(value.clone()),
-    }
-}
-
-fn recording_flow_doc(id: &str, steps: Vec<YamlValue>) -> YamlValue {
-    let mut metadata = YamlMapping::new();
-    metadata.insert(yaml_key("id"), YamlValue::String(id.to_string()));
-    metadata.insert(yaml_key("version"), YamlValue::String("0.1.0".into()));
-    metadata.insert(yaml_key("name"), YamlValue::String(format!("录制 · {id}")));
-    metadata.insert(
-        yaml_key("tags"),
-        YamlValue::Sequence(vec![YamlValue::String("recording".into())]),
-    );
-
-    let mut capabilities = YamlMapping::new();
-    capabilities.insert(
-        yaml_key("network"),
-        YamlValue::Sequence(vec![YamlValue::String("*".into())]),
-    );
-
-    let mut spec = YamlMapping::new();
-    spec.insert(yaml_key("capabilities"), YamlValue::Mapping(capabilities));
-    spec.insert(yaml_key("steps"), YamlValue::Sequence(steps));
-
-    let mut doc = YamlMapping::new();
-    doc.insert(
-        yaml_key("apiVersion"),
-        YamlValue::String("lumorpa.io/v1".into()),
-    );
-    doc.insert(yaml_key("kind"), YamlValue::String("Flow".into()));
-    doc.insert(yaml_key("metadata"), YamlValue::Mapping(metadata));
-    doc.insert(yaml_key("spec"), YamlValue::Mapping(spec));
-    YamlValue::Mapping(doc)
-}
-
-fn yaml_key(key: &str) -> YamlValue {
-    YamlValue::String(key.to_string())
-}
-
-fn yaml_string(map: &YamlMapping, key: &str) -> Option<String> {
-    yaml_string_preserve(map, key).and_then(|s| {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn yaml_string_preserve(map: &YamlMapping, key: &str) -> Option<String> {
-    map.get(yaml_key(key))
-        .and_then(YamlValue::as_str)
-        .map(str::to_string)
-}
-
-fn copy_yaml_string(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
-    if let Some(value) = yaml_string(src, key) {
-        out.insert(yaml_key(key), YamlValue::String(value));
-    }
-}
-
-fn copy_yaml_bool(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
-    if let Some(value) = src.get(yaml_key(key)).and_then(YamlValue::as_bool) {
-        out.insert(yaml_key(key), YamlValue::Bool(value));
-    }
-}
-
-fn copy_yaml_number(out: &mut YamlMapping, src: &YamlMapping, key: &str) {
-    if let Some(value) = src.get(yaml_key(key)) {
-        if matches!(value, YamlValue::Number(_)) {
-            out.insert(yaml_key(key), value.clone());
-        }
-    }
-}
-
-fn unique_recording_step_id(raw: String, seen: &mut std::collections::BTreeSet<String>) -> String {
-    let mut clean: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    clean = clean.trim_matches('_').to_string();
-    if clean.is_empty() {
-        clean = "recorded_step".into();
-    }
-    let base = clean.clone();
-    let mut n = 2;
-    while seen.contains(&clean) {
-        clean = format!("{base}_{n}");
-        n += 1;
-    }
-    seen.insert(clean.clone());
-    clean
-}
 
 /// Save the recorder's last output as a complete flow under the recordings
 /// folder. Returns the new file path so the library can refresh + select it.
@@ -1209,15 +618,6 @@ async fn debug_flow(
     .await
 }
 
-/// P1（人机交互）：为一次运行构造桌面宿主的 prompter（事件 + 回执表均挂在
-/// 共享 `DesktopState` 上，`human_respond` 命令与之同源）。
-fn desktop_prompter(app: &AppHandle, state: &State<'_, DesktopState>) -> Arc<dyn HumanPrompter> {
-    Arc::new(TauriPrompter {
-        app: app.clone(),
-        prompts: state.prompts.clone(),
-    })
-}
-
 /// P0-1：`cancel_run` 的返回。`ok=false` 表示该 run 不存在或已结束 —— 取消
 /// 与运行结束天然存在竞态，前端只需提示"已无可取消的运行"，不必当错误处理。
 #[derive(Debug, Serialize)]
@@ -1249,140 +649,6 @@ fn cancel_run_inner(cancels: &CancelMap, run_id: &str) -> bool {
             true
         }
         None => false,
-    }
-}
-
-// ─── P1（人机交互）：human-prompt 事件 + human_respond 回执 ─────────────────
-
-/// emit 给前端的 `human-prompt` 事件载荷。前端 `listen("human-prompt", …)`
-/// 弹窗收集回答后调 `human_respond(promptId, value)` 投递回执；`value` 形状：
-/// input → string，confirm/approve → bool，approve 也可给
-/// `{approved, by?, comment?}` 携带审批人与备注。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HumanPromptEvent {
-    prompt_id: String,
-    /// "input" | "confirm" | "approve"
-    kind: String,
-    message: String,
-    default: Option<Value>,
-    timeout_ms: u64,
-    run_id: String,
-    step_path: String,
-}
-
-/// 桌面宿主的 [`HumanPrompter`]：emit `human-prompt` 事件，经 oneshot 等
-/// `human_respond` 回执。等待 future 被动作侧 drop（超时/取消）时 RAII guard
-/// 把表项摘除，迟到的回执自然落空（ok=false）。
-struct TauriPrompter {
-    app: AppHandle,
-    prompts: PromptMap,
-}
-
-/// RAII：无论正常回执、超时还是取消，都保证 prompt 表项被摘除，表不随
-/// 历史增长（与 `cancels` 表同一治理思路）。
-struct PromptCleanup {
-    prompts: PromptMap,
-    id: String,
-}
-
-impl Drop for PromptCleanup {
-    fn drop(&mut self) {
-        self.prompts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
-    }
-}
-
-/// 前端回执 → 引擎 `HumanResponse`。裸值（string/bool）直通；对象形状取
-/// `value`/`approved`/`confirmed` 之一作为值，`by`/`comment` 原样透传。
-fn decode_human_response(value: Value) -> HumanResponse {
-    if let Value::Object(map) = &value {
-        let inner = map
-            .get("value")
-            .or_else(|| map.get("approved"))
-            .or_else(|| map.get("confirmed"));
-        if let Some(inner) = inner {
-            return HumanResponse {
-                value: inner.clone(),
-                by: map.get("by").and_then(Value::as_str).map(str::to_string),
-                comment: map
-                    .get("comment")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-        }
-    }
-    HumanResponse {
-        value,
-        by: None,
-        comment: None,
-    }
-}
-
-#[async_trait::async_trait]
-impl HumanPrompter for TauriPrompter {
-    async fn prompt(&self, req: HumanPromptRequest) -> Result<HumanResponse, StepError> {
-        let prompt_id = ulid::Ulid::new().to_string();
-        let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
-        self.prompts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(prompt_id.clone(), tx);
-        let _cleanup = PromptCleanup {
-            prompts: self.prompts.clone(),
-            id: prompt_id.clone(),
-        };
-        let kind = match req.kind {
-            HumanPromptKind::Input => "input",
-            HumanPromptKind::Confirm => "confirm",
-            HumanPromptKind::Approve => "approve",
-        };
-        self.app
-            .emit(
-                "human-prompt",
-                &HumanPromptEvent {
-                    prompt_id,
-                    kind: kind.into(),
-                    message: req.message,
-                    default: req.default,
-                    timeout_ms: req.timeout_ms,
-                    run_id: req.run_id,
-                    step_path: req.step_path,
-                },
-            )
-            .map_err(|e| StepError::msg(format!("emit human-prompt: {e}")))?;
-        let value = rx
-            .await
-            .map_err(|_| StepError::msg("human prompt channel closed without a response"))?;
-        Ok(decode_human_response(value))
-    }
-}
-
-/// P1（人机交互）：`human_respond` 的返回。ok=false 表示 prompt 不存在或已
-/// 结束（超时/取消先到）—— 回执与等待结束天然存在竞态，前端提示"该提示已
-/// 失效"即可，不必当错误处理（与 `cancel_run` 同一语义）。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HumanRespondResult {
-    ok: bool,
-}
-
-/// P1（人机交互）：前端对一条 `human-prompt` 事件的回执入口。
-#[tauri::command]
-fn human_respond(
-    state: State<'_, DesktopState>,
-    prompt_id: String,
-    value: Value,
-) -> HumanRespondResult {
-    let sender = state
-        .prompts
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&prompt_id);
-    HumanRespondResult {
-        ok: sender.is_some_and(|tx| tx.send(value).is_ok()),
     }
 }
 
@@ -1593,9 +859,11 @@ fn enable_llm_network_for_session(app: AppHandle) -> Result<ProviderStatus, Stri
 
 #[tauri::command]
 fn list_ocr_models(app: AppHandle) -> Result<Vec<lumo_ai::OcrModelStatus>, String> {
+    // P2-2：home 显式传参给 lumo-ai —— 此前这里 set_var("LUMO_HOME") 与运行中
+    // flow 的 getenv（LUMO_STEP_TIMEOUT_MS / LUMO_ALLOW_PROCESS …）在多线程
+    // tokio 下构成数据竞争。
     let home = app_home(&app)?;
-    std::env::set_var("LUMO_HOME", home);
-    Ok(lumo_ai::ocr_model_catalog())
+    Ok(lumo_ai::ocr_model_catalog(&home))
 }
 
 #[tauri::command]
@@ -1603,9 +871,9 @@ async fn download_ocr_model(
     app: AppHandle,
     model: String,
 ) -> Result<lumo_ai::OcrModelDownload, String> {
+    // P2-2：同上 —— 显式 home，运行期不再写环境变量。
     let home = app_home(&app)?;
-    std::env::set_var("LUMO_HOME", home);
-    lumo_ai::download_modelscope_model(&model)
+    lumo_ai::download_modelscope_model(&home, &model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1742,15 +1010,25 @@ async fn generate_flow(
 fn list_skills(app: AppHandle) -> Result<Vec<SkillDto>, String> {
     let home = app_home(&app)?;
     let skills = load_skill_registry(&home, None);
+    let manager =
+        lumo_agent::SkillManager::new(skills_root(&home)).map_err(|error| error.to_string())?;
     Ok(skills
         .all()
         .into_iter()
-        .map(|skill| SkillDto {
-            name: skill.name().to_string(),
-            description: skill.description().map(str::to_string),
-            version: skill.frontmatter.version.clone(),
-            tags: skill.frontmatter.tags.clone(),
-            source: skill.source.display().to_string(),
+        .map(|skill| {
+            let active = manager.active(skill.name()).ok().flatten();
+            SkillDto {
+                name: skill.name().to_string(),
+                description: skill.description().map(str::to_string),
+                version: skill.frontmatter.version.clone(),
+                tags: skill.frontmatter.tags.clone(),
+                source: skill.source.display().to_string(),
+                hash: active.as_ref().map(|version| version.hash.clone()),
+                enabled: active
+                    .as_ref()
+                    .map(|version| version.enabled)
+                    .unwrap_or(true),
+            }
         })
         .collect())
 }
@@ -1900,20 +1178,34 @@ fn feature_map() -> Vec<FeatureSection> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let updater_pubkey = std::env::var("LUMO_UPDATER_PUBKEY").unwrap_or_default();
     tauri::Builder::default()
         .plugin(
+            tauri_plugin_updater::Builder::new()
+                .pubkey(updater_pubkey)
+                .build(),
+        )
+        .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    handle_global_shortcut(app, event.state);
+                .with_handler(|app, shortcut, event| {
+                    handle_global_shortcut(app, &shortcut.to_string(), event.state);
                 })
                 .build(),
         )
         .manage(DesktopState::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            // P2-2：这是 desktop 里唯一允许的非测试 set_var —— 只在 setup 阶段
+            // （窗口尚未创建、任何命令/flow 都还没跑）执行一次，供引擎内部无法
+            // 显式传 home 的 env 回退路径使用（如 flow 内 OCR 的 cache_root、
+            // SkillRegistry::default_root）。运行期一律显式传 home，禁止再写
+            // 环境变量（与多线程 getenv 构成数据竞争）。
             if let Ok(home) = app_home(&handle) {
                 std::env::set_var("LUMO_HOME", home);
             }
+            // P2-3：skills 加载失败的首个 toast 需要一个进程级 AppHandle（构建
+            // 注册表的路径深处拿不到 tauri State）。
+            let _ = APP_HANDLE.set(handle.clone());
             setup_tray(app)?;
             setup_agent_service(&handle).map_err(|error| anyhow::anyhow!(error))?;
             setup_job_worker(&handle).map_err(|error| anyhow::anyhow!(error))?;
@@ -1971,6 +1263,19 @@ pub fn run() {
             test_provider,
             generate_flow,
             list_skills,
+            skill_import_local,
+            skill_import_git,
+            skill_versions,
+            skill_activate,
+            skill_set_enabled,
+            skill_validate,
+            skill_rollback,
+            list_agent_profiles,
+            list_improvement_proposals,
+            evaluate_improvement,
+            approve_improvement,
+            reject_improvement,
+            rollback_improvement,
             apply_window_appearance,
             set_window_alpha,
             recorder_status,
@@ -1998,6 +1303,7 @@ pub fn run() {
             voice_configure,
             voice_start_listening,
             voice_stop,
+            capsule_expand,
             voice_devices,
             voice_daemon_status,
             voice_daemon_set_enabled,
@@ -2005,12 +1311,15 @@ pub fn run() {
             voice_daemon_suspend,
             voice_daemon_resume,
             voice_daemon_set_device,
+            voice_command_history,
+            voice_tts_preview,
             agent_start,
             agent_pause,
             agent_resume,
             agent_cancel,
             agent_approve,
             agent_events,
+            agent_run_list,
             agent_restore,
             job_list,
             job_schedule,
@@ -2020,6 +1329,10 @@ pub fn run() {
             voice_model_install,
             voice_model_remove,
             voice_model_list,
+            desktop_update_status,
+            desktop_update_check,
+            desktop_update_install,
+            desktop_update_restart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumoRPA desktop");
@@ -2087,501 +1400,17 @@ fn open_main_view(app: &AppHandle, view: &str) {
     let _ = app.emit("lumo://open-view", view);
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn reveal_path(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = Command::new("explorer");
-        c.arg(format!("/select,{}", path.display()));
-        c
-    };
-
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let mut command = {
-        let mut c = Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
-        c
-    };
-
-    let status = command
-        .status()
-        .map_err(|e| format!("open file location for {}: {e}", path.display()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "open file location for {} failed with status {status}",
-            path.display()
-        ))
+#[tauri::command]
+fn capsule_expand(app: AppHandle, expanded: bool) -> Result<(), String> {
+    if !expanded {
+        return Ok(());
     }
+    show_main_window(&app);
+    app.emit("lumo://open-view", "mission-control")
+        .map_err(|error| error.to_string())
 }
 
-fn app_home(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
 
-/// Roots the webview is allowed to *read* flow files from: the user's
-/// LUMO_HOME (user flows + recordings + artifacts) and the read-only bundled
-/// examples directory. Each is canonicalized; unreadable roots are skipped (P0-3).
-fn flow_read_roots(app: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(home) = app_home(app) {
-        if let Ok(canon) = home.canonicalize() {
-            roots.push(canon);
-        }
-    }
-    if let Some(ex) = examples_dir(app) {
-        if let Ok(canon) = ex.canonicalize() {
-            roots.push(canon);
-        }
-    }
-    roots
-}
-
-/// Canonicalize `requested` and confirm it resolves inside one of `roots`
-/// (each already canonicalized). The path must exist. Confines webview-driven
-/// file *reads* to the flow library + examples so a crafted `..`/symlink path
-/// can't exfiltrate arbitrary files (P0-3).
-fn resolve_within(requested: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
-    let canonical = Path::new(requested)
-        .canonicalize()
-        .map_err(|e| format!("resolve {requested}: {e}"))?;
-    if roots.iter().any(|root| canonical.starts_with(root)) {
-        Ok(canonical)
-    } else {
-        Err(format!(
-            "refused: {} is outside the allowed flow directories",
-            canonical.display()
-        ))
-    }
-}
-
-/// Resolve a *write* target for `requested`, confining it to `home`
-/// (LUMO_HOME). The file need not exist yet, so its parent directory is
-/// canonicalized (it must exist and resolve under `home`) and the file name is
-/// re-appended. Bundled examples live outside `home` and are thus read-only (P0-3).
-fn resolve_write_within(requested: &str, home: &Path) -> Result<PathBuf, String> {
-    let requested_path = Path::new(requested);
-    let file_name = requested_path
-        .file_name()
-        .ok_or_else(|| format!("invalid write path: {requested}"))?;
-    let parent = requested_path.parent().unwrap_or_else(|| Path::new(""));
-    let home_canon = home
-        .canonicalize()
-        .map_err(|e| format!("resolve LUMO_HOME: {e}"))?;
-    let parent_canon = if parent.as_os_str().is_empty() {
-        home_canon.clone()
-    } else {
-        parent
-            .canonicalize()
-            .map_err(|e| format!("resolve {}: {e}", parent.display()))?
-    };
-    if !parent_canon.starts_with(&home_canon) {
-        return Err(format!(
-            "refused: {} is outside LUMO_HOME",
-            parent_canon.display()
-        ));
-    }
-    Ok(parent_canon.join(file_name))
-}
-
-/// A `FlowSummary` for a path the webview isn't allowed to read — surfaced as
-/// an invalid entry instead of leaking file metadata for arbitrary paths (P0-3).
-fn refused_summary(path: &str, reason: String) -> FlowSummary {
-    FlowSummary {
-        path: path.to_string(),
-        file_name: Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(str::to_string)
-            .unwrap_or_default(),
-        valid: false,
-        error: Some(reason),
-        ..Default::default()
-    }
-}
-
-fn open_repo(app: &AppHandle) -> Result<Repo, String> {
-    Repo::open(app_home(app)?.join("lumo.db")).map_err(|e| e.to_string())
-}
-
-fn examples_dir(app: &AppHandle) -> Option<PathBuf> {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let bundled = resource_dir.join("examples");
-        if bundled.exists() {
-            return Some(bundled);
-        }
-    }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
-    if dev.exists() {
-        return Some(dev);
-    }
-    None
-}
-
-/// User-owned flows. Lives under `$LUMO_HOME/flows`, created on first save.
-fn user_flows_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_home(app)?.join("flows");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-/// Recorder output drop zone. Each `recorder_stop_and_save` call writes one
-/// `.lumoflow.yaml` here so the user can pick it up from the library.
-fn recordings_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_home(app)?.join("recordings");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-fn exports_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_home(app)?.join("exports");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-fn element_library_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let home = app_home(app)?;
-    std::fs::create_dir_all(&home).map_err(|e| format!("create {}: {e}", home.display()))?;
-    Ok(home.join("element-library.json"))
-}
-
-fn empty_element_library() -> Value {
-    serde_json::json!({
-        "version": 1,
-        "elements": [],
-        "images": [],
-        "datatables": [],
-    })
-}
-
-fn normalize_element_library(value: &mut Value) {
-    if !value.is_object() {
-        *value = empty_element_library();
-        return;
-    }
-    let obj = value.as_object_mut().expect("checked object");
-    obj.entry("version").or_insert(Value::from(1));
-    for key in ["elements", "images", "datatables"] {
-        if !matches!(obj.get(key), Some(Value::Array(_))) {
-            obj.insert(key.into(), Value::Array(Vec::new()));
-        }
-    }
-}
-
-fn load_element_library_value(app: &AppHandle) -> Result<Value, String> {
-    let path = element_library_path(app)?;
-    if !path.exists() {
-        return Ok(empty_element_library());
-    }
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut library: Value =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
-    normalize_element_library(&mut library);
-    Ok(library)
-}
-
-fn save_element_library_value(app: &AppHandle, library: &Value) -> Result<(), String> {
-    let path = element_library_path(app)?;
-    let text = serde_json::to_string_pretty(library).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
-}
-
-fn upsert_recorded_elements(app: &AppHandle, events: &[RawEvent]) -> Result<usize, String> {
-    let mut library = load_element_library_value(app)?;
-    normalize_element_library(&mut library);
-    let Some(elements) = library.get_mut("elements").and_then(Value::as_array_mut) else {
-        return Ok(0);
-    };
-    let mut changed = 0usize;
-    for event in events {
-        if let Some(element) = recorded_element_from_event(event) {
-            upsert_element(elements, element);
-            changed += 1;
-        }
-    }
-    if changed > 0 {
-        if let Some(obj) = library.as_object_mut() {
-            obj.insert(
-                "updatedAt".into(),
-                chrono::Utc::now()
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    .into(),
-            );
-        }
-        save_element_library_value(app, &library)?;
-    }
-    Ok(changed)
-}
-
-fn upsert_element(elements: &mut Vec<Value>, incoming: Value) {
-    let Some(id) = incoming
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    else {
-        return;
-    };
-    if let Some(existing) = elements
-        .iter_mut()
-        .find(|el| el.get("id").and_then(Value::as_str) == Some(id.as_str()))
-    {
-        merge_recorded_element(existing, incoming);
-    } else {
-        elements.push(incoming);
-    }
-}
-
-fn merge_recorded_element(existing: &mut Value, incoming: Value) {
-    let preserved_label = existing.get("label").cloned();
-    let preserved_group = existing.get("group").cloned();
-    let preserved_used_in = existing.get("usedIn").cloned();
-    *existing = incoming;
-    if let Some(label) =
-        preserved_label.filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
-    {
-        existing["label"] = label;
-    }
-    if let Some(group) =
-        preserved_group.filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
-    {
-        existing["group"] = group;
-    }
-    if let Some(old_used) = preserved_used_in.and_then(|v| v.as_array().cloned()) {
-        let mut merged = existing
-            .get("usedIn")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for item in old_used {
-            if !merged.iter().any(|v| v == &item) {
-                merged.push(item);
-            }
-        }
-        existing["usedIn"] = Value::Array(merged);
-    }
-}
-
-fn recorded_element_from_event(event: &RawEvent) -> Option<Value> {
-    match event.source.as_str() {
-        "dom" => recorded_dom_element(event),
-        "desktop" => recorded_desktop_element(event),
-        _ => None,
-    }
-}
-
-/// R-02 desktop element ingestion. A `focus_field` / `focus_changed` event
-/// carries a [`FocusSnapshot`] (app / window_title / focused_role / name /
-/// value). When the focused control is identifiable we mint a desktop
-/// element-library entry whose fingerprints describe the AX target so the
-/// user can reuse it in `desktop.*` steps. We deliberately skip
-/// `app_changed` / `launched` / `heartbeat` (no actionable control there).
-fn recorded_desktop_element(event: &RawEvent) -> Option<Value> {
-    if !matches!(event.kind.as_str(), "focus_field" | "focus_changed") {
-        return None;
-    }
-    let payload = &event.payload;
-    let str_field = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    };
-    let role = str_field("focused_role");
-    let name = str_field("focused_name");
-    let app = str_field("app");
-    let window = str_field("window_title");
-    // Need at least a named/typed control to be worth saving.
-    if role.is_none() && name.is_none() {
-        return None;
-    }
-    let source_label = window.or(app).unwrap_or("桌面应用");
-    // Reuse the same id hashing as DOM: (source | css(=role) | xpath(unused) | label(=name)).
-    let id = recorded_element_id(source_label, role, None, name);
-    let captured_at = format_event_time(event.at_ms);
-    let mut fingerprints = Map::new();
-    if let Some(v) = role {
-        fingerprints.insert("ax_role".into(), v.into());
-    }
-    if let Some(v) = name {
-        fingerprints.insert("ax_name".into(), v.into());
-        fingerprints.insert("text_includes".into(), v.into());
-    }
-    if let Some(v) = app {
-        fingerprints.insert("app".into(), v.into());
-    }
-    if let Some(v) = window {
-        fingerprints.insert("window_title".into(), v.into());
-    }
-    let display_label = name
-        .map(str::to_string)
-        .or_else(|| role.map(|r| format!("桌面控件 · {r}")))
-        .unwrap_or_else(|| "桌面控件".into());
-    let element = serde_json::json!({
-        "id": id,
-        "label": display_label,
-        "group": format!("录制 · {source_label}"),
-        "automation": "desktop",
-        "scope": "local",
-        "syncState": "local",
-        "owner": "Recorder",
-        "source": source_label,
-        "tag": role.unwrap_or("control"),
-        "role": role.unwrap_or("element"),
-        "capturedAt": captured_at,
-        "lastValidated": captured_at,
-        "usedIn": ["desktop.focus"],
-        "fingerprints": Value::Object(fingerprints),
-    });
-    Some(element)
-}
-
-fn recorded_dom_element(event: &RawEvent) -> Option<Value> {
-    if event.source != "dom" {
-        return None;
-    }
-    if !matches!(
-        event.kind.as_str(),
-        "click" | "input" | "change" | "keydown" | "similar_grab"
-    ) {
-        return None;
-    }
-    let payload = &event.payload;
-    let css = if event.kind == "similar_grab" {
-        payload.get("generalized_selector").and_then(Value::as_str)
-    } else {
-        payload.get("selector").and_then(Value::as_str)
-    }
-    .map(str::trim)
-    .filter(|s| !s.is_empty());
-    let xpath = payload
-        .get("xpath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let label = payload
-        .get("label")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if css.is_none() && xpath.is_none() && label.is_none() {
-        return None;
-    }
-    let url = payload
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or("录制页面");
-    let tag = payload
-        .get("tag")
-        .and_then(Value::as_str)
-        .unwrap_or("element");
-    let id = recorded_element_id(url, css, xpath, label);
-    let captured_at = format_event_time(event.at_ms);
-    let mut fingerprints = Map::new();
-    if let Some(v) = css {
-        fingerprints.insert("css".into(), v.into());
-    }
-    if let Some(v) = xpath {
-        fingerprints.insert("xpath".into(), v.into());
-    }
-    if let Some(v) = label {
-        fingerprints.insert("aria_label".into(), v.into());
-        if v.len() < 32 {
-            fingerprints.insert("text_includes".into(), v.into());
-        }
-    }
-    let display_label = label
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("录制元素 · {tag}"));
-    let used_in = match event.kind.as_str() {
-        "input" | "change" => "browser.type",
-        "similar_grab" => "browser.extract",
-        _ => "browser.click",
-    };
-    let sibling_count = payload
-        .get("sibling_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut element = serde_json::json!({
-        "id": id,
-        "label": display_label,
-        "group": format!("录制 · {}", source_group(url)),
-        "automation": "web",
-        "scope": "local",
-        "syncState": "local",
-        "owner": "Recorder",
-        "source": url,
-        "tag": tag,
-        "role": role_for_tag(tag),
-        "capturedAt": captured_at,
-        "lastValidated": captured_at,
-        "usedIn": [used_in],
-        "fingerprints": Value::Object(fingerprints),
-    });
-    if sibling_count > 0 {
-        element["siblingCount"] = Value::from(sibling_count);
-        element["similar"] = Value::Array(vec![Value::from("同款元素")]);
-    }
-    Some(element)
-}
-
-fn recorded_element_id(
-    source: &str,
-    css: Option<&str>,
-    xpath: Option<&str>,
-    label: Option<&str>,
-) -> String {
-    let key = format!(
-        "{}|{}|{}|{}",
-        source,
-        css.unwrap_or_default(),
-        xpath.unwrap_or_default(),
-        label.unwrap_or_default()
-    );
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    format!("el_rec_{:016x}", hasher.finish())
-}
-
-fn format_event_time(ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .unwrap_or_else(chrono::Utc::now)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
-}
-
-fn source_group(source: &str) -> String {
-    let without_scheme = source.split("://").nth(1).unwrap_or(source);
-    without_scheme
-        .split('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("页面")
-        .to_string()
-}
-
-fn role_for_tag(tag: &str) -> &'static str {
-    match tag {
-        "input" | "textarea" => "textbox",
-        "button" => "button",
-        "select" => "combobox",
-        "a" => "link",
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
-        _ => "element",
-    }
-}
 
 fn scan_flows_in(dir: &Path, source: &str) -> Vec<FlowSummary> {
     let mut out = Vec::new();
@@ -2664,8 +1493,8 @@ fn flow_summary(path: &Path) -> FlowSummary {
 fn parse_and_validate(home: &Path, flow_path: &Path) -> Result<Flow, String> {
     let flow = lumo_dsl::parse_file(flow_path).map_err(|e| e.to_string())?;
     lumo_dsl::validate(&flow).map_err(|e| e.to_string())?;
-    let registry = build_action_registry(home, Some(flow_path));
-    let skills = load_skill_registry(home, Some(flow_path));
+    // P2-3：注册表与 skills 走同一次缓存查询（此前各自 load_dir 扫两遍）。
+    let (registry, skills, skill_load_errors) = cached_registry(home, Some(flow_path));
     // P1-7:步级校验上移到 lumo-core 的单一实现(原桌面侧副本已删),与 CLI 共用。
     lumo_core::validate_steps(
         &flow.spec.steps,
@@ -2673,7 +1502,7 @@ fn parse_and_validate(home: &Path, flow_path: &Path) -> Result<Flow, String> {
         &registry,
         &|name| skills.get(name).is_some(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| attach_skill_load_errors(e.to_string(), &skill_load_errors))?;
     Ok(flow)
 }
 
@@ -2683,124 +1512,15 @@ fn validate_generated_flow_yaml(home: &Path, yaml: &str) -> Result<(), String> {
     }
     let flow = lumo_dsl::parse_str(yaml).map_err(|e| format!("parse: {e}"))?;
     lumo_dsl::validate(&flow).map_err(|e| format!("validate: {e}"))?;
-    let registry = build_action_registry(home, None);
-    let skills = load_skill_registry(home, None);
+    let (registry, skills, skill_load_errors) = cached_registry(home, None);
     lumo_core::validate_steps(
         &flow.spec.steps,
         &flow.spec.capabilities,
         &registry,
         &|name| skills.get(name).is_some(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| attach_skill_load_errors(e.to_string(), &skill_load_errors))?;
     Ok(())
-}
-
-/// F-20: breakpoint-debug options threaded into a run. Default ⇒ a normal run
-/// (no breakpoints, no single-step) so existing callers are unaffected.
-#[derive(Default)]
-struct DebugOpts {
-    breakpoints: std::collections::HashSet<String>,
-    step_mode: bool,
-    resume_from: Option<String>,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_flow(
-    home: &Path,
-    flow_path: Option<&Path>,
-    flow: Flow,
-    inputs: Value,
-    no_store: bool,
-    debug: DebugOpts,
-    cancels: &CancelMap,
-    prompter: Option<Arc<dyn HumanPrompter>>,
-) -> Result<RunResponse, String> {
-    let registry = build_action_registry(home, flow_path);
-    let repo = if no_store {
-        None
-    } else {
-        Some(Repo::open(home.join("lumo.db")).map_err(|e| e.to_string())?)
-    };
-    // P0-1：run_id 由宿主预生成并喂给 VM 落库——取消表必须在 run 启动前建键，
-    // 这样 cancel_run / 运行历史 / 取消表三方共用同一个 id。
-    let run_id = ulid::Ulid::new().to_string();
-    let cancel = CancelToken::new();
-    cancels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(run_id.clone(), cancel.clone());
-    // F-20: breakpoint / single-step / resume are inert by default (empty set,
-    // false, None), so this is identical to a plain run unless debugging.
-    // P0-1 / X-07：取消 + 步级超时 + artifacts 落盘从此默认接线 —— 引擎能力
-    // 早已就位，桌面宿主此前从未传入。artifacts 固定写 `$LUMO_HOME/artifacts`，
-    // 与 read_artifact_blob 的 LUMO_HOME 越界防护对齐。
-    let vm = FlowVm::new(registry, repo.clone())
-        .with_run_id(Some(run_id.clone()))
-        .with_cancel(cancel)
-        .with_step_timeout(step_timeout())
-        .with_artifacts_dir(Some(home.join("artifacts")))
-        .with_breakpoints(debug.breakpoints)
-        .with_step_mode(debug.step_mode)
-        .with_resume_from(debug.resume_from)
-        // P1（人机交互）：桌面宿主的 human-prompt 事件通道（测试路径传 None，
-        // human.* 步骤届时显式报"宿主不支持人机交互"）。
-        .with_human_prompter(prompter);
-    // P0-1: attach AI hooks (heal / extract_visual / decide / diagnose) when the
-    // flow enables AI and providers are configured; otherwise the VM stays
-    // deterministic. Mirrors the CLI's `attach_ai_hooks`.
-    let ai = flow.metadata.ai.clone().unwrap_or_default();
-    let ai_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
-    let vm = match lumo_ai::build_hook_provider(&ai_cfg, ai.enabled, ai.budget.max_calls_per_run) {
-        Some(provider) => vm.with_ai_provider(provider),
-        None => vm,
-    };
-    let result = vm
-        .run(
-            &flow,
-            RunOptions {
-                inputs,
-                trigger_kind: "desktop".into(),
-            },
-        )
-        .await;
-    // 成功 / 失败 / 暂停一律摘掉句柄：表不随历史增长，结束后的重复 cancel
-    // 自然落到 ok=false（幂等），必须在 `?` 早退之前执行。
-    cancels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&run_id);
-    let report = result.map_err(|e| e.to_string())?;
-
-    let run = repo
-        .as_ref()
-        .and_then(|r| r.get_run(&report.run_id).ok().flatten())
-        .map(run_dto);
-    let steps = repo
-        .as_ref()
-        .and_then(|r| r.list_steps(&report.run_id).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(step_dto)
-        .collect();
-
-    Ok(RunResponse {
-        report: report_dto(report),
-        run,
-        steps,
-    })
-}
-
-/// P0-1：步级超时，防止一个卡死的步骤把 Studio 的运行面板永久挂住。
-/// 默认 10 分钟；`LUMO_STEP_TIMEOUT_MS` 可覆盖，解析失败或填 0 一律回退
-/// 默认（0 会让所有步骤瞬间超时，按配置错误处理）。
-fn step_timeout() -> std::time::Duration {
-    const DEFAULT_MS: u64 = 600_000;
-    let ms = std::env::var("LUMO_STEP_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .unwrap_or(DEFAULT_MS);
-    std::time::Duration::from_millis(ms)
 }
 
 fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
@@ -2817,52 +1537,8 @@ fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
     None
 }
 
-fn validation_report(path: &str, flow: &Flow) -> ValidationReport {
-    let warnings = if flow_uses_action(&flow.spec.steps, "ai.chat")
-        || flow_uses_action(&flow.spec.steps, "image.ocr")
-    {
-        vec!["This flow uses AI actions; configure providers.toml and the corresponding API key environment variables before running it.".into()]
-    } else {
-        Vec::new()
-    };
 
-    ValidationReport {
-        path: path.to_string(),
-        id: flow.metadata.id.clone(),
-        version: flow.metadata.version.clone(),
-        name: flow.metadata.name.clone(),
-        description: flow.metadata.description.clone(),
-        tags: flow.metadata.tags.clone(),
-        inputs: io_dtos(&flow.spec.inputs),
-        outputs: io_dtos(&flow.spec.outputs),
-        capabilities: serde_json::to_value(&flow.spec.capabilities).unwrap_or(Value::Null),
-        step_count: count_steps(&flow.spec.steps),
-        warnings,
-    }
-}
 
-fn io_dtos(items: &[IoDecl]) -> Vec<IoDeclDto> {
-    items
-        .iter()
-        .map(|item| IoDeclDto {
-            name: item.name.clone(),
-            kind: item.ty.clone(),
-            required: item.required,
-            default: item
-                .default
-                .as_ref()
-                .and_then(|v| serde_json::to_value(v).ok()),
-            description: item.description.clone(),
-        })
-        .collect()
-}
-
-fn count_steps(steps: &[Step]) -> usize {
-    steps
-        .iter()
-        .map(|step| 1 + step.children().into_iter().map(count_steps).sum::<usize>())
-        .sum()
-}
 
 fn parse_inputs(raw: &str) -> Result<Value, String> {
     if raw.trim().is_empty() {
@@ -2876,123 +1552,9 @@ fn parse_inputs(raw: &str) -> Result<Value, String> {
     }
 }
 
-fn report_dto(report: lumo_core::RunReport) -> RunReportDto {
-    RunReportDto {
-        run_id: report.run_id,
-        success: report.success,
-        steps_total: report.steps_total,
-        steps_ok: report.steps_ok,
-        steps_executed: report.steps_executed,
-        steps_failed: report.steps_failed,
-        steps_skipped: report.steps_skipped,
-        steps_retried: report.steps_retried,
-        steps_caught: report.steps_caught,
-        duration_ms: report.duration_ms,
-        outputs: report.outputs,
-        paused_at: report.paused_at,
-    }
-}
 
-fn run_dto(row: FlowRunRow) -> RunDto {
-    let duration_ms = match (&row.started_at, &row.finished_at) {
-        (Some(started), Some(finished)) => {
-            Some(finished.timestamp_millis() - started.timestamp_millis())
-        }
-        _ => None,
-    };
-    RunDto {
-        id: row.id,
-        flow_id: row.flow_id,
-        flow_version: row.flow_version,
-        trigger_kind: row.trigger_kind,
-        inputs: row.inputs,
-        outputs: row.outputs,
-        state: row.state,
-        started_at: row.started_at.map(|t| t.to_rfc3339()),
-        finished_at: row.finished_at.map(|t| t.to_rfc3339()),
-        duration_ms,
-        cost_token: row.cost_token,
-        cost_usd_micro: row.cost_usd_micro,
-    }
-}
 
-fn step_dto(row: StepRunRow) -> StepRunDto {
-    let duration_ms = match (&row.started_at, &row.finished_at) {
-        (Some(started), Some(finished)) => {
-            Some(finished.timestamp_millis() - started.timestamp_millis())
-        }
-        _ => None,
-    };
-    StepRunDto {
-        seq: row.seq,
-        path: row.path,
-        parent_path: row.parent_path,
-        depth: row.depth,
-        step_id: row.step_id,
-        idx: row.idx,
-        state: row.state,
-        attempt: row.attempt,
-        output_json: row.output_json,
-        vars_json: row.vars_json,
-        error: row.error,
-        started_at: row.started_at.map(|t| t.to_rfc3339()),
-        finished_at: row.finished_at.map(|t| t.to_rfc3339()),
-        duration_ms,
-    }
-}
 
-fn providers_path(home: &Path) -> PathBuf {
-    std::env::var_os("LUMO_PROVIDERS_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("providers.toml"))
-}
-
-fn skills_root(home: &Path) -> PathBuf {
-    std::env::var_os("LUMO_SKILLS_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("skills"))
-}
-
-fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> ActionRegistry {
-    let providers_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
-    let router = Arc::new(AiRouter::from_config(&providers_cfg));
-
-    let mut registry = ActionRegistry::new();
-    lumo_actions::register_all(&mut registry);
-    registry.register(ChatAction::new(router));
-
-    let skill_reg = load_skill_registry(home, flow_path);
-    register_skill_actions(&mut registry, skill_reg);
-
-    let flow_base = flow_path
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.to_path_buf());
-    register_flow_call_action(&mut registry, flow_base);
-
-    registry
-}
-
-fn load_skill_registry(home: &Path, flow_path: Option<&Path>) -> Arc<SkillRegistry> {
-    let skill_reg = Arc::new(SkillRegistry::new());
-    let _ = skill_reg.load_dir(skills_root(home));
-    if let Some(flow_path) = flow_path {
-        if let Some(flow_dir) = flow_path.parent() {
-            let _ = skill_reg.load_dir(flow_dir.join("skills"));
-        }
-    }
-    skill_reg
-}
-
-fn flow_uses_action(steps: &[Step], action_id: &str) -> bool {
-    steps.iter().any(|step| {
-        step.action == action_id
-            || step
-                .children()
-                .into_iter()
-                .any(|children| flow_uses_action(children, action_id))
-    })
-}
 
 fn make_provider_status(path: &Path, cfg: &ProvidersConfig) -> ProviderStatus {
     ProviderStatus {
@@ -3044,896 +1606,9 @@ fn looks_like_env_var_name(value: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// Hard-coded snapshot of the implementation status of the design-doc feature
-/// matrix. This is what the Studio "feature map" panel renders so the user can
-/// see exactly which docs/01-Product-Design items are wired up vs. planned.
-fn feature_map_data() -> Vec<FeatureSection> {
-    fn item(id: &str, title: &str, stage: &str, status: &str, note: &str) -> FeatureStatus {
-        FeatureStatus {
-            id: id.into(),
-            title: title.into(),
-            stage: stage.into(),
-            status: status.into(),
-            note: note.into(),
-        }
-    }
 
-    vec![
-        FeatureSection {
-            id: "design".into(),
-            title: "流程设计 (D)".into(),
-            items: vec![
-                item(
-                    "D-01",
-                    "节点视图 + 表单参数",
-                    "M1",
-                    "ready",
-                    "动作库可拖入画布，schema 自动生成属性表单。",
-                ),
-                item(
-                    "D-02",
-                    "流程图视图 (DAG)",
-                    "M1",
-                    "ready",
-                    "Graph 视图基于 SVG 节点 + 折线连接。",
-                ),
-                item(
-                    "D-03",
-                    "代码视图 (YAML)",
-                    "M1",
-                    "ready",
-                    "Code 视图行号 + 简易高亮。",
-                ),
-                item(
-                    "D-04",
-                    "三向同构实时同步",
-                    "M1",
-                    "ready",
-                    "Graph / Tree / Code 共享同一 AST。",
-                ),
-                item(
-                    "D-05",
-                    "变量面板",
-                    "M1",
-                    "partial",
-                    "inputs JSON 编辑 + outputs 展示。",
-                ),
-                item(
-                    "D-06",
-                    "子流程 / 参数化",
-                    "M1",
-                    "planned",
-                    "lumo-dsl 当前不展开子流程导入。",
-                ),
-                item(
-                    "D-07",
-                    "Try / Catch / Finally",
-                    "M1",
-                    "ready",
-                    "DSL + VM 已支持 try.catch.finally.",
-                ),
-                item(
-                    "D-08",
-                    "重试策略",
-                    "M1",
-                    "ready",
-                    "retry.times/backoff/on 已在 VM 实现。",
-                ),
-                item(
-                    "D-09",
-                    "条件分支 / 循环",
-                    "M1",
-                    "ready",
-                    "control.if / control.for / control.for_each / control.break.",
-                ),
-                item(
-                    "D-10",
-                    "并行块",
-                    "M2",
-                    "ready",
-                    "★ control.parallel branches: [[steps], ...] 真并发执行（futures::join_all），StepCtx Arc<Mutex> 共享变量绑定；back-compat：do: [step,...] 每项作为单步分支。examples/parallel-demo.lumoflow.yaml.",
-                ),
-                item(
-                    "D-11",
-                    "注释 / 折叠 / 标签",
-                    "M1",
-                    "partial",
-                    "Tree 视图可折叠；标签来自 metadata.tags.",
-                ),
-                item(
-                    "D-12",
-                    "任意节点级单步运行",
-                    "M1",
-                    "ready",
-                    "run_step 命令已落地，可直接运行当前选中节点。",
-                ),
-                item(
-                    "D-13",
-                    "断点 / 条件断点",
-                    "M1",
-                    "planned",
-                    "M2 计划在 VM 加入断点 hook.",
-                ),
-                item(
-                    "D-15",
-                    "自然语言生成节点 / 整段流程",
-                    "M2",
-                    "planned",
-                    "AI Copilot 入口预留。",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "recorder".into(),
-            title: "录制器 (R)".into(),
-            items: vec![
-                item(
-                    "R-01",
-                    "Web 录制 (CDP)",
-                    "M2",
-                    "ready",
-                    "★ BrowserRecorder + CDP Runtime.addBinding 注入 JS 钩子，捕获 click/input/change/keydown，附 CSS+XPath+a11y 标签。导航/心跳并存。",
-                ),
-                item(
-                    "R-02",
-                    "桌面录制 (Windows UIA)",
-                    "M1",
-                    "planned",
-                    "AccessKit 桥接待补.",
-                ),
-                item(
-                    "R-05",
-                    "智能录制 (自动判别)",
-                    "M1",
-                    "planned",
-                    "归并/抖动算法尚未实现.",
-                ),
-                item(
-                    "R-08",
-                    "事件去抖 / 合并",
-                    "M2",
-                    "ready",
-                    "★ ActionBuffer 200ms 同 selector 输入合并 + 三档跨事件抑制:click→input 焦点丢弃(<250ms)、input→change blur 回声丢弃(<500ms)、近距 dblclick 折叠(<60ms);7 个新测试覆盖正负路径.",
-                ),
-                item(
-                    "R-09",
-                    "相似元素一键抓取",
-                    "M2",
-                    "ready",
-                    "★ Alt+点击触发同款泛化：注入 JS 比对父节点同 tag + 80% 共有 class，生成 `parent > tag.class` 选择器，YAML patch 直出 browser.extract { all: true } + 兄弟数注释。",
-                ),
-                item(
-                    "R-10",
-                    "录制→YAML patch",
-                    "M2",
-                    "ready",
-                    "★ events_to_yaml_patch 把录制流转成可粘贴的 browser.open/click/type 步骤；recorder_stop 直接返回。",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "selectors".into(),
-            title: "选择器 / Self-Healing (S)".into(),
-            items: vec![
-                item(
-                    "S-01",
-                    "CSS 选择器",
-                    "M1",
-                    "ready",
-                    "browser.click / type 接受 selector (CSS) 或 selectors 多策略对象，二者择一。",
-                ),
-                item(
-                    "S-02",
-                    "XPath",
-                    "M2",
-                    "ready",
-                    "★ selectors.xpath 走 document.evaluate；与 CSS / aria-label / text 共用 Self-Healing 回退。",
-                ),
-                item(
-                    "S-06",
-                    "智能多策略选择器",
-                    "M2",
-                    "ready",
-                    "★ Self-Healing Router 完整落地：6 策略 (id/data-testid/css/aria-label/text/xpath)，按 base_cost × history_penalty 动态排序，每次解析记录 resolved_by 与 tried 列表，下一轮自动收益。Vision-LLM 后续 plug-in。",
-                ),
-                item(
-                    "S-11",
-                    "Vision-LLM 自愈",
-                    "M2",
-                    "partial",
-                    "★ AI 层传输完成:`ChatMessage.attachments: Vec<ImageAttachment>` + base64/URL 双源 + Anthropic/OpenAI 双 wire 编码(`image_url` / `image` block)+ 7 个 vision 测试.OmniParser/UI-TARS 端到端注入选择器路由仍排期 M3.",
-                ),
-                item(
-                    "S-12",
-                    "Set-of-Mark 兜底",
-                    "M2",
-                    "partial",
-                    "传输层就绪(可向 vision 模型发送截图);Set-of-Mark 标注 / 视觉坐标 → DOM 元素的反查机制排期 M3.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "browser".into(),
-            title: "浏览器 (B)".into(),
-            items: vec![
-                item(
-                    "B-01",
-                    "Chromium CDP",
-                    "M1",
-                    "ready",
-                    "lumo-actions::browser 已经接 chromiumoxide.",
-                ),
-                item(
-                    "B-04",
-                    "多 Tab / Context",
-                    "M1",
-                    "partial",
-                    "browser.open / close 已就绪.",
-                ),
-                item(
-                    "B-05",
-                    "click / type / hover / scroll / upload / download",
-                    "M1",
-                    "ready",
-                    "首发动作集已覆盖核心交互.",
-                ),
-                item(
-                    "B-07",
-                    "表格抓取",
-                    "M1",
-                    "partial",
-                    "browser.extract 支持 map 字段.",
-                ),
-                item(
-                    "B-11",
-                    "Headless / Headed 切换",
-                    "M1",
-                    "ready",
-                    "browser.launch 支持 headless 标志.",
-                ),
-                item(
-                    "B-12",
-                    "Stealth 反指纹",
-                    "M2",
-                    "planned",
-                    "Patchright 思路排期 M2.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "office".into(),
-            title: "Office / 文档 (O)".into(),
-            items: vec![
-                item(
-                    "O-01",
-                    "Excel 读写",
-                    "M1",
-                    "ready",
-                    "excel.read_rows / write_row 已实现.",
-                ),
-                item(
-                    "O-03",
-                    "Polars DataFrame Action",
-                    "M1",
-                    "partial",
-                    "data.* 系列动作初版.",
-                ),
-                item(
-                    "O-08",
-                    "Excel 行驱动循环",
-                    "M1",
-                    "ready",
-                    "典型批处理场景；examples/excel-loop.lumoflow.yaml.",
-                ),
-                item(
-                    "O-13",
-                    "OCR (PaddleOCR 3.0)",
-                    "M2",
-                    "planned",
-                    "本地视觉模型排期 M2.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "ai".into(),
-            title: "AI 节点 (A)".into(),
-            items: vec![
-                item(
-                    "A-01",
-                    "LLM 节点 (多 provider)",
-                    "M1",
-                    "ready",
-                    "ai.chat + ProvidersConfig + Anthropic/OpenAI 适配.",
-                ),
-                item(
-                    "A-02",
-                    "Embedding / 向量检索",
-                    "M2",
-                    "planned",
-                    "libSQL F32_BLOB 待启用.",
-                ),
-                item(
-                    "A-05",
-                    "屏幕理解 (OmniParser v2)",
-                    "M2",
-                    "planned",
-                    "本地视觉路线.",
-                ),
-                item(
-                    "A-07",
-                    "Computer Use 节点",
-                    "M2",
-                    "planned",
-                    "Claude / Gemini CU 适配.",
-                ),
-                item(
-                    "A-13",
-                    "自然语言生成流程",
-                    "M2",
-                    "ready",
-                    "★ `lumo copilot \"...\"` 子命令通过 AiRouter 生成 lumo/v1 YAML 草稿,内置 system prompt 含 schema/合法 action id 列表;parse+validate 失败自动重试一次并把错误带回提示;支持 --out / --dry-run / --model 覆盖.",
-                ),
-                item(
-                    "A-14",
-                    "Self-Healing Router",
-                    "M2",
-                    "ready",
-                    "★ 双层学习:per-strategy 成功率(`history_penalty` 1-3 倍成本)+ per-(prev→next) 转移概率(`transition_score` 0-1);贪心选择 `cost(s)/(1+5×score(prev→s))` 把验证过的恢复策略提到第二位即使基础成本更高;`resolve_element` 自动记录 last_failed→winner 转移;选择器统计已 JSON 持久化.Vision-LLM 端点排期 M3.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "triggers".into(),
-            title: "触发 / 调度 (T)".into(),
-            items: vec![
-                item(
-                    "T-01",
-                    "Cron",
-                    "M2",
-                    "ready",
-                    "★ `lumo serve` 启动时扫 --flows 目录，spec.triggers.[kind: cron, with: { schedule: \"0 */5 * * * *\" }] 每个触发器起独立 tokio 任务，按 schedule 睡到下一次 fire，run 走 lumo.db 持久化（trigger_kind=cron）。每次 fire 重新 parse flow，编辑后无需重启。",
-                ),
-                item("T-02", "文件触发", "M2", "ready", "★ `lumo serve` 同进程内 spawn `notify` watcher;`triggers.[kind:file, with:{path, events:[create,modify,remove], pattern:\"*.csv\"}]` 触发 → 输入 `{trigger:{path,kind}}` 自动注入,run 走 lumo.db 持久化(trigger_kind=file)."),
-                item(
-                    "T-04",
-                    "Webhook",
-                    "M2",
-                    "ready",
-                    "★ `lumo serve` 启 axum HTTP server (默认 127.0.0.1:8787)，POST /webhook/<flow-name> 触发流；流必须声明 spec.triggers.[kind: webhook] 才能被外网驱动；X-Lumo-Token 共享密钥可选；run 走 lumo.db 持久化。",
-                ),
-                item("T-05", "热键", "M1", "planned", "rdev 跨平台 hook."),
-                item(
-                    "T-07",
-                    "MCP 工具调用触发",
-                    "M2",
-                    "planned",
-                    "MCP server 排期 M2.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "observe".into(),
-            title: "调试 / 可观测 (X)".into(),
-            items: vec![
-                item(
-                    "X-01",
-                    "单步 / 变量面板",
-                    "M1",
-                    "ready",
-                    "右栏属性 + 单步运行入口.",
-                ),
-                item(
-                    "X-04",
-                    "错误堆栈 + 重试链路",
-                    "M1",
-                    "ready",
-                    "step_runs.error_json 已写库.",
-                ),
-                item(
-                    "X-05",
-                    "OTel GenAI semconv",
-                    "M2",
-                    "planned",
-                    "opentelemetry crate 待集成.",
-                ),
-                item(
-                    "X-07",
-                    "Time-Travel Debugger",
-                    "M1",
-                    "partial",
-                    "时间线滑块基于已有 step_runs.",
-                ),
-                item(
-                    "X-09",
-                    "实时 stdout/stderr",
-                    "M1",
-                    "partial",
-                    "Studio 底栏聚合日志.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "mcp".into(),
-            title: "MCP 双向 (MCP)".into(),
-            items: vec![
-                item(
-                    "MCP-01",
-                    "LumoRPA as MCP Server",
-                    "M2",
-                    "ready",
-                    "`lumo mcp --flows ./flows` 通过 JSON-RPC 2.0 / stdio 暴露 5 个工具 (list_flows, validate_flow, run_flow, list_runs, get_run) 以及 resources/list + resources/read(把流文件以 `file://` URI 暴露,Claude/Cursor 可直接读取 YAML;路径越界拒绝).",
-                ),
-                item(
-                    "MCP-02",
-                    "LumoRPA as MCP Client",
-                    "M2",
-                    "ready",
-                    "`mcp.call` action 已注册;通过 stdio + JSON-RPC 2.0 调用任意 MCP server,执行 initialize → tools/call 握手,受 `capabilities.mcp` 白名单门禁保护.",
-                ),
-                item(
-                    "MCP-03",
-                    "Tool Discovery + 审批",
-                    "M3",
-                    "ready",
-                    "`mcp.discover` action 通过 `tools/list` 返回工具描述符 + `proposed_grant` + `already_allowed`;`capabilities.mcp` 支持 `server`、`server:tool`、`server:tool_*` 三档粒度,`mcp.call` 强制按 `(server,tool)` 对放行.",
-                ),
-            ],
-        },
-        FeatureSection {
-            id: "security".into(),
-            title: "安全 / 沙箱 (Se)".into(),
-            items: vec![
-                item(
-                    "Se-01",
-                    "Capability 声明",
-                    "M1",
-                    "ready",
-                    "spec.capabilities 在执行前强校验;Studio 右侧 `权限` Tab 渲染当前 network/fs.read/fs.write/llm/mcp 五档 chip 列表;每档自带 `+加白名单` 表单,通过 `add_capability_grant` Tauri 命令把 grant 追加回 YAML 自动去重并热刷新编辑器(配合 MCP-03 的 `proposed_grant`).",
-                ),
-                item(
-                    "Se-02",
-                    "默认 deny 网络出站",
-                    "M1",
-                    "ready",
-                    "ai.chat 需要 LUMO_ALLOW_LLM_NETWORK=1;`add_capability_grant` 把 network/fs.read/fs.write/llm/mcp 五档 grant 写回 YAML,自动去重.",
-                ),
-                item(
-                    "Se-05",
-                    "凭据 LLM 不可见",
-                    "M3",
-                    "planned",
-                    "Vault JIT 注入排期 M3.",
-                ),
-            ],
-        },
-    ]
-}
 
-#[cfg(test)]
-mod path_sandbox_tests {
-    //! P0-3: the webview file IPC must confine reads to the flow library +
-    //! bundled examples and confine writes to LUMO_HOME, so a crafted path
-    //! (`../`, absolute, symlink) can't exfiltrate or tamper with arbitrary
-    //! files on disk.
-    use super::{resolve_within, resolve_write_within};
-    use std::fs;
 
-    #[test]
-    fn resolve_within_allows_file_inside_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let f = root.join("a.lumoflow.yaml");
-        fs::write(&f, "x").unwrap();
-        let got = resolve_within(f.to_str().unwrap(), std::slice::from_ref(&root)).unwrap();
-        assert!(got.starts_with(&root));
-    }
 
-    #[test]
-    fn resolve_within_rejects_dotdot_escape() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("flows");
-        fs::create_dir_all(&root).unwrap();
-        let outside = tmp.path().join("secret.txt");
-        fs::write(&outside, "secret").unwrap();
-        let root_canon = root.canonicalize().unwrap();
-        let escape = root.join("../secret.txt");
-        let err = resolve_within(escape.to_str().unwrap(), &[root_canon]).unwrap_err();
-        assert!(err.contains("outside"), "got: {err}");
-    }
 
-    #[test]
-    fn resolve_within_rejects_nonexistent_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        let err = resolve_within(root.join("nope.yaml").to_str().unwrap(), &[root]).unwrap_err();
-        assert!(err.contains("resolve"), "got: {err}");
-    }
 
-    #[test]
-    fn resolve_write_within_allows_new_file_under_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().canonicalize().unwrap();
-        let flows = home.join("flows");
-        fs::create_dir_all(&flows).unwrap();
-        // target does not exist yet — must still resolve via its parent
-        let target = flows.join("new.lumoflow.yaml");
-        let got = resolve_write_within(target.to_str().unwrap(), &home).unwrap();
-        assert_eq!(got, flows.join("new.lumoflow.yaml"));
-    }
-
-    #[test]
-    fn resolve_write_within_rejects_escape_above_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let flows = home.join("flows");
-        fs::create_dir_all(&flows).unwrap();
-        let home_canon = home.canonicalize().unwrap();
-        // home/flows/../../evil.yaml resolves to tmp/evil.yaml — outside home
-        let escape = flows.join("../../evil.lumoflow.yaml");
-        let err = resolve_write_within(escape.to_str().unwrap(), &home_canon).unwrap_err();
-        assert!(err.contains("outside"), "got: {err}");
-    }
-}
-
-#[cfg(test)]
-mod recording_flow_tests {
-    use super::wrap_recording_fragment;
-
-    #[test]
-    fn wrap_recording_fragment_drops_empty_and_schema_unknown_steps() {
-        let fragment = r##"
-# Recorder YAML patch
-- id: click_1
-  action: browser.click
-  "# note": recorder spotted 12 similar items
-  with:
-    selectors:
-      css: button.login
-      xpath: //button[1]
-- id: empty_1
-  with: {}
-- id: type_1
-  action: browser.type
-  with:
-    selectors:
-      id: user
-    text: alice
-    clear: true
-"##;
-        let source = wrap_recording_fragment("rec-smoke", fragment).expect("wrap recording");
-        assert!(!source.contains("# note"), "{source}");
-        assert!(!source.contains("empty_1"), "{source}");
-
-        let flow = lumo_dsl::parse_str(&source).expect("recording flow parses");
-        assert_eq!(flow.metadata.id, "rec-smoke");
-        assert_eq!(flow.spec.steps.len(), 2);
-        assert_eq!(flow.spec.steps[0].id, "click_1");
-        assert_eq!(flow.spec.steps[0].action, "browser.click");
-        assert_eq!(flow.spec.steps[1].id, "type_1");
-        assert_eq!(flow.spec.steps[1].action, "browser.type");
-    }
-}
-
-#[cfg(test)]
-mod debug_flow_tests {
-    //! F-20: integration coverage for the breakpoint debugger at the *desktop*
-    //! layer — the `debug_flow` command's real work lives in `execute_flow`, so
-    //! we drive that directly against a temp `LUMO_HOME`. This exercises the
-    //! whole chain a webview hits: build the registry, run under `DebugOpts`,
-    //! surface `paused_at`, persist per-step `vars_json` (F-19), and resume the
-    //! paused run to advance — plus the serde `camelCase` DTO contract the
-    //! frontend depends on (`pausedAt`, `varsJson`).
-    use super::{execute_flow, CancelMap, DebugOpts, RunResponse};
-    use std::collections::HashSet;
-    use std::path::Path;
-
-    const FLOW: &str = r#"
-apiVersion: lumorpa.io/v1
-kind: Flow
-metadata: { id: dbg-it }
-spec:
-  steps:
-    - { id: one,   action: control.set_var, with: { name: x, value: "1" } }
-    - { id: two,   action: control.set_var, with: { name: y, value: "2" } }
-    - { id: three, action: control.set_var, with: { name: z, value: "3" } }
-"#;
-
-    fn bps(list: &[&str]) -> HashSet<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
-    async fn run_debug(home: &Path, debug: DebugOpts) -> RunResponse {
-        let flow = lumo_dsl::parse_str(FLOW).expect("parse flow");
-        let cancels = CancelMap::default();
-        execute_flow(
-            home,
-            None,
-            flow,
-            serde_json::json!({}),
-            false,
-            debug,
-            &cancels,
-            None,
-        )
-        .await
-        .expect("execute_flow ok")
-    }
-
-    #[tokio::test]
-    async fn debug_flow_breakpoint_pause_persists_vars_then_resume_completes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-
-        // ── Run 1: breakpoint on `two` → `one` runs, pause before `two`. ──
-        let r1 = run_debug(
-            home,
-            DebugOpts {
-                breakpoints: bps(&["two"]),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert_eq!(
-            r1.report.paused_at.as_deref(),
-            Some("two"),
-            "paused before `two`"
-        );
-        assert!(!r1.report.success, "a paused run is not a success");
-
-        // `one` is persisted ok with its F-19 vars snapshot; `two` (the
-        // breakpoint) never ran, so it is absent.
-        let one = r1
-            .steps
-            .iter()
-            .find(|s| s.path == "one")
-            .expect("step `one` persisted");
-        assert_eq!(one.state, "ok");
-        assert!(
-            !r1.steps.iter().any(|s| s.path == "two"),
-            "the un-run breakpoint step `two` must not be persisted"
-        );
-        let vars = one
-            .vars_json
-            .as_ref()
-            .expect("F-19: per-step vars snapshot present");
-        assert!(
-            vars.get("x").is_some(),
-            "vars snapshot carries `x` after set_var, got: {vars}"
-        );
-
-        // serde contract the webview reads: camelCase, no snake_case leak.
-        let report_json = serde_json::to_value(&r1.report).unwrap();
-        assert_eq!(report_json["pausedAt"], serde_json::json!("two"));
-        assert!(
-            report_json.get("runId").is_some(),
-            "report uses camelCase runId"
-        );
-        let one_json = serde_json::to_value(one).unwrap();
-        assert!(
-            one_json.get("varsJson").is_some(),
-            "StepRunDto serializes vars_json as camelCase varsJson"
-        );
-        assert!(
-            one_json.get("vars_json").is_none(),
-            "no snake_case key should leak to the webview"
-        );
-
-        // ── Run 2: continue (resume + same breakpoint) → steps off `two`,
-        //    runs `two` + `three`, completes. ──
-        let r2 = run_debug(
-            home,
-            DebugOpts {
-                breakpoints: bps(&["two"]),
-                resume_from: Some(r1.report.run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert!(
-            r2.report.success,
-            "continuing past the breakpoint completes the run"
-        );
-        assert_eq!(r2.report.paused_at, None, "no further pause");
-    }
-
-    #[tokio::test]
-    async fn debug_flow_single_step_advances_one_step_per_resume() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
-
-        // Fresh single-step run pauses before the very first step.
-        let r1 = run_debug(
-            home,
-            DebugOpts {
-                step_mode: true,
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(r1.report.paused_at.as_deref(), Some("one"));
-        assert!(!r1.report.success);
-
-        // Each resume steps off the current step and pauses before the next.
-        let r2 = run_debug(
-            home,
-            DebugOpts {
-                step_mode: true,
-                resume_from: Some(r1.report.run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(r2.report.paused_at.as_deref(), Some("two"));
-
-        let r3 = run_debug(
-            home,
-            DebugOpts {
-                step_mode: true,
-                resume_from: Some(r2.report.run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(r3.report.paused_at.as_deref(), Some("three"));
-
-        // Stepping off the last step finishes the run.
-        let r4 = run_debug(
-            home,
-            DebugOpts {
-                step_mode: true,
-                resume_from: Some(r3.report.run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert!(
-            r4.report.success,
-            "stepping off the last step completes the run"
-        );
-        assert_eq!(r4.report.paused_at, None);
-    }
-}
-
-#[cfg(test)]
-mod cancel_timeout_tests {
-    //! P0-1 / P1-1 桌面接线：`execute_flow` 现在为每次运行注册 CancelToken
-    //! （键 = 落库 run_id）并默认挂步级超时。仿照 `debug_flow_tests` 直接驱动
-    //! 私有 `execute_flow` + temp `LUMO_HOME`，覆盖 webview 命中的完整链路：
-    //! 注册 → 触发取消 / 超时 → run 落库状态 → 句柄表自清理 → 幂等语义。
-    use super::{cancel_run_inner, execute_flow, CancelMap, DebugOpts};
-    use std::time::Duration;
-
-    /// `LUMO_STEP_TIMEOUT_MS` 是进程级环境变量，cargo test 默认多线程并行，
-    /// 两个用例必须串行持锁，否则超时覆盖会污染对方的取消/默认语义。锁要
-    /// 跨 await 持有，故用 tokio 的异步 Mutex（std 版会触发 await_holding_lock）。
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// 单步长睡：取消 / 超时都要能打断一个仍在 await 的动作，而不是等它跑完。
-    const SLEEP_FLOW: &str = r#"
-apiVersion: lumorpa.io/v1
-kind: Flow
-metadata: { id: cancel-it }
-spec:
-  steps:
-    - { id: slow, action: control.sleep, with: { ms: 30000 } }
-"#;
-
-    async fn spawn_sleep_flow(
-        home: std::path::PathBuf,
-        cancels: CancelMap,
-    ) -> Result<super::RunResponse, String> {
-        let flow = lumo_dsl::parse_str(SLEEP_FLOW).expect("parse flow");
-        execute_flow(
-            &home,
-            None,
-            flow,
-            serde_json::json!({}),
-            false,
-            DebugOpts::default(),
-            &cancels,
-            None,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn cancel_run_interrupts_inflight_step_and_clears_token_table() {
-        let _env = ENV_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let cancels = CancelMap::default();
-
-        let task = tokio::spawn(spawn_sleep_flow(home.clone(), cancels.clone()));
-
-        // run_id 由宿主在 run 启动前注册进取消表 —— 轮询表拿到真实键，
-        // 这正是前端 cancel 按钮可依赖的同一份数据源。
-        let mut run_id = None;
-        for _ in 0..250 {
-            if let Some(id) = cancels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .keys()
-                .next()
-                .cloned()
-            {
-                run_id = Some(id);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let run_id = run_id.expect("run registered its cancel token");
-
-        assert!(
-            !cancel_run_inner(&cancels, "no-such-run"),
-            "不存在的 run 必须返回 ok=false 而非报错"
-        );
-        assert!(
-            cancel_run_inner(&cancels, &run_id),
-            "运行中的 run 取消应返回 ok=true"
-        );
-        assert!(
-            cancel_run_inner(&cancels, &run_id),
-            "运行结束前的重复取消保持幂等 ok=true"
-        );
-
-        let result = task.await.expect("task join");
-        let err = match result {
-            Ok(_) => panic!("被取消的 run 不应成功返回"),
-            Err(e) => e,
-        };
-        assert!(err.contains("cancelled"), "错误应表明取消，got: {err}");
-
-        // run 落库为 cancelled，句柄表已被 execute_flow 清理，再取消 → false。
-        let repo = lumo_storage::Repo::open(home.join("lumo.db")).unwrap();
-        let run = repo.get_run(&run_id).unwrap().expect("run row persisted");
-        assert_eq!(run.state, "cancelled");
-        assert!(
-            cancels.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
-            "运行结束后 token 表必须清空"
-        );
-        assert!(
-            !cancel_run_inner(&cancels, &run_id),
-            "已结束的 run 重复取消返回 ok=false"
-        );
-    }
-
-    #[tokio::test]
-    async fn step_timeout_env_override_marks_step_timeout() {
-        let _env = ENV_LOCK.lock().await;
-        std::env::set_var("LUMO_STEP_TIMEOUT_MS", "80");
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().to_path_buf();
-        let cancels = CancelMap::default();
-
-        let result = spawn_sleep_flow(home.clone(), cancels.clone()).await;
-        // 先恢复环境再断言：断言失败也不能把覆盖值泄漏给后续用例。
-        std::env::remove_var("LUMO_STEP_TIMEOUT_MS");
-
-        let err = match result {
-            Ok(_) => panic!("80ms 超时下 30s 的步骤不应成功"),
-            Err(e) => e,
-        };
-        assert!(err.contains("timed out"), "错误应表明超时，got: {err}");
-
-        let repo = lumo_storage::Repo::open(home.join("lumo.db")).unwrap();
-        let run = repo
-            .list_runs(10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .expect("run row persisted");
-        assert_eq!(run.state, "failed", "超时的 run 落库为 failed");
-        let steps = repo.list_steps(&run.id).unwrap();
-        assert!(
-            steps.iter().any(|s| s.state == "timeout"),
-            "超时步骤应标记 state=timeout，got: {:?}",
-            steps.iter().map(|s| s.state.clone()).collect::<Vec<_>>()
-        );
-        assert!(
-            cancels.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
-            "超时失败的 run 也要清理 token 表"
-        );
-    }
-}

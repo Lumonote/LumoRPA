@@ -6,6 +6,7 @@ export const FAMILY_LABEL = {
   desktop:  "桌面自动化",
   image:    "图像识别",
   pdf:      "PDF",
+  docx:     "Word / DOCX",
   condition:"条件判断",
   loop:     "循环",
   wait:     "等待",
@@ -16,6 +17,7 @@ export const FAMILY_LABEL = {
   http:     "网络 / API",
   transfer: "文件传输",
   email:    "邮件",
+  human:    "人机协同",
   notify:   "通知 / Webhook",
   mcp:      "MCP 工具",
   ai:       "AI / 大模型",
@@ -29,6 +31,7 @@ export const FAMILY_LABEL = {
   math:     "数学 / 计算",
   list:     "列表",
   json:     "JSON",
+  xml:      "XML / SOAP",
   csv:      "CSV",
   hash:     "哈希 / 加密",
   util:     "通用工具",
@@ -59,6 +62,13 @@ export const ACTION_ZH = {
   "browser.tabs":     { label: "列出标签页",       hint: "列出当前浏览器标签页" },
   "browser.tab":      { label: "切换标签页",       hint: "按目标 ID 或 URL 片段激活/关闭标签页" },
   "browser.upload":   { label: "上传文件",         hint: "向文件输入框设置本地文件" },
+  "browser.download_wait": { label: "等待下载完成", hint: "点击触发下载并等待文件落盘" },
+  "browser.dialog":   { label: "处理网页弹窗",     hint: "接受或取消 alert / confirm / prompt" },
+  "browser.frame":    { label: "操作 iframe",      hint: "在指定 iframe 内执行脚本或提取元素" },
+  "browser.extract_table": { label: "提取网页表格", hint: "把 HTML 表格抽取为结构化行列" },
+  "browser.drag_and_drop": { label: "拖拽元素",     hint: "把网页元素拖到目标元素或坐标" },
+  "browser.print_pdf": { label: "网页保存 PDF",    hint: "把当前页面打印为 PDF 文件" },
+  "browser.wait_response": { label: "等待接口响应", hint: "等待匹配 URL 的网络响应并读取内容" },
   "browser.close":    { label: "关闭浏览器",       hint: "关闭当前浏览器会话" },
 
   "desktop.move":     { label: "移动鼠标",         hint: "移动到屏幕坐标" },
@@ -66,6 +76,11 @@ export const ACTION_ZH = {
   "desktop.scroll":   { label: "桌面滚动",         hint: "发送鼠标滚轮滚动" },
   "desktop.key":      { label: "发送快捷键",       hint: "发送按键或组合键" },
   "desktop.type":     { label: "桌面输入文本",     hint: "向当前焦点输入文本" },
+  "desktop.screenshot": { label: "桌面截图",       hint: "截取屏幕或区域并保存图片" },
+  "desktop.click_text": { label: "点击屏幕文字",   hint: "OCR 定位屏幕文字并点击" },
+  "window.list":      { label: "列出窗口",         hint: "读取当前可见窗口列表" },
+  "window.activate":  { label: "激活窗口",         hint: "按窗口 ID 或标题片段切到前台" },
+  "window.bounds":    { label: "窗口位置大小",     hint: "读取或设置窗口坐标和尺寸" },
 
   "control.log":      { label: "打印日志",         hint: "向运行台输出一条日志" },
   "control.sleep":    { label: "等待",             hint: "睡眠指定毫秒数" },
@@ -74,6 +89,9 @@ export const ACTION_ZH = {
   "control.if":       { label: "条件判断",         hint: "if / else 分支" },
   "control.for":      { label: "计数循环",         hint: "按次数循环执行" },
   "control.for_each": { label: "遍历循环",         hint: "对数组 / Range / 迭代器迭代" },
+  "control.while":    { label: "条件循环",         hint: "条件为真时重复执行 do 块" },
+  "control.break":    { label: "跳出循环",         hint: "退出最近一层循环" },
+  "control.continue": { label: "继续下一轮",       hint: "跳过当前循环剩余步骤" },
   "control.parallel": { label: "并行执行",         hint: "同时编排多个分支" },
   "control.try":      { label: "异常处理",         hint: "try / catch / finally" },
 
@@ -85,12 +103,29 @@ export const ACTION_ZH = {
   "data.filter":      { label: "过滤数据表",       hint: "按字段条件过滤对象数组" },
   "data.group_by":    { label: "分组聚合",         hint: "按字段分组并统计聚合" },
   "data.join":        { label: "连接数据表",       hint: "按键连接两个对象数组" },
+  "data.dedup":       { label: "数据去重",         hint: "按字段去重并保留首条或末条" },
+  "data.sort_multi":  { label: "多字段排序",       hint: "按多个字段稳定排序对象数组" },
 
   "excel.read_rows":  { label: "读取 Excel",       hint: "读取 .xlsx 表格的行" },
   "excel.write_row":  { label: "写入 Excel",       hint: "追加一行到 .xlsx 表格" },
   "excel.sheet_names": { label: "列出工作表",      hint: "读取工作簿中的工作表名称" },
   "excel.read_cell":  { label: "读取单元格",       hint: "按 A1 地址读取单元格" },
   "excel.write_cell": { label: "写入单元格",       hint: "按 A1 地址写入单元格" },
+  "excel.read_range": { label: "读取区域",         hint: "按 A1 区域读取二维单元格数据" },
+  "excel.write_range": { label: "写入区域",        hint: "把二维数组写入指定工作表区域" },
+  "excel.find_replace": { label: "查找替换",       hint: "在工作表范围内查找并替换文本" },
+  "excel.set_formula": { label: "写入公式",        hint: "向单元格写入 Excel 公式" },
+  "excel.set_style":  { label: "设置样式",         hint: "设置单元格字体、颜色、对齐和边框" },
+  "excel.merge_cells": { label: "合并单元格",      hint: "合并指定区域并写入可选文本" },
+  "excel.set_column_width": { label: "设置列宽",   hint: "调整一个或多个列的显示宽度" },
+  "excel.set_row_height": { label: "设置行高",     hint: "调整一个或多个行的显示高度" },
+  "excel.freeze_panes": { label: "冻结窗格",       hint: "冻结工作表首行、首列或指定位置" },
+  "excel.add_chart": { label: "添加图表",          hint: "基于工作表数据创建折线、柱状或饼图" },
+  "excel.set_conditional_format": { label: "条件格式", hint: "为单元格区域设置条件高亮规则" },
+  "excel.autofit_columns": { label: "自动列宽",    hint: "按内容估算并调整列宽" },
+  "excel.set_comment": { label: "单元格批注",      hint: "给指定单元格写入批注" },
+  "excel.set_data_validation": { label: "数据验证", hint: "给单元格设置列表或数值校验" },
+  "excel.lookup":     { label: "表格查找",         hint: "按键值执行类似 VLOOKUP/XLOOKUP 的查询" },
 
   "file.read":        { label: "读取文件",         hint: "从本地路径读文件" },
   "file.write":       { label: "写入文件",         hint: "把数据写到本地路径" },
@@ -102,16 +137,22 @@ export const ACTION_ZH = {
   "file.rename":      { label: "重命名",           hint: "在当前目录内重命名文件 / 目录" },
   "file.delete":      { label: "删除路径",         hint: "删除文件、链接或目录" },
   "file.metadata":    { label: "读取元数据",       hint: "读取大小、类型和时间信息" },
+  "file.append":      { label: "追加写入",         hint: "向文件末尾追加文本或字节" },
+  "file.wait":        { label: "等待文件",         hint: "等待文件出现、稳定或满足大小条件" },
   "archive.zip":      { label: "创建 ZIP",         hint: "把文件或目录打包成 ZIP" },
   "archive.unzip":    { label: "解压 ZIP",         hint: "安全解压 ZIP 到目标目录" },
 
   "http.request":     { label: "HTTP 请求",        hint: "发起 GET / POST / PUT / DELETE 请求" },
   "http.download":    { label: "HTTP 下载",        hint: "从 URL 下载文件到本地" },
   "http.upload":      { label: "HTTP 上传",        hint: "上传本地文件到 HTTP 服务" },
+  "http.oauth2_token": { label: "获取 OAuth2 Token", hint: "向 Token 端点换取 access_token" },
+  "http.paginate":    { label: "分页请求",         hint: "按 next 链接或字段连续抓取分页数据" },
 
   "pdf.extract_text": { label: "提取 PDF 文本",    hint: "从 PDF 中提取文本" },
   "pdf.info":         { label: "读取 PDF 信息",    hint: "读取页数和 PDF 版本" },
   "pdf.write":        { label: "生成 PDF",         hint: "把文本写成 PDF 文件" },
+  "docx.read_text":   { label: "读取 Word 文本",   hint: "提取 .docx 文档里的段落文本" },
+  "docx.replace_placeholders": { label: "替换 Word 占位符", hint: "把 .docx 模板中的占位符替换为值" },
 
   "image.locate":     { label: "定位图片",         hint: "在截图中查找模板图片位置" },
   "image.compare":    { label: "比较图片",         hint: "比较两张图片的差异" },
@@ -125,9 +166,17 @@ export const ACTION_ZH = {
 
   "email.send":       { label: "发送邮件",         hint: "通过 SMTP 发送邮件" },
   "email.fetch":      { label: "读取邮件",         hint: "通过 IMAP 获取邮件" },
+  "email.mark":       { label: "标记邮件",         hint: "按 UID 标记已读、删除或加旗标" },
+  "email.move":       { label: "移动邮件",         hint: "按 UID 移动邮件到另一个邮箱目录" },
+  "human.input":      { label: "人工输入",         hint: "暂停流程等待操作员输入文本" },
+  "human.confirm":    { label: "人工确认",         hint: "暂停流程等待是/否确认" },
+  "human.approve":    { label: "人工审批",         hint: "发送审批通知并等待操作员决策" },
   "clipboard.get":    { label: "读取剪贴板",       hint: "读取系统剪贴板文本" },
   "clipboard.set":    { label: "写入剪贴板",       hint: "把文本写入系统剪贴板" },
   "notify.send":      { label: "发送通知",         hint: "发送企业微信/飞书/通用 Webhook" },
+  "notify.dingtalk":  { label: "钉钉通知",         hint: "发送钉钉群机器人消息" },
+  "notify.feishu":    { label: "飞书通知",         hint: "发送飞书群机器人消息" },
+  "notify.wecom":     { label: "企微通知",         hint: "发送企业微信群机器人消息" },
   "ftp.upload":       { label: "FTP 上传",         hint: "上传本地文件到 FTP" },
   "ftp.download":     { label: "FTP 下载",         hint: "从 FTP 下载文件" },
   "s3.put":           { label: "上传 S3",          hint: "上传本地文件到 S3 兼容存储" },
@@ -149,6 +198,7 @@ export const ACTION_ZH = {
   "string.pad_left":    { label: "左侧补齐",         hint: "把字符串补齐到指定宽度" },
   "string.pad_right":   { label: "右侧补齐",         hint: "把字符串补齐到指定宽度" },
   "string.format":      { label: "模板替换",         hint: "替换 {key} 占位符" },
+  "string.encode_convert": { label: "编码转换",      hint: "在 UTF-8、GBK、GB18030、Big5 等编码间转换" },
 
   // ── 正则 ──
   "regex.match":        { label: "正则匹配?",        hint: "判断文本是否匹配正则" },
@@ -163,6 +213,7 @@ export const ACTION_ZH = {
   "date.add":           { label: "时间偏移",         hint: "按天/小时/分/秒加减" },
   "date.diff":          { label: "时间差",           hint: "返回 a-b 的差值（天/时/分/秒）" },
   "date.weekday":       { label: "星期几",           hint: "返回 1=周一 … 7=周日" },
+  "date.workday_add":   { label: "工作日偏移",       hint: "按工作日加减日期" },
 
   // ── 数学 ──
   "math.round":         { label: "四舍五入",         hint: "保留指定位小数" },
@@ -206,6 +257,8 @@ export const ACTION_ZH = {
   "hash.md5":           { label: "MD5（旧）",        hint: "MD5 十六进制" },
   "util.base64_encode": { label: "Base64 编码",      hint: "把字符串编码为 Base64" },
   "util.base64_decode": { label: "Base64 解码",      hint: "把 Base64 解码为字符串" },
+  "util.url_encode":    { label: "URL 编码",         hint: "对文本做百分号编码" },
+  "util.url_decode":    { label: "URL 解码",         hint: "还原百分号编码文本" },
   "util.uuid":          { label: "UUID 生成",        hint: "生成随机 UUID v4" },
 
   // ── 系统 ──
@@ -213,10 +266,23 @@ export const ACTION_ZH = {
   "system.env_get":     { label: "读取环境变量",     hint: "按名字读 env" },
   "system.sleep":       { label: "睡眠",             hint: "等待 N 毫秒" },
   "system.platform":    { label: "系统信息",         hint: "返回 OS / arch" },
+  "system.process_list": { label: "进程列表",        hint: "列出当前系统进程" },
+  "system.process_kill": { label: "结束进程",        hint: "按 PID 终止进程，需要显式环境开关" },
+  "system.app_start":   { label: "启动应用",         hint: "启动外部程序并返回进程 ID" },
 
   // ── 数据库 ──
   "db.sqlite_query":    { label: "SQLite 查询",      hint: "只读 SELECT，返回行" },
   "db.sqlite_exec":     { label: "SQLite 写入",      hint: "执行 INSERT/UPDATE/DDL" },
+  "db.sqlite_batch":    { label: "SQLite 批处理",    hint: "在事务中连续执行多条 SQL" },
+  "db.postgres_query":  { label: "PostgreSQL 查询",  hint: "执行只读查询并返回行" },
+  "db.postgres_exec":   { label: "PostgreSQL 写入",  hint: "执行写入或 DDL SQL" },
+  "db.mysql_query":     { label: "MySQL 查询",       hint: "执行只读查询并返回行" },
+  "db.mysql_exec":      { label: "MySQL 写入",       hint: "执行写入或 DDL SQL" },
+
+  // ── XML ──
+  "xml.parse":          { label: "解析 XML",         hint: "把 XML 文本转成 JSON 对象" },
+  "xml.build":          { label: "生成 XML",         hint: "把 JSON 对象生成 XML 文本" },
+  "xml.xpath":          { label: "XPath 查询",       hint: "用 XPath 1.0 从 XML 中提取值" },
 };
 
 // Scenario presets per action: ready-to-tweak `with` payloads surfaced in the
@@ -261,8 +327,10 @@ export const ACTION_PRESETS = {
 export function categoryOf(actionId) {
   if (actionId.startsWith("browser."))                     return "browser";
   if (actionId.startsWith("desktop."))                     return "desktop";
+  if (actionId.startsWith("window."))                      return "desktop";
   if (actionId.startsWith("image."))                       return "image";
   if (actionId.startsWith("pdf."))                         return "pdf";
+  if (actionId.startsWith("docx."))                        return "docx";
   if (actionId === "control.if")                           return "condition";
   if (actionId === "control.for" || actionId === "control.for_each") return "loop";
   if (actionId === "control.sleep")                        return "wait";
@@ -273,6 +341,7 @@ export function categoryOf(actionId) {
   if (actionId.startsWith("http."))                        return "http";
   if (actionId.startsWith("ftp.") || actionId.startsWith("s3.")) return "transfer";
   if (actionId.startsWith("email."))                       return "email";
+  if (actionId.startsWith("human."))                       return "human";
   if (actionId.startsWith("notify."))                      return "notify";
   if (actionId.startsWith("mcp."))                         return "mcp";
   if (actionId.startsWith("ai."))                          return "ai";
@@ -284,6 +353,7 @@ export function categoryOf(actionId) {
   if (actionId.startsWith("math."))                        return "math";
   if (actionId.startsWith("list."))                        return "list";
   if (actionId.startsWith("json."))                        return "json";
+  if (actionId.startsWith("xml."))                         return "xml";
   if (actionId.startsWith("csv."))                         return "csv";
   if (actionId.startsWith("hash."))                        return "hash";
   if (actionId.startsWith("util."))                        return "util";

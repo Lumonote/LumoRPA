@@ -216,7 +216,11 @@ pub(crate) fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
         "inputs" => (&ctx.inputs, &path[1..]),
         "env" => (&ctx.env, &path[1..]),
         "steps" | "vars" => {
-            let map = if head == "steps" { &ctx.steps } else { &ctx.vars };
+            let map = if head == "steps" {
+                &ctx.steps
+            } else {
+                &ctx.vars
+            };
             match path.get(1) {
                 None => return Some(Json::Object((**map).clone())),
                 // 与旧语义一致:对象缺键视作 Null 继续下钻(尾段为空 ⇒ Some(Null),
@@ -408,7 +412,9 @@ mod tests {
         // hard-coded row/item/index binds, so `{{ n }}` silently rendered ""
         // (and errors outright under SemiStrict). row/index must still work.
         let ctx = TemplateCtx {
-            bindings: TemplateCtx::ns(serde_json::json!({ "n": "hello", "row": "hello", "index": 2 })),
+            bindings: TemplateCtx::ns(
+                serde_json::json!({ "n": "hello", "row": "hello", "index": 2 }),
+            ),
             ..Default::default()
         };
         let out = render(

@@ -19,8 +19,9 @@ import {
 } from "./elements.js";
 import { appendStepToSource, appendStepWithSelector } from "./editor/mutations.js";
 import { syncGutter } from "./editor/code.js";
-import { runSelectedFlow, runStep, refreshRuns } from "./runs.js";
+import { runSelectedFlow, runStep, refreshRuns, cancelActiveRun } from "./runs.js";
 import { startDebug } from "./debug.js";
+import { ensureHumanPromptListener } from "./human-prompt.js";
 import {
   refreshProviders, openProviderEditor, saveProvider, testProvider, enableLlmNetworkForSession,
   renderProviderList, refreshActiveProviderPill,
@@ -33,8 +34,8 @@ import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
 import { mountCapabilityHub } from "./capability-hub.js";
-import { mountMissionControl, updateMissionControl } from "./mission-control.js";
-import { restoreAndSubscribeAgentEvents } from "./app-events.js";
+import { mountMissionControl, refreshVoiceHistory, updateMissionControl } from "./mission-control.js";
+import { normalizeToastEvent, reduceRunProgress, restoreAndSubscribeAgentEvents } from "./app-events.js";
 
 let bootStarted = false;
 
@@ -44,10 +45,44 @@ async function bindAppEvents() {
   try {
     await listen("lumo://open-view", (event) => {
       const view = String(event?.payload || "");
-      if (["design", "recorder", "runs", "models", "features", "settings"].includes(view)) {
+      if (["design", "recorder", "runs", "models", "features", "settings", "capability-hub", "mission-control"].includes(view)) {
         switchTopView(view);
+        document.querySelector(`[data-view="${CSS.escape(view)}"]`)?.click();
       }
     });
+    await listen("lumo://toast", (event) => {
+      const message = normalizeToastEvent(event?.payload);
+      toast(message.title, message.body, message.kind);
+    });
+    await listen("lumo://voice-history", () => {
+      refreshVoiceHistory(document, call).catch(() => {});
+    });
+    await listen("lumo://run-progress", (event) => {
+      state.liveRunProgress = reduceRunProgress(state.liveRunProgress, event?.payload);
+      const progress = state.liveRunProgress;
+      if (progress.currentStep) setStatus(`运行中 · ${progress.currentStep}`, "warn");
+      if (progress.logs.length) {
+        const dropped = progress.droppedLogs ? `\n… 已截断 ${progress.droppedLogs} 条较早日志` : "";
+        $("outputBox").textContent = `${progress.logs.join("\n")}${dropped}`;
+      }
+    });
+    await listen("lumo://mcp-oauth-open", (event) => {
+      const url = String(event?.payload?.url || "");
+      if (!/^https?:\/\//i.test(url)) return toast("OAuth 地址无效", url, "bad");
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (!opened) toast("请允许打开 OAuth 页面", url, "warn");
+    });
+    await listen("lumo://mcp-schema-drift", (event) => {
+      const payload = event?.payload || {};
+      toast("MCP Schema 发生变化", `${payload.serverId || "MCP"} · 请审核后再启用新工具结构`, "warn");
+      state.capabilityHubController?.refresh?.();
+    });
+    await listen("lumo://voice-daemon-error", (event) => toast("语音服务异常", String(event?.payload?.error || "未知错误"), "bad"));
+    await listen("lumo://agent-start-failed", (event) => toast("Agent 启动失败", String(event?.payload?.error || "未知错误"), "bad"));
+    await listen("lumo://job-worker-error", (event) => toast("后台任务异常", String(event?.payload?.error || "未知错误"), "bad"));
+    for (const name of ["lumo://job-updated", "lumo://job-recovered"]) {
+      await listen(name, () => state.capabilityHubController?.refresh?.());
+    }
   } catch (err) {
     console.warn("app event listen failed", err);
   }
@@ -62,7 +97,7 @@ function bindEvents() {
     const mission = $("missionControlView");
     mission.style.display = b.dataset.view === "mission-control" ? "" : "none";
     if (b.dataset.view === "capability-hub" && !state.capabilityHubMounted) {
-      mountCapabilityHub({ call, root: hub });
+      state.capabilityHubController = mountCapabilityHub({ call, root: hub });
       state.capabilityHubMounted = true;
     }
     if (b.dataset.view === "mission-control" && !state.missionControlMounted) {
@@ -292,6 +327,7 @@ function bindEvents() {
     else toast("先在图/树视图选中一个节点", "", "warn");
   });
   $("debugBtn").addEventListener("click", () => startDebug());
+  $("cancelRunBtn").addEventListener("click", () => cancelActiveRun());
   $("saveFlowBtn").addEventListener("click", () => saveFlowSource().catch(reportError));
   $("resetInputBtn").addEventListener("click", () => {
     if (state.flow) $("inputsJson").value = pretty(defaultInputs(state.flow));
@@ -352,6 +388,7 @@ async function boot() {
   switchRightSection("inspector");
   renderElementLibrary();
   ensureRecorderListener();
+  ensureHumanPromptListener();
   bindAppEvents();
   const agentListen = window.__TAURI__?.event?.listen;
   if (agentListen) restoreAndSubscribeAgentEvents({ runId: "latest", call, listen: agentListen, onProjection: (projection) => {

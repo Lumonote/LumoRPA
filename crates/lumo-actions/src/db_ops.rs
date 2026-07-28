@@ -366,6 +366,8 @@ struct ExecIn {
     sql: String,
     #[serde(default)]
     args: Vec<Value>,
+    #[serde(default)]
+    dry_run: bool,
 }
 #[async_trait]
 impl Action for SqliteExecAction {
@@ -380,11 +382,25 @@ impl Action for SqliteExecAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ExecIn { db, sql, args } = serde_json::from_value(input)
+        let ExecIn {
+            db,
+            sql,
+            args,
+            dry_run,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.sqlite_exec invalid: {e}")))?;
         let (slot, path) = resolve_target(ctx, db)?;
         ctx.ensure_fs_write(&path)?;
         let binds = bind_params(&args)?;
+        if dry_run {
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "would_execute": true,
+                "sql": sql,
+                "args_count": args.len(),
+                "rows_affected": 0,
+            })));
+        }
         // P0-2:单条写没有事务包裹,执行即落盘 —— 执行前是唯一能拦住副作用的
         // 检查点(拿到锁之后再查一次:排队等锁期间步骤可能已被判死)。
         let interrupt = ctx.step_interrupt();
@@ -449,6 +465,9 @@ struct BatchIn {
     db: Option<PathBuf>,
     /// 顺序执行的语句列表;同一事务内,任一失败全部回滚。
     statements: Vec<BatchStmt>,
+    /// Validate and preview the transaction without opening or mutating the database.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[async_trait]
@@ -464,7 +483,11 @@ impl Action for SqliteBatchAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let BatchIn { db, statements } = serde_json::from_value(input)
+        let BatchIn {
+            db,
+            statements,
+            dry_run,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.sqlite_batch invalid: {e}")))?;
         let (slot, path) = resolve_target(ctx, db)?;
         ctx.ensure_fs_write(&path)?;
@@ -472,6 +495,17 @@ impl Action for SqliteBatchAction {
             return Err(StepError::msg(
                 "db.sqlite_batch requires at least one statement",
             ));
+        }
+        if dry_run {
+            for statement in &statements {
+                let _ = bind_params(&statement.args)?;
+            }
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "database": path,
+                "statements": statements.len(),
+                "sql": statements.iter().map(|statement| &statement.sql).collect::<Vec<_>>(),
+            })));
         }
         // 预先绑定每条语句的参数(在阻塞前做类型校验,任一坏参数直接失败)。
         let mut prepared: Vec<(String, Vec<rusqlite::types::Value>)> =
@@ -550,6 +584,7 @@ static MYSQL_POOLS: ResourceStore<sqlx::MySqlPool> = ResourceStore::new();
 fn register_pg(r: &mut ActionRegistry) {
     r.register(PgQueryAction);
     r.register(PgExecAction);
+    r.register(PgBatchAction);
     r.register_teardown(Arc::new(PgTeardown));
     r.register_resource_factory(Arc::new(PgFactory));
 }
@@ -557,6 +592,7 @@ fn register_pg(r: &mut ActionRegistry) {
 fn register_mysql(r: &mut ActionRegistry) {
     r.register(MysqlQueryAction);
     r.register(MysqlExecAction);
+    r.register(MysqlBatchAction);
     r.register_teardown(Arc::new(MysqlTeardown));
     r.register_resource_factory(Arc::new(MysqlFactory));
 }
@@ -593,7 +629,7 @@ async fn ensure_pg_pool(
     let pool = sqlx::PgPool::connect(dsn)
         .await
         // 故意不回原始错误:DSN 含凭据,sqlx 错误可能回显连接串片段。
-        .map_err(|_| StepError::msg("postgres connect failed"))?;
+        .map_err(|_| StepError::network("postgres connect failed"))?;
     Ok(PG_POOLS.get_or_put(run_id, slot, Arc::new(pool)))
 }
 
@@ -608,7 +644,7 @@ async fn ensure_mysql_pool(
     }
     let pool = sqlx::MySqlPool::connect(dsn)
         .await
-        .map_err(|_| StepError::msg("mysql connect failed"))?;
+        .map_err(|_| StepError::network("mysql connect failed"))?;
     Ok(MYSQL_POOLS.get_or_put(run_id, slot, Arc::new(pool)))
 }
 
@@ -666,7 +702,12 @@ impl ResourceFactory for PgFactory {
     fn kind(&self) -> &str {
         PG_KIND
     }
-    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
         Ok(())
     }
 }
@@ -678,7 +719,12 @@ impl ResourceFactory for MysqlFactory {
     fn kind(&self) -> &str {
         MYSQL_KIND
     }
-    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
         Ok(())
     }
 }
@@ -697,7 +743,11 @@ impl ResourceFactory for MysqlFactory {
 
 /// 解码失败兜底:带列名+类型名打 warn,返回 Null(可见,而非静默)。
 fn unsupported_column(driver: &str, name: &str, ty: &str) -> Value {
-    tracing::warn!(column = name, r#type = ty, "{driver} column type not decodable; returning null");
+    tracing::warn!(
+        column = name,
+        r#type = ty,
+        "{driver} column type not decodable; returning null"
+    );
     Value::Null
 }
 
@@ -710,7 +760,10 @@ fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
         let v = match row.try_get_raw(i) {
             Ok(raw) if raw.is_null() => Value::Null,
             Ok(_) => match ty.as_str() {
-                "BOOL" => row.try_get::<bool, _>(i).map(Value::Bool).unwrap_or(Value::Null),
+                "BOOL" => row
+                    .try_get::<bool, _>(i)
+                    .map(Value::Bool)
+                    .unwrap_or(Value::Null),
                 "INT2" | "SMALLINT" => row
                     .try_get::<i16, _>(i)
                     .map(|n| Value::from(n as i64))
@@ -719,7 +772,10 @@ fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
                     .try_get::<i32, _>(i)
                     .map(|n| Value::from(n as i64))
                     .unwrap_or(Value::Null),
-                "INT8" | "BIGINT" => row.try_get::<i64, _>(i).map(Value::from).unwrap_or(Value::Null),
+                "INT8" | "BIGINT" => row
+                    .try_get::<i64, _>(i)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
                 "FLOAT4" | "REAL" => row
                     .try_get::<f32, _>(i)
                     .ok()
@@ -777,7 +833,10 @@ fn mysql_row_to_json(row: &sqlx::mysql::MySqlRow) -> Value {
         let v = match row.try_get_raw(i) {
             Ok(raw) if raw.is_null() => Value::Null,
             Ok(_) => match ty.as_str() {
-                "BOOLEAN" | "BOOL" => row.try_get::<bool, _>(i).map(Value::Bool).unwrap_or(Value::Null),
+                "BOOLEAN" | "BOOL" => row
+                    .try_get::<bool, _>(i)
+                    .map(Value::Bool)
+                    .unwrap_or(Value::Null),
                 "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => row
                     .try_get::<i64, _>(i)
                     .map(Value::from)
@@ -898,6 +957,9 @@ struct PgIn {
     /// 输出 `truncated: true` 并停止取行 —— 大表不全量进内存。
     #[serde(default = "default_db_limit")]
     limit: u64,
+    /// Mutation actions only: validate and preview without connecting.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 fn default_db_timeout_ms() -> u64 {
@@ -945,14 +1007,16 @@ async fn pg_pool_for(
         }
         None => {
             let dsn = step_dsn.ok_or_else(|| {
-                StepError::msg(format!("{action}: `dsn` is required (or bind a `postgres` resource)"))
+                StepError::msg(format!(
+                    "{action}: `dsn` is required (or bind a `postgres` resource)"
+                ))
             })?;
             ctx.ensure_network_url(&dsn)?;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&dsn)
                 .await
-                .map_err(|_| StepError::msg("postgres connect failed"))?;
+                .map_err(|_| StepError::network("postgres connect failed"))?;
             Ok((Arc::new(pool), true))
         }
     }
@@ -977,14 +1041,16 @@ async fn mysql_pool_for(
         }
         None => {
             let dsn = step_dsn.ok_or_else(|| {
-                StepError::msg(format!("{action}: `dsn` is required (or bind a `mysql` resource)"))
+                StepError::msg(format!(
+                    "{action}: `dsn` is required (or bind a `mysql` resource)"
+                ))
             })?;
             ctx.ensure_network_url(&dsn)?;
             let pool = sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(1)
                 .connect(&dsn)
                 .await
-                .map_err(|_| StepError::msg("mysql connect failed"))?;
+                .map_err(|_| StepError::network("mysql connect failed"))?;
             Ok((Arc::new(pool), true))
         }
     }
@@ -1004,7 +1070,14 @@ impl Action for PgQueryAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let PgIn { dsn, sql, params, timeout_ms, limit } = serde_json::from_value(input)
+        let PgIn {
+            dsn,
+            sql,
+            params,
+            timeout_ms,
+            limit,
+            dry_run: _,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.postgres_query invalid: {e}")))?;
         let (pool, ephemeral) = pg_pool_for(ctx, "db.postgres_query", dsn).await?;
         // 流式取行:到 limit 即停,大结果集不全量进内存;整段套 timeout。
@@ -1031,12 +1104,8 @@ impl Action for PgQueryAction {
             pool.close().await;
         }
         let (rows, truncated) = match fetched {
-            Err(_) => {
-                return Err(StepError::msg(format!(
-                    "db.postgres_query: timed out after {timeout_ms} ms"
-                )))
-            }
-            Ok(r) => r.map_err(|e| StepError::msg(format!("postgres query: {e}")))?,
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r.map_err(|e| StepError::network(format!("postgres query: {e}")))?,
         };
         Ok(ActionResult::from(serde_json::json!({
             "rows": rows,
@@ -1060,8 +1129,31 @@ impl Action for PgExecAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let PgIn { dsn, sql, params, timeout_ms, limit: _ } = serde_json::from_value(input)
+        let PgIn {
+            dsn,
+            sql,
+            params,
+            timeout_ms,
+            limit: _,
+            dry_run,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.postgres_exec invalid: {e}")))?;
+        if dry_run {
+            let (slot, dsn) = resolve_pg(ctx, dsn.clone());
+            if slot.is_none() && dsn.is_none() {
+                return Err(StepError::msg(
+                    "db.postgres_exec: `dsn` is required (or bind a `postgres` resource)",
+                ));
+            }
+            if let Some(dsn) = &dsn {
+                ctx.ensure_network_url(dsn)?;
+            }
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "sql": sql,
+                "params": params.len(),
+            })));
+        }
         let (pool, ephemeral) = pg_pool_for(ctx, "db.postgres_exec", dsn).await?;
         let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
             let mut q = sqlx::query(&sql);
@@ -1075,12 +1167,8 @@ impl Action for PgExecAction {
             pool.close().await;
         }
         let res = match res {
-            Err(_) => {
-                return Err(StepError::msg(format!(
-                    "db.postgres_exec: timed out after {timeout_ms} ms"
-                )))
-            }
-            Ok(r) => r.map_err(|e| StepError::msg(format!("postgres exec: {e}")))?,
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r.map_err(|e| StepError::network(format!("postgres exec: {e}")))?,
         };
         Ok(ActionResult::from(serde_json::json!({
             "rows_affected": res.rows_affected(),
@@ -1107,6 +1195,9 @@ struct MysqlIn {
     /// 仅 query 生效:返回行数上限(默认 1000),超限时输出 `truncated: true`。
     #[serde(default = "default_db_limit")]
     limit: u64,
+    /// Mutation actions only: validate and preview without connecting.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 pub struct MysqlQueryAction;
@@ -1123,7 +1214,14 @@ impl Action for MysqlQueryAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let MysqlIn { dsn, sql, params, timeout_ms, limit } = serde_json::from_value(input)
+        let MysqlIn {
+            dsn,
+            sql,
+            params,
+            timeout_ms,
+            limit,
+            dry_run: _,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.mysql_query invalid: {e}")))?;
         let (pool, ephemeral) = mysql_pool_for(ctx, "db.mysql_query", dsn).await?;
         let fetched = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
@@ -1149,12 +1247,8 @@ impl Action for MysqlQueryAction {
             pool.close().await;
         }
         let (rows, truncated) = match fetched {
-            Err(_) => {
-                return Err(StepError::msg(format!(
-                    "db.mysql_query: timed out after {timeout_ms} ms"
-                )))
-            }
-            Ok(r) => r.map_err(|e| StepError::msg(format!("mysql query: {e}")))?,
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r.map_err(|e| StepError::network(format!("mysql query: {e}")))?,
         };
         Ok(ActionResult::from(serde_json::json!({
             "rows": rows,
@@ -1178,8 +1272,31 @@ impl Action for MysqlExecAction {
         &S
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let MysqlIn { dsn, sql, params, timeout_ms, limit: _ } = serde_json::from_value(input)
+        let MysqlIn {
+            dsn,
+            sql,
+            params,
+            timeout_ms,
+            limit: _,
+            dry_run,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("db.mysql_exec invalid: {e}")))?;
+        if dry_run {
+            let (slot, dsn) = resolve_mysql(ctx, dsn.clone());
+            if slot.is_none() && dsn.is_none() {
+                return Err(StepError::msg(
+                    "db.mysql_exec: `dsn` is required (or bind a `mysql` resource)",
+                ));
+            }
+            if let Some(dsn) = &dsn {
+                ctx.ensure_network_url(dsn)?;
+            }
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "sql": sql,
+                "params": params.len(),
+            })));
+        }
         let (pool, ephemeral) = mysql_pool_for(ctx, "db.mysql_exec", dsn).await?;
         let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
             let mut q = sqlx::query(&sql);
@@ -1193,15 +1310,251 @@ impl Action for MysqlExecAction {
             pool.close().await;
         }
         let res = match res {
-            Err(_) => {
-                return Err(StepError::msg(format!(
-                    "db.mysql_exec: timed out after {timeout_ms} ms"
-                )))
-            }
-            Ok(r) => r.map_err(|e| StepError::msg(format!("mysql exec: {e}")))?,
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r.map_err(|e| StepError::network(format!("mysql exec: {e}")))?,
         };
         Ok(ActionResult::from(serde_json::json!({
             "rows_affected": res.rows_affected(),
+        })))
+    }
+}
+
+// ─── db.postgres_batch / db.mysql_batch ──────────────────────────────────────
+// 显式事务批处理:`statements` 数组在同一个事务里顺序执行,全部成功才 COMMIT,
+// 任一失败提前返回 Err ⇒ `tx` 被 drop ⇒ sqlx 在连接回池时补发 ROLLBACK,整批
+// 不落库(镜像 `db.sqlite_batch` 的语义)。整段套 timeout:超时把事务 future
+// drop 掉,同样走 drop-rollback 路径 —— 「状态说没写,库里也确实没写」。
+// 协作中断:语句边界与 commit 前各设 StepInterrupt 检查点(对照 sqlite
+// `run_batch` 的检查点模式)。池解析 / DSN 脱敏 / network 门禁全部复用
+// `pg_pool_for` / `mysql_pool_for`,与 `db.postgres_exec` 完全一致。
+
+/// 一条批处理语句:SQL + 其位置参数(pg 用 `$1,$2,…`,mysql 用 `?`,原样透传)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RemoteBatchStmt {
+    sql: String,
+    #[serde(default)]
+    params: Vec<Value>,
+}
+
+/// `postgres_batch` 的输入:`dsn`(未绑定时必填)+ `statements` + `timeout_ms`。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PgBatchIn {
+    /// 连接串 `postgres://user:pass@host:5432/db`。绑定语义同 `db.postgres_exec`。
+    #[serde(default)]
+    dsn: Option<String>,
+    /// 顺序执行的语句列表;同一事务内,任一失败全部回滚。
+    statements: Vec<RemoteBatchStmt>,
+    /// 整批执行超时(毫秒,默认 60_000)。超时即报错,事务被丢弃 ⇒ 回滚。
+    #[serde(default = "default_db_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `mysql_batch` 的输入:字段与 `PgBatchIn` 一致(占位符是 `?`)。
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MysqlBatchIn {
+    /// 连接串 `mysql://user:pass@host:3306/db`。绑定语义同 `db.mysql_exec`。
+    #[serde(default)]
+    dsn: Option<String>,
+    /// 顺序执行的语句列表;同一事务内,任一失败全部回滚。
+    statements: Vec<RemoteBatchStmt>,
+    /// 整批执行超时(毫秒,默认 60_000)。超时即报错,事务被丢弃 ⇒ 回滚。
+    #[serde(default = "default_db_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+pub struct PgBatchAction;
+#[async_trait]
+impl Action for PgBatchAction {
+    fn id(&self) -> &'static str {
+        "db.postgres_batch"
+    }
+    fn summary(&self) -> &'static str {
+        "Run many parameterized statements against PostgreSQL in ONE transaction (rollback on error)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PgBatchIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let PgBatchIn {
+            dsn,
+            statements,
+            timeout_ms,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.postgres_batch invalid: {e}")))?;
+        if statements.is_empty() {
+            return Err(StepError::msg(
+                "db.postgres_batch requires at least one statement",
+            ));
+        }
+        if dry_run {
+            let (slot, dsn) = resolve_pg(ctx, dsn.clone());
+            if slot.is_none() && dsn.is_none() {
+                return Err(StepError::msg(
+                    "db.postgres_batch: `dsn` is required (or bind a `postgres` resource)",
+                ));
+            }
+            if let Some(dsn) = &dsn {
+                ctx.ensure_network_url(dsn)?;
+            }
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "statements": statements.len(),
+                "sql": statements.iter().map(|statement| &statement.sql).collect::<Vec<_>>(),
+            })));
+        }
+        let (pool, ephemeral) = pg_pool_for(ctx, "db.postgres_batch", dsn).await?;
+        let interrupt = ctx.step_interrupt();
+        let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| StepError::msg(format!("begin tx: {e}")))?;
+            let mut counts: Vec<u64> = Vec::with_capacity(statements.len());
+            for (i, s) in statements.iter().enumerate() {
+                // 语句边界检查点:Err 提前 return ⇒ `tx` drop ⇒ 回池时 ROLLBACK。
+                if interrupt.is_interrupted() {
+                    return Err(StepError::msg(
+                        "db.postgres_batch interrupted (rolled back)",
+                    ));
+                }
+                let mut q = sqlx::query(&s.sql);
+                for p in &s.params {
+                    q = bind_pg(q, p);
+                }
+                let r = q
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| StepError::msg(format!("statement {i}: {e}")))?;
+                counts.push(r.rows_affected());
+            }
+            // commit 是副作用落地的唯一闸口,必查(对照 sqlite `run_batch`)。
+            if interrupt.is_interrupted() {
+                return Err(StepError::msg(
+                    "db.postgres_batch interrupted (rolled back)",
+                ));
+            }
+            tx.commit()
+                .await
+                .map_err(|e| StepError::msg(format!("commit: {e}")))?;
+            Ok::<_, StepError>(counts)
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let counts = match res {
+            // 超时:事务 future 被 drop,连接回池/关闭时由 sqlx 或服务端 ROLLBACK
+            // —— 未 commit 的写不落地。
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r?,
+        };
+        let total: u64 = counts.iter().sum();
+        Ok(ActionResult::from(serde_json::json!({
+            "rows_affected": counts,
+            "total_affected": total,
+            "statements": counts.len(),
+        })))
+    }
+}
+
+pub struct MysqlBatchAction;
+#[async_trait]
+impl Action for MysqlBatchAction {
+    fn id(&self) -> &'static str {
+        "db.mysql_batch"
+    }
+    fn summary(&self) -> &'static str {
+        "Run many parameterized statements against MySQL in ONE transaction (rollback on error)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<MysqlBatchIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let MysqlBatchIn {
+            dsn,
+            statements,
+            timeout_ms,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("db.mysql_batch invalid: {e}")))?;
+        if statements.is_empty() {
+            return Err(StepError::msg(
+                "db.mysql_batch requires at least one statement",
+            ));
+        }
+        if dry_run {
+            let (slot, dsn) = resolve_mysql(ctx, dsn.clone());
+            if slot.is_none() && dsn.is_none() {
+                return Err(StepError::msg(
+                    "db.mysql_batch: `dsn` is required (or bind a `mysql` resource)",
+                ));
+            }
+            if let Some(dsn) = &dsn {
+                ctx.ensure_network_url(dsn)?;
+            }
+            return Ok(ActionResult::from(serde_json::json!({
+                "dry_run": true,
+                "statements": statements.len(),
+                "sql": statements.iter().map(|statement| &statement.sql).collect::<Vec<_>>(),
+            })));
+        }
+        let (pool, ephemeral) = mysql_pool_for(ctx, "db.mysql_batch", dsn).await?;
+        let interrupt = ctx.step_interrupt();
+        let res = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| StepError::msg(format!("begin tx: {e}")))?;
+            let mut counts: Vec<u64> = Vec::with_capacity(statements.len());
+            for (i, s) in statements.iter().enumerate() {
+                // 语句边界检查点:Err 提前 return ⇒ `tx` drop ⇒ 回池时 ROLLBACK。
+                if interrupt.is_interrupted() {
+                    return Err(StepError::msg("db.mysql_batch interrupted (rolled back)"));
+                }
+                let mut q = sqlx::query(&s.sql);
+                for p in &s.params {
+                    q = bind_mysql(q, p);
+                }
+                let r = q
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| StepError::msg(format!("statement {i}: {e}")))?;
+                counts.push(r.rows_affected());
+            }
+            // commit 是副作用落地的唯一闸口,必查(对照 sqlite `run_batch`)。
+            if interrupt.is_interrupted() {
+                return Err(StepError::msg("db.mysql_batch interrupted (rolled back)"));
+            }
+            tx.commit()
+                .await
+                .map_err(|e| StepError::msg(format!("commit: {e}")))?;
+            Ok::<_, StepError>(counts)
+        })
+        .await;
+        if ephemeral {
+            pool.close().await;
+        }
+        let counts = match res {
+            // 超时:事务 future 被 drop,连接回池/关闭时由 sqlx 或服务端 ROLLBACK
+            // —— 未 commit 的写不落地。
+            Err(_) => return Err(StepError::Timeout { ms: timeout_ms }),
+            Ok(r) => r?,
+        };
+        let total: u64 = counts.iter().sum();
+        Ok(ActionResult::from(serde_json::json!({
+            "rows_affected": counts,
+            "total_affected": total,
+            "statements": counts.len(),
         })))
     }
 }

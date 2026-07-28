@@ -9,6 +9,16 @@ mod common;
 use common::{fs_caps, ok_with, run, run_with};
 use serde_json::json;
 
+#[test]
+fn blocking_pdf_actions_expose_timeout_ms() {
+    let mut registry = lumo_core::ActionRegistry::new();
+    lumo_actions::register_all(&mut registry);
+    for id in ["pdf.extract_text", "pdf.info", "pdf.write"] {
+        let schema = registry.get(id).unwrap().schema().clone();
+        assert!(schema["properties"].get("timeout_ms").is_some(), "{id}");
+    }
+}
+
 #[tokio::test]
 async fn write_then_extract_round_trips_text() {
     let dir = tempfile::tempdir().unwrap();

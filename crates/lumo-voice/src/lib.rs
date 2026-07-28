@@ -8,6 +8,7 @@ pub mod sherpa;
 pub mod sherpa_native;
 pub mod state;
 pub mod stt_router;
+pub mod system_tts;
 
 pub use audio::{AudioFrame, PreRollBuffer, TARGET_SAMPLE_RATE};
 pub use state::{VoiceController, VoiceEvent, VoiceState, VoiceStateError};

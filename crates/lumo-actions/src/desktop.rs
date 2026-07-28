@@ -35,9 +35,101 @@ use std::time::Duration;
 pub fn register(r: &mut ActionRegistry) {
     r.register(MoveAction);
     r.register(ClickAction);
+    r.register(DragAction);
     r.register(ScrollAction);
     r.register(KeyAction);
     r.register(TypeAction);
+}
+
+// ---------------------------------------------------------------------------
+// desktop.drag
+// ---------------------------------------------------------------------------
+
+pub struct DragAction;
+
+fn default_drag_duration_ms() -> u64 {
+    500
+}
+
+fn default_drag_steps() -> u32 {
+    20
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DragIn {
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    #[serde(default)]
+    button: ClickButton,
+    #[serde(default = "default_drag_duration_ms")]
+    duration_ms: u64,
+    #[serde(default = "default_drag_steps")]
+    steps: u32,
+}
+
+#[async_trait]
+impl Action for DragAction {
+    fn id(&self) -> &'static str {
+        "desktop.drag"
+    }
+    fn summary(&self) -> &'static str {
+        "Drag from one absolute screen coordinate to another"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DragIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DragIn {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            button,
+            duration_ms,
+            steps,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("desktop.drag input invalid: {e}")))?;
+        ctx.ensure_desktop("mouse")?;
+        if duration_ms == 0 {
+            return Err(StepError::msg("desktop.drag: `duration_ms` must be >= 1"));
+        }
+        if steps == 0 {
+            return Err(StepError::msg("desktop.drag: `steps` must be >= 1"));
+        }
+        tokio::task::spawn_blocking(move || {
+            send(EventType::MouseMove {
+                x: from_x,
+                y: from_y,
+            })?;
+            send(EventType::ButtonPress(button.to_rdev()))?;
+            let pause = Duration::from_millis(duration_ms / u64::from(steps));
+            for step in 1..=steps {
+                let t = f64::from(step) / f64::from(steps);
+                send(EventType::MouseMove {
+                    x: from_x + (to_x - from_x) * t,
+                    y: from_y + (to_y - from_y) * t,
+                })?;
+                if !pause.is_zero() {
+                    std::thread::sleep(pause);
+                }
+            }
+            send(EventType::ButtonRelease(button.to_rdev()))?;
+            Ok::<(), StepError>(())
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("desktop.drag join: {e}")))??;
+        Ok(ActionResult::from(serde_json::json!({
+            "dragged": true,
+            "from": {"x": from_x, "y": from_y},
+            "to": {"x": to_x, "y": to_y},
+            "duration_ms": duration_ms,
+            "steps": steps,
+        })))
+    }
 }
 
 /// 合成事件间的节流:OS 事件队列需要一点时间,过快会被合并 / 丢弃。

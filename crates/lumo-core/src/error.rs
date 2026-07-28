@@ -99,6 +99,14 @@ pub enum StepError {
     /// AI budget exhausted (max_calls_per_run). Surfaces as raw error, never tries AI again this run.
     #[error("AI budget exhausted ({max} calls per run)")]
     BudgetExceeded { max: u32 },
+    /// Local filesystem/process I/O failed. Kept separate from transport
+    /// failures so `retry.on: [io]` can target transient host errors without
+    /// retrying malformed inputs.
+    #[error("io: {0}")]
+    Io(String),
+    /// Remote transport/protocol operation failed (HTTP/DB/email/FTP/etc.).
+    #[error("network: {0}")]
+    Network(String),
     /// P0-2:步级超时降级成的可重试错误。仅当该步 `retry.on` 显式包含
     /// `timeout` 且还有重试预算时,VM 才把 `StepOutcome::TimedOut` 转成本
     /// 变体送进重试循环;其余情况一律保持 `ExecError::Timeout` 硬中断语义。
@@ -112,6 +120,14 @@ impl StepError {
     pub fn msg(s: impl Into<String>) -> Self {
         Self::Message(s.into())
     }
+
+    pub fn io(s: impl Into<String>) -> Self {
+        Self::Io(s.into())
+    }
+
+    pub fn network(s: impl Into<String>) -> Self {
+        Self::Network(s.into())
+    }
 }
 
 /// Classification of any `StepError` for VM hook dispatch.
@@ -123,6 +139,8 @@ pub enum ErrorKind {
     CondError,
     CapabilityDenied,
     BudgetExceeded,
+    Io,
+    Network,
     /// P0-2:步级超时(仅在 `retry.on` 显式列出 `timeout` 时可重试)。
     Timeout,
     Other,
@@ -138,6 +156,8 @@ impl ErrorKind {
             ErrorKind::CondError => "cond_error",
             ErrorKind::CapabilityDenied => "capability_denied",
             ErrorKind::BudgetExceeded => "budget_exceeded",
+            ErrorKind::Io => "io",
+            ErrorKind::Network => "network",
             ErrorKind::Timeout => "timeout",
             ErrorKind::Other => "other",
         }
@@ -152,6 +172,8 @@ impl StepError {
             StepError::CondError(_) => ErrorKind::CondError,
             StepError::CapabilityDenied { .. } => ErrorKind::CapabilityDenied,
             StepError::BudgetExceeded { .. } => ErrorKind::BudgetExceeded,
+            StepError::Io(_) => ErrorKind::Io,
+            StepError::Network(_) => ErrorKind::Network,
             StepError::Timeout { .. } => ErrorKind::Timeout,
             _ => ErrorKind::Other,
         }
@@ -174,6 +196,8 @@ mod tests {
             ErrorKind::CondError,
             ErrorKind::CapabilityDenied,
             ErrorKind::BudgetExceeded,
+            ErrorKind::Io,
+            ErrorKind::Network,
             ErrorKind::Timeout,
             ErrorKind::Other,
         ] {
@@ -198,6 +222,8 @@ mod tests {
             ErrorKind::CondError,
             ErrorKind::CapabilityDenied,
             ErrorKind::BudgetExceeded,
+            ErrorKind::Io,
+            ErrorKind::Network,
             ErrorKind::Timeout,
             ErrorKind::Other,
         ];

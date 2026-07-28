@@ -203,7 +203,11 @@ fn close_frame(
     stack: &mut [Frame],
     root: &mut Option<(String, Value)>,
 ) -> Result<(), String> {
-    let Frame { name, mut map, text } = frame;
+    let Frame {
+        name,
+        mut map,
+        text,
+    } = frame;
     let value = if map.is_empty() {
         if text.is_empty() {
             Value::Null
@@ -283,12 +287,9 @@ impl Action for BuildAction {
             indent,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("xml.build invalid: {e}")))?;
-        let obj = value
-            .as_object()
-            .filter(|m| m.len() == 1)
-            .ok_or_else(|| {
-                StepError::msg("xml.build: `value` must be an object with exactly one root key")
-            })?;
+        let obj = value.as_object().filter(|m| m.len() == 1).ok_or_else(|| {
+            StepError::msg("xml.build: `value` must be an object with exactly one root key")
+        })?;
         let (name, node) = obj.iter().next().unwrap();
         if node.is_array() {
             return Err(StepError::msg(
@@ -353,7 +354,11 @@ fn write_element(
         return Ok(());
     }
 
-    let pad = if indent { "  ".repeat(depth) } else { String::new() };
+    let pad = if indent {
+        "  ".repeat(depth)
+    } else {
+        String::new()
+    };
     out.push_str(&pad);
 
     let mut attrs: Vec<(&String, &Value)> = Vec::new();
@@ -479,9 +484,7 @@ impl Action for XpathAction {
 
         // 节点集按文档序输出;标量结果(number/string/boolean)作为单元素 matches。
         let matches: Vec<Value> = match result {
-            sxd_xpath::Value::Nodeset(ns) => {
-                ns.document_order().iter().map(node_to_json).collect()
-            }
+            sxd_xpath::Value::Nodeset(ns) => ns.document_order().iter().map(node_to_json).collect(),
             sxd_xpath::Value::Number(n) => {
                 vec![serde_json::Number::from_f64(n)
                     .map(Value::Number)
@@ -540,7 +543,10 @@ fn serialize_sxd_element(out: &mut String, e: &sxd_document::dom::Element<'_>) {
     out.push_str(&name);
     for attr in e.attributes() {
         out.push(' ');
-        out.push_str(&sxd_qname(attr.preferred_prefix(), attr.name().local_part()));
+        out.push_str(&sxd_qname(
+            attr.preferred_prefix(),
+            attr.name().local_part(),
+        ));
         out.push_str("=\"");
         out.push_str(&escape(attr.value()));
         out.push('"');

@@ -10,11 +10,40 @@ import {
 } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { switchRightSection } from "./views.js";
+import { pickRunningRunIds } from "./prompt-utils.js";
+
+/// P0-1：取消按钮的可见性。run_flow/run_step/debug_flow 都是一次 await 到底
+/// 的 invoke，运行期间前端无事件流——发起时亮出「⏹ 取消」，settle 后隐藏。
+export function setRunInFlight(on) {
+  const btn = $("cancelRunBtn");
+  if (btn) btn.hidden = !on;
+}
+
+/// P0-1：点按「取消运行」。后端不在运行开始时把 run_id 推给前端，但引擎在
+/// run 启动时就以 state="running" 落库（vm.rs create_run，键与取消表同一
+/// ulid），所以点按时查一次 list_runs 挑出 running 的 run 逐个 cancel_run
+/// 即可，无需前端后台轮询。ok=false（不存在/已结束）按后端约定只提示。
+export async function cancelActiveRun() {
+  try {
+    const runs = await call("list_runs", { limit: 10 });
+    const ids = pickRunningRunIds(runs);
+    let cancelled = false;
+    for (const runId of ids) {
+      const r = await call("cancel_run", { runId });
+      cancelled = cancelled || !!r?.ok;
+    }
+    if (cancelled) toast("已请求取消", "运行将在当前步中断", "ok");
+    else toast("运行已结束", "没有可取消的进行中运行", "warn");
+  } catch (error) {
+    toast("取消失败", String(error), "bad");
+  }
+}
 
 export async function runSelectedFlow() {
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
   setStatus("运行中…", "warn");
   $("runBtn").disabled = true;
+  setRunInFlight(true);
   try {
     const response = await call("run_flow", {
       path: state.flowPath,
@@ -27,12 +56,14 @@ export async function runSelectedFlow() {
     handleRunError(error);
   } finally {
     $("runBtn").disabled = false;
+    setRunInFlight(false);
   }
 }
 
 export async function runStep(stepId) {
   if (!state.flowPath || !stepId) return;
   setStatus(`单步运行 ${stepId} …`, "warn");
+  setRunInFlight(true);
   try {
     const response = await call("run_step", {
       path: state.flowPath,
@@ -45,6 +76,8 @@ export async function runStep(stepId) {
   } catch (error) {
     setStatus("单步失败", "bad");
     handleRunError(error);
+  } finally {
+    setRunInFlight(false);
   }
 }
 

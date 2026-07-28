@@ -20,6 +20,16 @@ pub trait AiPlanModel: Send + Sync {
         utterance: &str,
         candidates: &[RankedCandidate],
     ) -> Result<String, String>;
+
+    async fn repair(
+        &self,
+        utterance: &str,
+        candidates: &[RankedCandidate],
+        _previous_output: &str,
+        _validation_error: &str,
+    ) -> Result<String, String> {
+        self.generate(utterance, candidates).await
+    }
 }
 
 #[async_trait]
@@ -43,7 +53,11 @@ impl Planner {
         profile: AgentProfile,
         model: Arc<dyn AiPlanModel>,
     ) -> Self {
-        Self { catalog, profile, model }
+        Self {
+            catalog,
+            profile,
+            model,
+        }
     }
 
     pub async fn plan(
@@ -56,8 +70,26 @@ impl Planner {
             .generate(utterance, &candidates)
             .await
             .map_err(PlannerError::Model)?;
-        let plan: AgentPlan =
-            serde_json::from_str(&raw).map_err(|error| PlannerError::MalformedPlan(error.to_string()))?;
+        match self.validate_raw(&raw, &candidates) {
+            Ok(plan) => Ok(plan),
+            Err(first_error) => {
+                let repaired = self
+                    .model
+                    .repair(utterance, &candidates, &raw, &first_error.to_string())
+                    .await
+                    .map_err(PlannerError::Model)?;
+                self.validate_raw(&repaired, &candidates)
+            }
+        }
+    }
+
+    fn validate_raw(
+        &self,
+        raw: &str,
+        candidates: &[RankedCandidate],
+    ) -> Result<AgentPlan, PlannerError> {
+        let plan: AgentPlan = serde_json::from_str(raw)
+            .map_err(|error| PlannerError::MalformedPlan(error.to_string()))?;
         if !candidates.is_empty()
             && plan.nodes.iter().any(|node| {
                 !candidates

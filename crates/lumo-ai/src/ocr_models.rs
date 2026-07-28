@@ -89,11 +89,15 @@ pub fn ocr_model_presets() -> &'static [OcrModelPreset] {
     ]
 }
 
-pub fn ocr_model_catalog() -> Vec<OcrModelStatus> {
+/// Catalog of the preset OCR models with download status. `home` is the
+/// LumoRPA data dir the cache lives under (P2-2: hosts pass it explicitly
+/// instead of mutating `LUMO_HOME` at runtime — `std::env::set_var` in an
+/// async command races every concurrent `getenv` on multi-threaded tokio).
+pub fn ocr_model_catalog(home: &Path) -> Vec<OcrModelStatus> {
     ocr_model_presets()
         .iter()
         .copied()
-        .map(status_for_preset)
+        .map(|preset| status_for_preset(Some(home), preset))
         .collect()
 }
 
@@ -123,13 +127,18 @@ pub fn resolve_preset(model: &str) -> Option<OcrModelPreset> {
 }
 
 pub fn status_for_model(model: &str) -> Option<OcrModelStatus> {
-    resolve_preset(model).map(status_for_preset)
+    resolve_preset(model).map(|preset| status_for_preset(None, preset))
 }
 
-pub async fn download_modelscope_model(model: &str) -> Result<OcrModelDownload, StepError> {
+/// Download a preset model into the cache under `home` (see
+/// [`ocr_model_catalog`] for why `home` is an explicit parameter).
+pub async fn download_modelscope_model(
+    home: &Path,
+    model: &str,
+) -> Result<OcrModelDownload, StepError> {
     let preset = resolve_preset(model)
         .ok_or_else(|| StepError::msg(format!("unknown OCR model preset `{model}`")))?;
-    let dest = cache_dir_for_repo(preset.repo);
+    let dest = cache_dir_for_repo(Some(home), preset.repo);
     tokio::fs::create_dir_all(&dest)
         .await
         .map_err(|e| StepError::msg(format!("create OCR model cache {}: {e}", dest.display())))?;
@@ -170,7 +179,7 @@ pub async fn download_modelscope_model(model: &str) -> Result<OcrModelDownload, 
 
     write_download_marker(&dest, preset)?;
     Ok(OcrModelDownload {
-        model: status_for_preset(preset),
+        model: status_for_preset(Some(home), preset),
         stdout_tail: tail(&stdout, 1800),
         stderr_tail: tail(&stderr, 1800),
     })
@@ -185,7 +194,10 @@ pub async fn run_modelscope_ocr(
     let model_ref = normalize_model_ref(model);
     let preset = resolve_preset(&model_ref)
         .ok_or_else(|| StepError::msg(format!("unknown local OCR model `{model}`")))?;
-    let status = status_for_preset(preset);
+    // No explicit home here: this runs deep inside the flow-run AI helpers
+    // where no data dir is threaded. `cache_root(None)` only *reads* the
+    // environment, which is race-free now that hosts no longer write it.
+    let status = status_for_preset(None, preset);
     if !status.downloaded {
         return Err(StepError::msg(format!(
             "OCR model `{}` is not downloaded. Download it from the Models page first.",
@@ -212,8 +224,8 @@ pub async fn run_modelscope_ocr(
     ))
 }
 
-fn status_for_preset(preset: OcrModelPreset) -> OcrModelStatus {
-    let cache_dir = cache_dir_for_repo(preset.repo);
+fn status_for_preset(home: Option<&Path>, preset: OcrModelPreset) -> OcrModelStatus {
+    let cache_dir = cache_dir_for_repo(home, preset.repo);
     OcrModelStatus {
         preset,
         downloaded: model_dir_downloaded(&cache_dir),
@@ -221,9 +233,17 @@ fn status_for_preset(preset: OcrModelPreset) -> OcrModelStatus {
     }
 }
 
-fn cache_root() -> PathBuf {
+/// Cache-root precedence: `LUMO_OCR_MODELS_DIR` (dedicated override) → the
+/// explicit `home` argument (P2-2) → `LUMO_HOME` env → `~/.lumorpa`. The env
+/// fallbacks stay for call sites that have no home threaded through
+/// ([`run_modelscope_ocr`] / [`status_for_model`]); they only read the
+/// environment — the desktop no longer writes it at runtime.
+fn cache_root(home: Option<&Path>) -> PathBuf {
     if let Ok(p) = std::env::var("LUMO_OCR_MODELS_DIR") {
         return PathBuf::from(p);
+    }
+    if let Some(home) = home {
+        return home.join("models").join("ocr");
     }
     if let Ok(p) = std::env::var("LUMO_HOME") {
         return PathBuf::from(p).join("models").join("ocr");
@@ -235,8 +255,8 @@ fn cache_root() -> PathBuf {
         .join("ocr")
 }
 
-fn cache_dir_for_repo(repo: &str) -> PathBuf {
-    cache_root().join(repo.replace(['/', ':'], "__"))
+fn cache_dir_for_repo(home: Option<&Path>, repo: &str) -> PathBuf {
+    cache_root(home).join(repo.replace(['/', ':'], "__"))
 }
 
 fn model_dir_downloaded(path: &Path) -> bool {
@@ -454,5 +474,26 @@ mod tests {
         assert!(is_local_ocr_model("modelscope/ZhipuAI/GLM-OCR"));
         assert!(is_local_ocr_model("ZhipuAI/GLM-OCR"));
         assert!(!is_local_ocr_model("gpt-4o"));
+    }
+
+    /// P2-2: the catalog roots every cache dir under the *explicit* home,
+    /// so hosts never need to mutate `LUMO_HOME` at runtime.
+    #[test]
+    fn catalog_roots_cache_dirs_under_explicit_home() {
+        if std::env::var_os("LUMO_OCR_MODELS_DIR").is_some() {
+            // The dedicated override wins over any home by design; nothing
+            // to assert about home-rooting in that environment.
+            return;
+        }
+        let home = std::env::temp_dir().join("lumo-ai-ocr-explicit-home");
+        let catalog = ocr_model_catalog(&home);
+        assert!(!catalog.is_empty());
+        for status in catalog {
+            assert!(
+                Path::new(&status.cache_dir).starts_with(home.join("models").join("ocr")),
+                "cache dir `{}` must live under the explicit home",
+                status.cache_dir
+            );
+        }
     }
 }

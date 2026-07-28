@@ -222,6 +222,10 @@ struct ForEachIn {
     r#in: Value,
     #[serde(default = "default_item_bind")]
     bind: String,
+    #[serde(default)]
+    parallel: bool,
+    #[serde(default = "default_max_concurrency")]
+    max_concurrency: usize,
 }
 fn default_item_bind() -> String {
     "item".into()
@@ -242,7 +246,9 @@ impl Action for ForEachAction {
                 "required": ["in"],
                 "properties": {
                     "in": { "type": "array" },
-                    "bind": { "type": "string" }
+                    "bind": { "type": "string" },
+                    "parallel": { "type": "boolean", "default": false },
+                    "max_concurrency": { "type": "integer", "minimum": 1, "default": 8 }
                 },
                 "additionalProperties": false
             })
@@ -378,6 +384,10 @@ impl Action for TryAction {
 
 pub struct ParallelAction;
 
+fn default_max_concurrency() -> usize {
+    8
+}
+
 #[async_trait]
 impl Action for ParallelAction {
     fn id(&self) -> &'static str {
@@ -390,8 +400,10 @@ impl Action for ParallelAction {
         static SCHEMA: Lazy<Value> = Lazy::new(|| {
             serde_json::json!({
                 "type": "object",
-                "properties": {},
-                "additionalProperties": true
+                "properties": {
+                    "max_concurrency": { "type": "integer", "minimum": 1, "default": 8 }
+                },
+                "additionalProperties": false
             })
         });
         &SCHEMA

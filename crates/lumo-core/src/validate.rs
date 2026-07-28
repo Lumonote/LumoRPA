@@ -18,9 +18,28 @@ use serde_json::Value;
 /// 递归校验一棵步骤树:
 /// 1. `action` 必须已在 registry 注册;
 /// 2. 需要 capability 的动作必须有对应的 `spec.capabilities` 声明(空 = 未授权);
+///    需求清单从 lumo-dsl 的 `caps::ACTION_CAPS` 单一声明表派生(P1-2,与运行期
+///    `StepCtx::ensure_*` 门禁及 lint 同源,不再各自硬编码);
 /// 3. `with:` 按动作 JSON schema 做静态校验(required / additionalProperties / 类型);
-/// 4. `skill.invoke` 的字面量 `name` 必须能在 skill 注册表里找到。
+/// 4. `skill.invoke` 的字面量 `name` 必须能在 skill 注册表里找到;
+/// 5. P2-6:`spec.capabilities.network` 的 grant 必须是裸 host 形状 —— 运行期
+///    门禁只拿 `extract_host` 剥出的裸 host 比对,带 scheme/path/port 的 grant
+///    永远匹配不上,是静默死配置,直接拒绝并给出正确写法。
 pub fn validate_steps(
+    steps: &[Step],
+    capabilities: &Capabilities,
+    registry: &ActionRegistry,
+    skill_exists: &dyn Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    for grant in &capabilities.network {
+        if let Some(msg) = lumo_dsl::caps::network_grant_shape_error(grant) {
+            anyhow::bail!("spec.capabilities.network: {msg}");
+        }
+    }
+    validate_steps_inner(steps, capabilities, registry, skill_exists)
+}
+
+fn validate_steps_inner(
     steps: &[Step],
     capabilities: &Capabilities,
     registry: &ActionRegistry,
@@ -30,12 +49,12 @@ pub fn validate_steps(
         let action = registry.get(&step.action).ok_or_else(|| {
             anyhow::anyhow!("unknown action `{}` in step `{}`", step.action, step.id)
         })?;
-        validate_capability_declaration(step, capabilities)?;
         let input = serde_json::to_value(&step.with).unwrap_or(Value::Null);
+        validate_capability_declaration(step, &input, capabilities)?;
         validate_schema(&step.id, &step.action, &input, action.schema())?;
         validate_skill_reference(step, &input, skill_exists)?;
         for children in step.children() {
-            validate_steps(children, capabilities, registry, skill_exists)?;
+            validate_steps_inner(children, capabilities, registry, skill_exists)?;
         }
     }
     Ok(())
@@ -43,32 +62,31 @@ pub fn validate_steps(
 
 fn validate_capability_declaration(
     step: &Step,
+    input: &Value,
     capabilities: &Capabilities,
 ) -> anyhow::Result<()> {
-    let missing = match step.action.as_str() {
-        "file.read" | "file.exists" | "file.list" | "file.metadata" | "file.copy" | "file.move"
-        | "file.rename" | "excel.read_rows" | "excel.read_cell" | "excel.sheet_names"
-        | "image.locate" | "image.compare" | "image.ocr"
-            if capabilities.fs_read.is_empty() =>
-        {
-            Some("fs.read")
-        }
-        "file.write" | "file.mkdir" | "file.copy" | "file.move" | "file.rename" | "file.delete"
-        | "excel.write_row" | "excel.write_cell"
-            if capabilities.fs_write.is_empty() =>
-        {
-            Some("fs.write")
-        }
-        "http.request" | "browser.open" if capabilities.network.is_empty() => Some("network"),
-        "ai.chat" | "image.ocr" if capabilities.llm.is_empty() => Some("llm"),
-        _ => None,
+    let Some(spec) = lumo_dsl::caps::action_caps(&step.action) else {
+        return Ok(());
     };
-    if let Some(kind) = missing {
-        anyhow::bail!(
-            "step `{}` action `{}` requires spec.capabilities.{kind}",
-            step.id,
-            step.action
-        );
+    for cap in spec.required {
+        if !cap.is_granted(capabilities) {
+            anyhow::bail!(
+                "step `{}` action `{}` requires spec.capabilities.{}",
+                step.id,
+                step.action,
+                cap.spec_field()
+            );
+        }
+    }
+    for (key, cap) in spec.conditional {
+        if lumo_dsl::caps::conditional_key_engaged(input, key) && !cap.is_granted(capabilities) {
+            anyhow::bail!(
+                "step `{}` action `{}` requires spec.capabilities.{} when with.{key} is set",
+                step.id,
+                step.action,
+                cap.spec_field()
+            );
+        }
     }
     Ok(())
 }
@@ -250,7 +268,11 @@ mod tests {
         fn id(&self) -> &'static str {
             "test.noop"
         }
-        async fn execute(&self, _ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
+        async fn execute(
+            &self,
+            _ctx: &mut StepCtx,
+            _input: Value,
+        ) -> Result<ActionResult, StepError> {
             Ok(ActionResult::null())
         }
     }
@@ -303,10 +325,11 @@ mod tests {
         }
         let mut registry = ActionRegistry::new();
         registry.register(Invoke);
-        let steps: Vec<Step> = vec![serde_yaml::from_str(
-            "{ id: a, action: skill.invoke, with: { name: ghost } }",
-        )
-        .unwrap()];
+        let steps: Vec<Step> =
+            vec![
+                serde_yaml::from_str("{ id: a, action: skill.invoke, with: { name: ghost } }")
+                    .unwrap(),
+            ];
         // 注入的查找闭包说 skill 不存在 → 报错;说存在 → 通过。
         let err = validate_steps(&steps, &Capabilities::default(), &registry, &|_| false)
             .expect_err("unknown skill must be rejected");
@@ -315,5 +338,97 @@ mod tests {
             n == "ghost"
         })
         .expect("existing skill must validate");
+    }
+
+    // ---- P1-2 / P2-6:capability 声明表派生 + network grant 形状 ---------------
+
+    /// 任意 id 的空动作桩:capability 检查只看 `caps::ACTION_CAPS` 表,不看实现。
+    struct Stub(&'static str);
+    #[async_trait::async_trait]
+    impl Action for Stub {
+        fn id(&self) -> &'static str {
+            self.0
+        }
+        async fn execute(
+            &self,
+            _ctx: &mut StepCtx,
+            _input: Value,
+        ) -> Result<ActionResult, StepError> {
+            Ok(ActionResult::null())
+        }
+    }
+
+    fn caps_with_network(grants: &[&str]) -> Capabilities {
+        Capabilities {
+            network: grants.iter().map(|g| g.to_string()).collect(),
+            ..Capabilities::default()
+        }
+    }
+
+    #[test]
+    fn capability_requirements_derive_from_caps_table() {
+        // 旧硬编码清单看不见的动作(notify.send / db.postgres_query)现在也拦截。
+        for action in ["notify.send", "db.postgres_query"] {
+            let mut registry = ActionRegistry::new();
+            registry.register(Stub(action));
+            let steps = [step("a", action)];
+            let err = validate_steps(&steps, &Capabilities::default(), &registry, &|_| true)
+                .expect_err("empty network grants must be rejected");
+            assert!(
+                err.to_string().contains("spec.capabilities.network"),
+                "{action}: {err}"
+            );
+            validate_steps(&steps, &caps_with_network(&["*"]), &registry, &|_| true)
+                .unwrap_or_else(|e| panic!("{action} with network grant must pass: {e}"));
+        }
+    }
+
+    #[test]
+    fn conditional_capability_checked_only_when_key_present() {
+        let mut registry = ActionRegistry::new();
+        registry.register(Stub("human.approve"));
+        // 无 notify 字段:human.approve 不需要任何 capability。
+        let plain: Vec<Step> = vec![serde_yaml::from_str(
+            "{ id: gate, action: human.approve, with: { message: 'ship?' } }",
+        )
+        .unwrap()];
+        validate_steps(&plain, &Capabilities::default(), &registry, &|_| true)
+            .expect("human.approve without notify needs no capability");
+        // 带 notify 字段:复用 notify.send 的网络门禁 → 必须声明 network。
+        let notifying: Vec<Step> = vec![serde_yaml::from_str(
+            "{ id: gate, action: human.approve, with: { message: 'ship?', notify: { provider: webhook, url: x } } }",
+        )
+        .unwrap()];
+        let err = validate_steps(&notifying, &Capabilities::default(), &registry, &|_| true)
+            .expect_err("human.approve with notify must require network");
+        assert!(
+            err.to_string().contains("when with.notify is set"),
+            "got: {err}"
+        );
+        validate_steps(&notifying, &caps_with_network(&["*"]), &registry, &|_| true)
+            .expect("granted network must pass");
+    }
+
+    #[test]
+    fn network_grant_shape_is_rejected_with_example() {
+        // P2-6:带 scheme/path 的 grant 运行期永不匹配(门禁只比对裸 host)。
+        let registry = ActionRegistry::new();
+        for bad in ["https://example.com", "example.com/api", "db.internal:5432"] {
+            let err = validate_steps(&[], &caps_with_network(&[bad]), &registry, &|_| true)
+                .expect_err("dead network grant must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("spec.capabilities.network") && msg.contains("instead"),
+                "`{bad}` 报错须给正确写法: {msg}"
+            );
+        }
+        // 裸 host / 通配 / 环境变量形状放行。
+        validate_steps(
+            &[],
+            &caps_with_network(&["example.com", "*.corp.cn", "*", "${DB_HOST}"]),
+            &registry,
+            &|_| true,
+        )
+        .expect("bare-host grants must pass");
     }
 }

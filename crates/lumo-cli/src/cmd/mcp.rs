@@ -18,7 +18,7 @@
 //! and `progress` frames don't trip the dispatcher.
 
 use clap::Args as ClapArgs;
-use lumo_core::{FlowVm, RunOptions};
+use lumo_core::RunOptions;
 use lumo_storage::Repo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -344,8 +344,16 @@ impl Server {
         let registry = build_action_registry(&self.home, Some(&path));
         let repo =
             Some(Repo::open(self.home.join("lumo.db")).map_err(|e| (-32002, e.to_string()))?);
-        let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &self.home, &flow)
-            .with_vault(super::load_vault_identity(&self.home));
+        // 架构 P1-1:统一走宿主组装(step_timeout/artifacts/cancel/vault/AI
+        // hooks)。MCP 是 headless 宿主:不注入 prompter(human.* 显式报错),
+        // 取消令牌每次运行新建(MCP 协议侧暂无取消通道,timeout 仍兜底)。
+        let vm = super::host_vm(
+            &self.home,
+            &flow,
+            registry,
+            repo,
+            lumo_core::CancelToken::new(),
+        );
         let report = vm
             .run(
                 &flow,

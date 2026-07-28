@@ -17,6 +17,20 @@ fn net(host: &str) -> Capabilities {
     }
 }
 
+#[test]
+fn every_email_action_exposes_timeout_ms() {
+    let mut registry = lumo_core::ActionRegistry::new();
+    lumo_actions::register_all(&mut registry);
+    for id in ["email.send", "email.fetch", "email.mark", "email.move"] {
+        let action = registry.get(id).unwrap();
+        assert!(
+            action.schema()["properties"].get("timeout_ms").is_some(),
+            "{id} schema: {}",
+            action.schema()
+        );
+    }
+}
+
 // ─── email.send validation + gating ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -116,6 +130,30 @@ async fn send_attachment_fs_read_gated_before_network() {
         err.contains("fs.read"),
         "attachment read must be gated on fs.read, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn send_dry_run_previews_without_connecting() {
+    let out = run_with(
+        "email.send",
+        json!({
+            "host": "smtp.example.com",
+            "port": 465,
+            "username": "u",
+            "password": "p",
+            "from": "a@example.com",
+            "to": ["b@example.com"],
+            "subject": "preview",
+            "body": "not sent",
+            "dry_run": true
+        }),
+        net("smtp.example.com"),
+    )
+    .await
+    .expect("dry-run must not open a socket");
+    assert_eq!(out["dry_run"], json!(true));
+    assert_eq!(out["would_send"], json!(true));
+    assert_eq!(out["recipients"], json!(1));
 }
 
 // ─── email.fetch validation + gating ─────────────────────────────────────────────
@@ -245,7 +283,10 @@ async fn mark_accepts_single_uid_and_is_denied_without_network() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
-    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        err.contains("network"),
+        "should name the network cap: {err}"
+    );
     assert!(
         !err.contains("connect") && !err.contains("handshake"),
         "gate must fire before the IMAP connect, got: {err}"
@@ -332,7 +373,10 @@ async fn move_is_denied_without_a_network_grant() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
-    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        err.contains("network"),
+        "should name the network cap: {err}"
+    );
     assert!(
         !err.contains("connect") && !err.contains("handshake"),
         "gate must fire before the IMAP connect, got: {err}"

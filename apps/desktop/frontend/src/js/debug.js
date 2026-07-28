@@ -11,7 +11,7 @@
 import { $, html, toast, setStatus } from "./dom.js";
 import { call } from "./api.js";
 import { state } from "./state.js";
-import { applyRunResponse } from "./runs.js";
+import { applyRunResponse, setRunInFlight } from "./runs.js";
 import { switchRightSection } from "./views.js";
 
 export function isBreakpoint(stepId) {
@@ -36,6 +36,7 @@ function breakpointList() {
 async function runDebug({ step, resumeFrom }) {
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
   setStatus("调试中…", "warn");
+  setRunInFlight(true);
   try {
     const response = await call("debug_flow", {
       path: state.flowPath,
@@ -48,6 +49,8 @@ async function runDebug({ step, resumeFrom }) {
   } catch (error) {
     setStatus("调试失败", "bad");
     toast("调试失败", String(error), "bad");
+  } finally {
+    setRunInFlight(false);
   }
 }
 

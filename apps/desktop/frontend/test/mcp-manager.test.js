@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderMcpImportWorkspace, buildMcpApplyRequest, renderMcpGovernance, runMcpGovernanceAction } from "../src/js/mcp-manager.js";
+import { collectMcpToolArguments, renderMcpImportWorkspace, buildMcpApplyRequest, renderMcpGovernance, renderMcpToolCall, runMcpGovernanceAction } from "../src/js/mcp-manager.js";
 
 test("renders secret inputs without exposing imported values", () => {
   const html = renderMcpImportWorkspace({ token: "t1", servers: [{ id: "s1", name: "Local" }], secrets: [{ serverId: "s1", fieldPath: "env.API_TOKEN", suggestedVaultKey: "mcp/s1/api_token" }] });
@@ -29,4 +29,21 @@ test("maps MCP OAuth reconnect and schema approval actions", async () => {
   await runMcpGovernanceAction({ action: "oauth", serverId: "erp" }, async (cmd, args) => calls.push([cmd, args]));
   await runMcpGovernanceAction({ action: "approve-schema", serverId: "erp", tool: "send_invoice", schemaHash: "b" }, async (cmd, args) => calls.push([cmd, args]));
   assert.deepEqual(calls.map(([cmd]) => cmd), ["mcp_oauth_start", "approve_mcp_schema_change"]);
+});
+
+test("renders MCP tool inputs from JSON Schema without leaking defaults", () => {
+  const html = renderMcpToolCall("erp", { name: "lookup", inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, limit: { type: "integer", default: 10 }, secret: { type: "string", format: "password" } } } });
+  assert.match(html, /data-mcp-argument="query"/);
+  assert.match(html, /type="number"/);
+  assert.match(html, /type="password"/);
+  assert.match(html, /required/);
+});
+
+test("collects typed MCP tool arguments", () => {
+  const fields = [
+    { dataset: { mcpArgument: "query", schemaType: "string" }, value: "lumo" },
+    { dataset: { mcpArgument: "limit", schemaType: "integer" }, value: "5" },
+    { dataset: { mcpArgument: "enabled", schemaType: "boolean" }, checked: true },
+  ];
+  assert.deepEqual(collectMcpToolArguments(fields), { query: "lumo", limit: 5, enabled: true });
 });

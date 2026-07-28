@@ -1,6 +1,8 @@
 //! `lumo` CLI entry. See `lumo --help`.
 
-mod cmd;
+// 架构 P1-1：`cmd` 收进 lib target（`src/lib.rs`），让 `tests/` 能对宿主
+// VM 组装（`cmd::host_vm`）做契约测试；二进制侧原样复用。
+use lumo_cli::cmd;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

@@ -11,7 +11,11 @@ struct Model(&'static str);
 
 #[async_trait]
 impl AiPlanModel for Model {
-    async fn generate(&self, _utterance: &str, _candidates: &[RankedCandidate]) -> Result<String, String> {
+    async fn generate(
+        &self,
+        _utterance: &str,
+        _candidates: &[RankedCandidate],
+    ) -> Result<String, String> {
         Ok(self.0.into())
     }
 }
@@ -19,7 +23,9 @@ impl AiPlanModel for Model {
 fn fixture() -> (CapabilityCatalog, AgentProfile) {
     let mut descriptor = CapabilityDescriptor {
         id: "orders".into(),
-        source: CapabilitySource::Flow { path: "/orders".into() },
+        source: CapabilitySource::Flow {
+            path: "/orders".into(),
+        },
         name: "orders".into(),
         description: String::new(),
         input_schema: json!({"type": "object", "required": ["id"]}),
@@ -39,7 +45,11 @@ fn fixture() -> (CapabilityCatalog, AgentProfile) {
 #[tokio::test]
 async fn malformed_and_schema_invalid_model_plans_are_rejected() {
     let (catalog, profile) = fixture();
-    let malformed = Planner::new(catalog.clone(), profile.clone(), Arc::new(Model("not-json")));
+    let malformed = Planner::new(
+        catalog.clone(),
+        profile.clone(),
+        Arc::new(Model("not-json")),
+    );
     assert!(matches!(
         malformed.plan("orders", vec![]).await,
         Err(PlannerError::MalformedPlan(_))
@@ -50,7 +60,11 @@ async fn malformed_and_schema_invalid_model_plans_are_rejected() {
     struct OwnedModel(String);
     #[async_trait]
     impl AiPlanModel for OwnedModel {
-        async fn generate(&self, _utterance: &str, _candidates: &[RankedCandidate]) -> Result<String, String> {
+        async fn generate(
+            &self,
+            _utterance: &str,
+            _candidates: &[RankedCandidate],
+        ) -> Result<String, String> {
             Ok(self.0.clone())
         }
     }
@@ -59,4 +73,35 @@ async fn malformed_and_schema_invalid_model_plans_are_rejected() {
         planner.plan("orders", vec![]).await,
         Err(PlannerError::InvalidPlan(_))
     ));
+}
+
+#[tokio::test]
+async fn invalid_model_plan_is_repaired_once() {
+    struct RepairModel;
+    #[async_trait]
+    impl AiPlanModel for RepairModel {
+        async fn generate(
+            &self,
+            _utterance: &str,
+            _candidates: &[RankedCandidate],
+        ) -> Result<String, String> {
+            Ok("not-json".into())
+        }
+
+        async fn repair(
+            &self,
+            _utterance: &str,
+            _candidates: &[RankedCandidate],
+            previous_output: &str,
+            validation_error: &str,
+        ) -> Result<String, String> {
+            assert_eq!(previous_output, "not-json");
+            assert!(validation_error.contains("malformed"));
+            Ok(r#"{"id":"p","objective":"orders","nodes":[{"id":"a","dependsOn":[],"capabilityId":"orders","arguments":{"id":"42"},"risk":"L0","timeoutMs":1000,"retryLimit":0,"expectedOutputSchema":null}],"metadata":{}}"#.into())
+        }
+    }
+
+    let (catalog, profile) = fixture();
+    let planner = Planner::new(catalog, profile, Arc::new(RepairModel));
+    assert_eq!(planner.plan("orders", vec![]).await.unwrap().nodes.len(), 1);
 }

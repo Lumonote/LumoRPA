@@ -266,6 +266,9 @@ struct ProcessKillIn {
     /// 优雅终止信号,force 与否都是 TerminateProcess(见 kill_process 注释)。
     #[serde(default)]
     force: bool,
+    /// Validate and preview the termination without sending a signal.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[async_trait]
@@ -281,7 +284,11 @@ impl Action for ProcessKillAction {
         &S
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ProcessKillIn { pid, force } = serde_json::from_value(input)
+        let ProcessKillIn {
+            pid,
+            force,
+            dry_run,
+        } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("system.process_kill invalid: {e}")))?;
         ensure_process_allowed("system.process_kill")?;
         // 防呆:拒杀自身 —— 杀掉宿主进程等于让 run 自毁,永远不是 flow 的本意
@@ -296,6 +303,14 @@ impl Action for ProcessKillAction {
             return Err(StepError::msg(
                 "system.process_kill: refusing pid 0 (the whole process group on Unix)",
             ));
+        }
+        if dry_run {
+            return Ok(ActionResult::from(serde_json::json!({
+                "pid": pid,
+                "force": force,
+                "dry_run": true,
+                "would_kill": true,
+            })));
         }
         // sysinfo 的进程表刷新是阻塞 syscall,与 process_list 同款挪到阻塞线程池。
         let signal = tokio::task::spawn_blocking(move || kill_process(pid, force))
@@ -369,7 +384,9 @@ impl Action for AppStartAction {
             .map_err(|e| StepError::msg(format!("system.app_start invalid: {e}")))?;
         ensure_process_allowed("system.app_start")?;
         if program.trim().is_empty() {
-            return Err(StepError::msg("system.app_start: program must not be empty"));
+            return Err(StepError::msg(
+                "system.app_start: program must not be empty",
+            ));
         }
         // macOS 的 .app 是 bundle 目录,不能直接 exec —— 转 `open -a <bundle>
         // [--args …]`。代价:返回的 pid 是 `open` 启动器的(LaunchServices 异步

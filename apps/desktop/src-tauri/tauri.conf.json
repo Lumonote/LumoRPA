@@ -30,8 +30,8 @@
         "label": "voice-capsule",
         "title": "Lumo Voice",
         "url": "capsule.html",
-        "width": 360,
-        "height": 64,
+        "width": 310,
+        "height": 76,
         "resizable": false,
         "transparent": true,
         "decorations": false,
@@ -50,6 +50,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "publisher": "LumoRPA Contributors",
     "homepage": "https://lumorpa.io",

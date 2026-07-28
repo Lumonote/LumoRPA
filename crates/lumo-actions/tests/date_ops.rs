@@ -158,5 +158,8 @@ async fn workday_add_rejects_unparseable_date() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("parse") || err.contains("cannot"), "got: {err}");
+    assert!(
+        err.contains("parse") || err.contains("cannot"),
+        "got: {err}"
+    );
 }

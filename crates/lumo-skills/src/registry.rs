@@ -23,6 +23,10 @@ impl SkillRegistry {
         self.by_name.lock().get(name).cloned()
     }
 
+    pub fn remove(&self, name: &str) -> Option<Arc<Skill>> {
+        self.by_name.lock().remove(name)
+    }
+
     pub fn names(&self) -> Vec<String> {
         let g = self.by_name.lock();
         let mut v: Vec<_> = g.keys().cloned().collect();

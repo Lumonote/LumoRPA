@@ -335,3 +335,43 @@ async fn breakpoint_inside_try_unwinds_without_catching_or_failing_container() {
         "a + b replayed (still 1 each), c stepped off and ran; catch never fired"
     );
 }
+
+/// 断点匹配的三层策略：嵌套/循环步骤用裸 id 或静态链也能命中运行期路径
+/// （`loop[0]/b`）。这是 Studio 断点（存裸 id）在嵌套节点上生效的回归测试。
+#[tokio::test]
+async fn breakpoint_on_bare_id_and_static_chain_pauses_inside_loop() {
+    const LOOP_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: bp-loop }
+spec:
+  steps:
+    - { id: a, action: probe.a, with: { tag: "a" } }
+    - id: loop
+      action: control.for_each
+      with: { in: [1, 2] }
+      do:
+        - { id: b, action: probe.b, with: { tag: "b" } }
+"#;
+    for breakpoint in ["b", "loop/b"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repo::open(tmp.path().join("lumo.db")).unwrap();
+        let probes = Probes::new();
+        let flow = parse_str(LOOP_FLOW).unwrap();
+        let report = FlowVm::new(probes.registry(), Some(repo))
+            .with_breakpoints(bp(&[breakpoint]))
+            .run(&flow, RunOptions::default())
+            .await
+            .expect("paused run returns Ok with paused_at");
+        assert_eq!(
+            report.paused_at.as_deref(),
+            Some("loop[0]/b"),
+            "`{breakpoint}` must pause before the first loop iteration of b"
+        );
+        assert_eq!(
+            probes.counts(),
+            (1, 0, 0),
+            "a ran; b never executed under breakpoint `{breakpoint}`"
+        );
+    }
+}

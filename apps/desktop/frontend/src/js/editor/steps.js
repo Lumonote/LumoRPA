@@ -260,7 +260,7 @@ async function toggleStepExpand(path) {
       const newWith = readWithFromContainer(body);
       const updated = mutateStepInSource(state.source, step.id, {
         id: step.id, action: step.action, with: newWith, ai: step.ai, retry: step.retry, when: step.when, bind: step.bind,
-        do: step.do, else: step.else, catch: step.catch, finally: step.finally,
+        do: step.do, else: step.else, catch: step.catch, finally: step.finally, branches: step.branches,
       });
       state.source = updated;
       state.ast = parseYaml(state.source);

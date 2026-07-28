@@ -63,7 +63,10 @@ async fn set_style_applies_font_fill_align_and_border() {
     assert_eq!(style.get_font().unwrap().get_name(), "Arial");
     // 6-digit RGB is normalized to opaque ARGB.
     assert_eq!(style.get_font().unwrap().get_color().get_argb(), "FFFF0000");
-    assert_eq!(style.get_number_format().unwrap().get_format_code(), "#,##0.00");
+    assert_eq!(
+        style.get_number_format().unwrap().get_format_code(),
+        "#,##0.00"
+    );
     assert_eq!(style.get_alignment().unwrap().get_wrap_text(), &true);
     assert_eq!(
         style.get_borders().unwrap().get_bottom().get_border_style(),
@@ -240,7 +243,13 @@ async fn add_chart_maps_column_to_bar() {
     .await;
 
     let book = umya_spreadsheet::reader::xlsx::read(&file).unwrap();
-    assert_eq!(book.get_sheet(&0usize).unwrap().get_chart_collection().len(), 1);
+    assert_eq!(
+        book.get_sheet(&0usize)
+            .unwrap()
+            .get_chart_collection()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -370,7 +379,10 @@ async fn set_data_validation_list_dropdown() {
     let sheet = book.get_sheet(&0usize).unwrap();
     let dvs = sheet.get_data_validations().expect("validations present");
     assert_eq!(dvs.get_data_validation_list().len(), 1);
-    assert_eq!(dvs.get_data_validation_list()[0].get_formula1(), "\"red,green,blue\"");
+    assert_eq!(
+        dvs.get_data_validation_list()[0].get_formula1(),
+        "\"red,green,blue\""
+    );
 }
 
 #[tokio::test]

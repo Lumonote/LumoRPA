@@ -2,7 +2,7 @@
 //! Digests are checked against the canonical "abc" test vectors.
 
 mod common;
-use common::{ok, run};
+use common::{fs_caps, ok, ok_with, run};
 use serde_json::json;
 
 #[tokio::test]
@@ -23,6 +23,29 @@ async fn sha_and_md5_vectors_for_abc() {
         ok("hash.md5", json!({"text": "abc"})).await,
         json!("900150983cd24fb0d6963f7d28e17f72")
     );
+}
+
+#[tokio::test]
+async fn hash_actions_accept_a_sandboxed_file_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc.bin");
+    std::fs::write(&path, b"abc").unwrap();
+    let out = ok_with("hash.sha256", json!({"path": path}), fs_caps(dir.path())).await;
+    assert_eq!(
+        out,
+        json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    );
+}
+
+#[tokio::test]
+async fn hash_actions_require_exactly_one_input_source() {
+    for input in [json!({}), json!({"text": "abc", "path": "/tmp/abc"})] {
+        let err = run("hash.sha256", input).await.unwrap_err();
+        assert!(
+            err.contains("exactly one") || err.contains("one of"),
+            "got: {err}"
+        );
+    }
 }
 
 #[tokio::test]

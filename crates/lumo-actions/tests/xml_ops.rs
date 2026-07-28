@@ -46,7 +46,8 @@ async fn parse_cdata_merges_into_text() {
 
 #[tokio::test]
 async fn parse_chinese_content_and_entities() {
-    let xml = r#"<发票 类型="增值税专用发票"><购买方>晨光&amp;文具</购买方><金额>1234.56</金额></发票>"#;
+    let xml =
+        r#"<发票 类型="增值税专用发票"><购买方>晨光&amp;文具</购买方><金额>1234.56</金额></发票>"#;
     assert_eq!(
         ok("xml.parse", json!({"xml": xml})).await,
         json!({
@@ -87,15 +88,24 @@ async fn parse_malformed_xml_errors() {
     let err = run("xml.parse", json!({"xml": "<a><b></a>"}))
         .await
         .expect_err("mismatched tags must error");
-    assert!(err.contains("xml.parse"), "error should name the action: {err}");
+    assert!(
+        err.contains("xml.parse"),
+        "error should name the action: {err}"
+    );
 }
 
 #[tokio::test]
 async fn parse_rejects_oversized_input() {
-    let err = run("xml.parse", json!({"xml": "<a>xxxxxxxxxx</a>", "max_bytes": 8}))
-        .await
-        .expect_err("input above max_bytes must error");
-    assert!(err.contains("max_bytes"), "error should mention the limit: {err}");
+    let err = run(
+        "xml.parse",
+        json!({"xml": "<a>xxxxxxxxxx</a>", "max_bytes": 8}),
+    )
+    .await
+    .expect_err("input above max_bytes must error");
+    assert!(
+        err.contains("max_bytes"),
+        "error should mention the limit: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +171,10 @@ async fn round_trip_parse_build_parse_is_stable() {
     let parsed = ok("xml.parse", json!({"xml": xml})).await;
     let rebuilt = ok("xml.build", json!({"value": parsed.clone()})).await;
     let reparsed = ok("xml.parse", json!({"xml": rebuilt})).await;
-    assert_eq!(reparsed, parsed, "parse(build(parse(x))) must equal parse(x)");
+    assert_eq!(
+        reparsed, parsed,
+        "parse(build(parse(x))) must equal parse(x)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +186,11 @@ const BOOKS: &str = r#"<library><book id="1" lang="zh"><title>三体</title><pri
 #[tokio::test]
 async fn xpath_text_function() {
     assert_eq!(
-        ok("xml.xpath", json!({"xml": BOOKS, "expr": "/library/book/title/text()"})).await,
+        ok(
+            "xml.xpath",
+            json!({"xml": BOOKS, "expr": "/library/book/title/text()"})
+        )
+        .await,
         json!({"matches": ["三体", "Dune"], "count": 2})
     );
 }
@@ -182,12 +199,20 @@ async fn xpath_text_function() {
 async fn xpath_predicate_and_attribute() {
     // 谓词:按属性筛选第二本书,再取其 @lang。
     assert_eq!(
-        ok("xml.xpath", json!({"xml": BOOKS, "expr": "/library/book[@id='2']/@lang"})).await,
+        ok(
+            "xml.xpath",
+            json!({"xml": BOOKS, "expr": "/library/book[@id='2']/@lang"})
+        )
+        .await,
         json!({"matches": ["en"], "count": 1})
     );
     // 位置谓词。
     assert_eq!(
-        ok("xml.xpath", json!({"xml": BOOKS, "expr": "//book[2]/title/text()"})).await,
+        ok(
+            "xml.xpath",
+            json!({"xml": BOOKS, "expr": "//book[2]/title/text()"})
+        )
+        .await,
         json!({"matches": ["Dune"], "count": 1})
     );
 }
@@ -209,7 +234,11 @@ async fn xpath_scalar_results() {
         json!({"matches": [2.0], "count": 1})
     );
     assert_eq!(
-        ok("xml.xpath", json!({"xml": BOOKS, "expr": "sum(//price) > 100"})).await,
+        ok(
+            "xml.xpath",
+            json!({"xml": BOOKS, "expr": "sum(//price) > 100"})
+        )
+        .await,
         json!({"matches": [true], "count": 1})
     );
 }

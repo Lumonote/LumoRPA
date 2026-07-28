@@ -48,6 +48,9 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(WindowListAction);
     r.register(WindowActivateAction);
     r.register(WindowBoundsAction);
+    r.register(WindowCloseAction);
+    r.register(WindowMinimizeAction);
+    r.register(WindowMaximizeAction);
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +241,7 @@ fn pick_window(
     title_contains: Option<&str>,
 ) -> Result<(WinInfo, usize), StepError> {
     let windows =
-        Window::all().map_err(|e| StepError::msg(format!("{action}: enumerate windows: {e}")))?;
+        Window::all().map_err(|e| StepError::io(format!("{action}: enumerate windows: {e}")))?;
     let infos: Vec<WinInfo> = windows.iter().map(win_info).collect();
     let matched: Vec<WinInfo> = match (id, title_contains) {
         (Some(id), _) => infos.into_iter().filter(|w| w.id == id).collect(),
@@ -258,7 +261,9 @@ fn pick_window(
             (_, Some(t)) => format!("title containing `{t}`"),
             _ => unreachable!(),
         };
-        StepError::msg(format!("{action}: no window matched {what}"))
+        // 归类为 selector_not_found:与 browser/desktop_text 的「目标未命中」同款
+        // typed 错误,`retry.on: [selector_not_found]` 开箱可用。
+        StepError::SelectorNotFound(format!("{action}: no window matched {what}"))
     })?;
     Ok((first, count))
 }
@@ -305,7 +310,7 @@ impl Action for WindowListAction {
         ctx.ensure_desktop("window")?;
         let windows = tokio::task::spawn_blocking(|| {
             let windows = Window::all()
-                .map_err(|e| StepError::msg(format!("window.list: enumerate windows: {e}")))?;
+                .map_err(|e| StepError::io(format!("window.list: enumerate windows: {e}")))?;
             Ok::<Vec<Value>, StepError>(windows.iter().map(|w| win_json(&win_info(w))).collect())
         })
         .await
@@ -476,6 +481,92 @@ impl Action for WindowBoundsAction {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WindowControlIn {
+    #[serde(default)]
+    id: Option<u32>,
+    #[serde(default)]
+    title_contains: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum WindowControlKind {
+    Close,
+    Minimize,
+    Maximize,
+}
+
+async fn execute_window_control(
+    ctx: &mut StepCtx,
+    input: Value,
+    action: &'static str,
+    kind: WindowControlKind,
+) -> Result<ActionResult, StepError> {
+    let WindowControlIn { id, title_contains } = serde_json::from_value(input)
+        .map_err(|e| StepError::msg(format!("{action} input invalid: {e}")))?;
+    ctx.ensure_desktop("window")?;
+    ensure_one_selector(action, id, title_contains.as_ref())?;
+    let out = tokio::task::spawn_blocking(move || {
+        let (win, matched) = pick_window(action, id, title_contains.as_deref())?;
+        match kind {
+            WindowControlKind::Close => platform::close(&win)?,
+            WindowControlKind::Minimize => platform::minimize(&win)?,
+            WindowControlKind::Maximize => platform::maximize(&win)?,
+        }
+        Ok::<Value, StepError>(json!({
+            "ok": true,
+            "id": win.id,
+            "title": win.title,
+            "app": win.app,
+            "matched": matched,
+        }))
+    })
+    .await
+    .map_err(|e| StepError::msg(format!("{action} join: {e}")))??;
+    Ok(ActionResult::from(out))
+}
+
+macro_rules! window_control_action {
+    ($name:ident, $id:literal, $summary:literal, $kind:ident) => {
+        pub struct $name;
+        #[async_trait]
+        impl Action for $name {
+            fn id(&self) -> &'static str {
+                $id
+            }
+            fn summary(&self) -> &'static str {
+                $summary
+            }
+            fn schema(&self) -> &'static Value {
+                static S: Lazy<Value> = Lazy::new(crate::schema::derive::<WindowControlIn>);
+                &S
+            }
+            async fn execute(
+                &self,
+                ctx: &mut StepCtx,
+                input: Value,
+            ) -> Result<ActionResult, StepError> {
+                execute_window_control(ctx, input, self.id(), WindowControlKind::$kind).await
+            }
+        }
+    };
+}
+
+window_control_action!(WindowCloseAction, "window.close", "Close a window", Close);
+window_control_action!(
+    WindowMinimizeAction,
+    "window.minimize",
+    "Minimize a window",
+    Minimize
+);
+window_control_action!(
+    WindowMaximizeAction,
+    "window.maximize",
+    "Maximize a window",
+    Maximize
+);
+
 // ---------------------------------------------------------------------------
 // 平台实现:激活 / 改几何(xcap 只读不写,这两件事必须各平台自己来)
 // ---------------------------------------------------------------------------
@@ -524,6 +615,43 @@ end tell"#,
         run_osascript("window.bounds", &script).map(|_| ())
     }
 
+    pub fn close(win: &WinInfo) -> Result<(), StepError> {
+        run_window_action("window.close", win, "perform action \"AXClose\" of w")
+    }
+
+    pub fn minimize(win: &WinInfo) -> Result<(), StepError> {
+        run_window_action(
+            "window.minimize",
+            win,
+            "set value of attribute \"AXMinimized\" of w to true",
+        )
+    }
+
+    pub fn maximize(win: &WinInfo) -> Result<(), StepError> {
+        run_window_action(
+            "window.maximize",
+            win,
+            "perform action \"AXPress\" of (first button of w whose subrole is \"AXZoomButton\")",
+        )
+    }
+
+    fn run_window_action(action: &str, win: &WinInfo, operation: &str) -> Result<(), StepError> {
+        let title = escape_applescript(&win.title);
+        let script = format!(
+            r#"tell application "System Events"
+  set p to first application process whose unix id is {pid}
+  try
+    set w to first window of p whose name is "{title}"
+  on error
+    set w to front window of p
+  end try
+  {operation}
+end tell"#,
+            pid = win.pid,
+        );
+        run_osascript(action, &script).map(|_| ())
+    }
+
     /// AppleScript 字符串字面量转义(反斜杠与双引号)。标题来自任意应用,不可信。
     fn escape_applescript(s: &str) -> String {
         s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -534,11 +662,12 @@ end tell"#,
             .arg("-e")
             .arg(script)
             .output()
-            .map_err(|e| StepError::msg(format!("{action}: spawn osascript: {e}")))?;
+            .map_err(|e| StepError::io(format!("{action}: spawn osascript: {e}")))?;
         if !out.status.success() {
             // 未授予「辅助功能」时 osascript 以非零退出 + stderr 说明,原样透传。
+            // 归类为 io:本机进程/权限层失败(permission),`retry.on: [io]` 可控。
             let err = String::from_utf8_lossy(&out.stderr);
-            return Err(StepError::msg(format!(
+            return Err(StepError::io(format!(
                 "{action}: osascript failed: {}",
                 err.trim()
             )));
@@ -555,7 +684,8 @@ mod platform {
     use lumo_core::error::StepError;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MoveWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        MoveWindow, PostMessageW, SetForegroundWindow, ShowWindow, SW_MAXIMIZE, SW_MINIMIZE,
+        SW_RESTORE, WM_CLOSE,
     };
 
     fn hwnd(win: &WinInfo) -> HWND {
@@ -569,7 +699,7 @@ mod platform {
         unsafe {
             ShowWindow(hwnd(win), SW_RESTORE);
             if SetForegroundWindow(hwnd(win)) == 0 {
-                return Err(StepError::msg(
+                return Err(StepError::io(
                     "window.activate: SetForegroundWindow refused (foreground lock)".to_string(),
                 ));
             }
@@ -580,11 +710,37 @@ mod platform {
     pub fn set_bounds(win: &WinInfo, s: BoundsSet) -> Result<(), StepError> {
         unsafe {
             if MoveWindow(hwnd(win), s.x, s.y, s.width as i32, s.height as i32, 1) == 0 {
-                return Err(StepError::msg(format!(
+                return Err(StepError::io(format!(
                     "window.bounds: MoveWindow failed (os error {})",
                     std::io::Error::last_os_error()
                 )));
             }
+        }
+        Ok(())
+    }
+
+    pub fn close(win: &WinInfo) -> Result<(), StepError> {
+        unsafe {
+            if PostMessageW(hwnd(win), WM_CLOSE, 0, 0) == 0 {
+                return Err(StepError::io(format!(
+                    "window.close: PostMessageW failed (os error {})",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn minimize(win: &WinInfo) -> Result<(), StepError> {
+        unsafe {
+            ShowWindow(hwnd(win), SW_MINIMIZE);
+        }
+        Ok(())
+    }
+
+    pub fn maximize(win: &WinInfo) -> Result<(), StepError> {
+        unsafe {
+            ShowWindow(hwnd(win), SW_MAXIMIZE);
         }
         Ok(())
     }
@@ -617,18 +773,42 @@ mod platform {
         )
     }
 
+    pub fn close(win: &WinInfo) -> Result<(), StepError> {
+        run_wmctrl("window.close", &["-i", "-c", &format!("0x{:x}", win.id)])
+    }
+
+    pub fn minimize(win: &WinInfo) -> Result<(), StepError> {
+        run_wmctrl(
+            "window.minimize",
+            &["-i", "-r", &format!("0x{:x}", win.id), "-b", "add,hidden"],
+        )
+    }
+
+    pub fn maximize(win: &WinInfo) -> Result<(), StepError> {
+        run_wmctrl(
+            "window.maximize",
+            &[
+                "-i",
+                "-r",
+                &format!("0x{:x}", win.id),
+                "-b",
+                "add,maximized_vert,maximized_horz",
+            ],
+        )
+    }
+
     fn run_wmctrl(action: &str, args: &[&str]) -> Result<(), StepError> {
         let out = std::process::Command::new("wmctrl")
             .args(args)
             .output()
             .map_err(|e| {
-                StepError::msg(format!(
+                StepError::io(format!(
                     "{action}: not supported on this platform without `wmctrl` (X11 only): {e}"
                 ))
             })?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            return Err(StepError::msg(format!(
+            return Err(StepError::io(format!(
                 "{action}: wmctrl failed: {}",
                 err.trim()
             )));
@@ -652,6 +832,22 @@ mod platform {
     pub fn set_bounds(_win: &WinInfo, _s: BoundsSet) -> Result<(), StepError> {
         Err(StepError::msg(
             "window.bounds: set is not supported on this platform".to_string(),
+        ))
+    }
+
+    pub fn close(_win: &WinInfo) -> Result<(), StepError> {
+        Err(StepError::msg(
+            "window.close: not supported on this platform",
+        ))
+    }
+    pub fn minimize(_win: &WinInfo) -> Result<(), StepError> {
+        Err(StepError::msg(
+            "window.minimize: not supported on this platform",
+        ))
+    }
+    pub fn maximize(_win: &WinInfo) -> Result<(), StepError> {
+        Err(StepError::msg(
+            "window.maximize: not supported on this platform",
         ))
     }
 }

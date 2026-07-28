@@ -71,7 +71,7 @@ export function openAiDrawer(path) {
     let updated = mutateStepInSource(state.source, step.id, {
       id: step.id, action: step.action, with: step.with, retry: step.retry, when: step.when, bind: step.bind,
       ai: newAi,
-      do: step.do, else: step.else, catch: step.catch, finally: step.finally,
+      do: step.do, else: step.else, catch: step.catch, finally: step.finally, branches: step.branches,
     });
     if (addCap && newMode !== "off") updated = ensureLlmCapability(updated);
     state.source = updated;

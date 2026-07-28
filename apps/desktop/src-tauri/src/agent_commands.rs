@@ -49,6 +49,18 @@ pub(super) struct AgentSessionDto {
     unknown_nodes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AgentRunSummaryDto {
+    id: String,
+    profile_id: Option<String>,
+    utterance: Option<String>,
+    state: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    error: Option<String>,
+}
+
 #[tauri::command]
 pub(super) async fn agent_start(
     state: State<'_, DesktopState>,
@@ -84,6 +96,7 @@ pub(super) fn setup_agent_service(app: &AppHandle) -> Result<(), String> {
                 Err(error) => Err(format!("invalid agent start request: {error}")),
             };
             if let Err(error) = result {
+                super::voice_commands::report_agent_start_failure(&app, &error);
                 let _ = app.emit("lumo://agent-start-failed", json!({ "error": error }));
             }
         });
@@ -164,6 +177,61 @@ pub(super) fn agent_cancel(
     Ok(result)
 }
 
+/// 语音状态播报用：正在运行/暂停中的 agent 会话数。
+pub(super) fn active_agent_session_count(state: &DesktopState) -> usize {
+    lock_runtime(state)
+        .map(|runtime| {
+            runtime
+                .sessions
+                .values()
+                .filter(|session| {
+                    matches!(
+                        session.state,
+                        AgentRuntimeState::Running | AgentRuntimeState::Paused
+                    )
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+pub(super) fn cancel_active_agent_sessions(
+    app: &AppHandle,
+    state: &DesktopState,
+) -> Result<Vec<String>, String> {    let cancelled = {
+        let mut runtime = lock_runtime(state)?;
+        runtime
+            .sessions
+            .iter_mut()
+            .filter_map(|(run_id, session)| {
+                matches!(
+                    session.state,
+                    AgentRuntimeState::Running | AgentRuntimeState::Paused
+                )
+                .then(|| {
+                    session.cancel.cancel();
+                    session.state = AgentRuntimeState::Cancelled;
+                    run_id.clone()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    if !cancelled.is_empty() {
+        let repo = open_repo(app)?;
+        for run_id in &cancelled {
+            append_event(
+                app,
+                &repo,
+                run_id,
+                AgentEventKind::RunCancelled,
+                None,
+                json!({"source":"voice_stop"}),
+            )?;
+        }
+    }
+    Ok(cancelled)
+}
+
 #[tauri::command]
 pub(super) fn agent_approve(
     app: AppHandle,
@@ -191,9 +259,41 @@ pub(super) fn agent_events(
     run_id: String,
     after_seq: Option<i64>,
 ) -> Result<Vec<AgentEventRow>, String> {
-    open_repo(&app)?
-        .list_agent_events(&run_id, after_seq.unwrap_or(0))
+    let repo = open_repo(&app)?;
+    let run_id = if run_id == "latest" {
+        latest_agent_run_id(&repo)?.unwrap_or(run_id)
+    } else {
+        run_id
+    };
+    repo.list_agent_events(&run_id, after_seq.unwrap_or(0))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) fn agent_run_list(
+    app: AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<AgentRunSummaryDto>, String> {
+    let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
+    open_repo(&app)?.with_raw(|connection| {
+        let mut statement = connection.prepare("SELECT id,profile_id,utterance,state,started_at,finished_at,error FROM agent_runs ORDER BY started_at DESC LIMIT ?")?;
+        let rows = statement.query_map([limit], |row| Ok(AgentRunSummaryDto { id: row.get(0)?, profile_id: row.get(1)?, utterance: row.get(2)?, state: row.get(3)?, started_at: row.get(4)?, finished_at: row.get(5)?, error: row.get(6)? }))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+    }).map_err(|error| error.to_string())
+}
+
+fn latest_agent_run_id(repo: &Repo) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    repo.with_raw(|connection| {
+        connection
+            .query_row(
+                "SELECT id FROM agent_runs ORDER BY started_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

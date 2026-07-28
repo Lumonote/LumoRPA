@@ -84,6 +84,8 @@ pub struct ReadTextAction;
 #[serde(deny_unknown_fields)]
 struct ReadTextIn {
     path: PathBuf,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -99,15 +101,18 @@ impl Action for ReadTextAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ReadTextIn { path } = serde_json::from_value(input)
+        let ReadTextIn { path, timeout_ms } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("docx.read_text input invalid: {e}")))?;
         // 先校验能力,再碰文件 —— 未授权路径即使不存在也要先失败。
         ctx.ensure_fs_read(&path)?;
 
         let path_for_blocking = path.clone();
-        let paragraphs = tokio::task::spawn_blocking(move || read_text(&path_for_blocking))
-            .await
-            .map_err(|e| StepError::msg(format!("docx.read_text join: {e}")))??;
+        let paragraphs = crate::contracts::with_timeout(timeout_ms, async move {
+            tokio::task::spawn_blocking(move || read_text(&path_for_blocking))
+                .await
+                .map_err(|e| StepError::io(format!("docx.read_text join: {e}")))?
+        })
+        .await?;
         let text = paragraphs.join("\n");
         Ok(ActionResult::from(serde_json::json!({
             "paragraphs": paragraphs,
@@ -117,8 +122,8 @@ impl Action for ReadTextAction {
 }
 
 fn read_text(path: &std::path::Path) -> Result<Vec<String>, StepError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| StepError::msg(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| StepError::msg(format!("read {}: {e}", path.display())))?;
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| StepError::msg(format!("open docx {}: {e}", path.display())))?;
     let mut xml = String::new();
@@ -143,6 +148,8 @@ struct ReplaceIn {
     out: PathBuf,
     /// `{{key}}` → 值映射。非字符串值按 JSON 文本写入。
     values: Map<String, Value>,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -162,6 +169,7 @@ impl Action for ReplacePlaceholdersAction {
             template,
             out,
             values,
+            timeout_ms,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("docx.replace_placeholders input invalid: {e}")))?;
         // 读模板 + 写输出,两个闸门都先于碰文件校验。
@@ -172,10 +180,14 @@ impl Action for ReplacePlaceholdersAction {
         let dst = out.clone();
         // P0-2:中断句柄进闭包,`replace_placeholders` 在条目边界与落盘前设检查点。
         let interrupt = ctx.step_interrupt();
-        let replaced =
-            tokio::task::spawn_blocking(move || replace_placeholders(&tpl, &dst, &values, &interrupt))
-                .await
-                .map_err(|e| StepError::msg(format!("docx.replace_placeholders join: {e}")))??;
+        let replaced = crate::contracts::with_timeout(timeout_ms, async move {
+            tokio::task::spawn_blocking(move || {
+                replace_placeholders(&tpl, &dst, &values, &interrupt)
+            })
+            .await
+            .map_err(|e| StepError::io(format!("docx.replace_placeholders join: {e}")))?
+        })
+        .await?;
         Ok(ActionResult::from(serde_json::json!({
             "out": out,
             "replaced": replaced,
@@ -216,8 +228,8 @@ fn replace_placeholders(
             entry
                 .read_to_end(&mut data)
                 .map_err(|e| StepError::msg(format!("read entry {name}: {e}")))?;
-            let opts: zip::write::FileOptions<()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
             writer
                 .start_file(&name, opts)
                 .map_err(|e| StepError::msg(format!("write entry {name}: {e}")))?;

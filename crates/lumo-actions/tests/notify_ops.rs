@@ -313,7 +313,10 @@ async fn dingtalk_robot_denied_without_network_grant() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
-    assert!(err.contains("network"), "should name the network cap: {err}");
+    assert!(
+        err.contains("network"),
+        "should name the network cap: {err}"
+    );
 }
 
 #[tokio::test]
@@ -340,7 +343,10 @@ async fn wecom_robot_rejects_unknown_field() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("input invalid"), "unknown `provider` field rejected: {err}");
+    assert!(
+        err.contains("input invalid"),
+        "unknown `provider` field rejected: {err}"
+    );
 }
 
 #[ignore = "requires a live group-robot webhook + token; set the URL and a network grant"]

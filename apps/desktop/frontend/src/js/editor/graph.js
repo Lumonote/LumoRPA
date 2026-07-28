@@ -3,19 +3,26 @@
 
 import { $, html, pretty } from "../dom.js";
 import { state, graph } from "../state.js";
-import { extractSteps, pathKey, parsePathKey } from "../yaml.js";
+import { childStepBlocks, extractSteps, pathKey, parsePathKey } from "../yaml.js";
 import { appendStepToSource } from "./mutations.js";
 import { selectStep } from "./inspector.js";
+import { applyLayoutOverrides, moveNodeByScreenDelta, zoomGraphAt } from "./graph-viewport.js";
+
+const GRID_SIZE = 18;
+let activeNodeDrag = null;
 
 export function renderGraph() {
   const svg = $("graphSvg");
   const root = $("graphRoot");
   root.innerHTML = "";
+  updateGraphViewport(svg);
   if (!state.ast) {
+    applyGraphTransform();
     return;
   }
   const steps = extractSteps(state.ast);
   if (!steps.length) {
+    applyGraphTransform();
     return;
   }
   // Layout: simple vertical column at depth 0, children expand to the right.
@@ -31,13 +38,13 @@ export function renderGraph() {
       const path = parentPath ? [...parentPath, idx] : [idx];
       const myY = curY;
       const id = pathKey(path);
-      const childKinds = ["do", "else", "catch", "finally"].filter((k) => Array.isArray(step[k]) && step[k].length);
-      const myH = NODE_H_HEAD + (childKinds.length ? 14 : 0);
+      const childBlocks = childStepBlocks(step);
+      const myH = NODE_H_HEAD + (childBlocks.length ? 14 : 0);
       positions.set(id, { x, y: myY, w: NODE_W, h: myH, step, path });
       curY += myH + GAP_Y;
-      childKinds.forEach((kind) => {
-        const childPath = [...path, kind];
-        layoutList(step[kind], x + CHILD_X, childPath);
+      childBlocks.forEach((block) => {
+        const childPath = [...path, ...block.path];
+        layoutList(block.steps, x + CHILD_X, childPath);
         // Mark the kind block top so we can draw a label later if needed.
       });
       maxY = curY;
@@ -45,11 +52,14 @@ export function renderGraph() {
     return maxY;
   }
   layoutList(steps, 0, null);
+  applyLayoutOverrides(positions, currentGraphLayoutOverrides());
+  graph.nodePositions = positions;
 
   // Determine viewbox.
   const items = [...positions.values()];
   const maxX = Math.max(...items.map((p) => p.x + p.w)) + 40;
   const maxY = Math.max(...items.map((p) => p.y + p.h)) + 40;
+  graph.contentBounds = { width: Math.max(maxX, 100), height: Math.max(maxY, 100) };
 
   // Edges: each sibling step → next sibling step at same parent. Plus parent → first child for each child kind.
   const edges = [];
@@ -63,19 +73,16 @@ export function renderGraph() {
       } else if (parentId) {
         edges.push({ from: parentId, to: key, kind: parentKind === "do" ? "loop" : "control" });
       }
-      ["do", "else", "catch", "finally"].forEach((kind) => {
-        if (Array.isArray(step[kind]) && step[kind].length) {
-          const childPath = [...path, kind];
-          collectEdges(step[kind], childPath, key, kind);
-        }
+      childStepBlocks(step).forEach((block) => {
+        const childPath = [...path, ...block.path];
+        collectEdges(block.steps, childPath, key, block.kind);
       });
     });
   }
   collectEdges(steps, null);
 
   // Apply current graph transform.
-  root.setAttribute("transform", `translate(${graph.tx} ${graph.ty}) scale(${graph.scale})`);
-  svg.setAttribute("viewBox", `0 0 ${Math.max(maxX, 100)} ${Math.max(maxY, 100)}`);
+  applyGraphTransform();
 
   // Draw edges first (under nodes).
   for (const e of edges) {
@@ -113,16 +120,18 @@ export function renderGraph() {
   // Draw nodes.
   for (const pos of positions.values()) {
     const family = pos.step.action ? pos.step.action.split(".")[0] : "misc";
+    const key = pathKey(pos.path);
     const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
     fo.setAttribute("x", String(pos.x));
     fo.setAttribute("y", String(pos.y));
     fo.setAttribute("width", String(pos.w));
     fo.setAttribute("height", String(pos.h + 40));
     fo.setAttribute("class", "graph-node-foreign");
+    fo.setAttribute("data-step-path", key);
     const withSummary = renderWithSummary(pos.step.with);
-    const selected = pathKey(state.selectedStepPath || []) === pathKey(pos.path);
+    const selected = pathKey(state.selectedStepPath || []) === key;
     fo.innerHTML = `
-      <div xmlns="http://www.w3.org/1999/xhtml" class="graph-node family-${html(family)} ${selected ? "is-selected" : ""}" data-step-path="${html(pathKey(pos.path))}">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="graph-node family-${html(family)} ${selected ? "is-selected" : ""}" data-step-path="${html(key)}">
         <div class="graph-node-head">
           <span class="id">${html(pos.step.id || "(no id)")}</span>
           <span class="action">${html(pos.step.action || "?")}</span>
@@ -154,16 +163,140 @@ export function renderWithSummary(w) {
     .join("<br />");
 }
 
+export function applyGraphTransform() {
+  $("graphRoot")?.setAttribute("transform", `translate(${graph.tx} ${graph.ty}) scale(${graph.scale})`);
+  updateGraphGrid();
+}
+
+function updateGraphViewport(svg) {
+  const rect = svg.getBoundingClientRect();
+  const width = Math.max(Math.round(rect.width || 0), 100);
+  const height = Math.max(Math.round(rect.height || 0), 100);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+}
+
+function updateGraphGrid() {
+  const svg = $("graphSvg");
+  const wrap = svg?.closest(".graph-wrap");
+  if (!wrap) return;
+  const size = GRID_SIZE * graph.scale;
+  wrap.style.backgroundSize = `${size}px ${size}px`;
+  wrap.style.backgroundPosition = `${positiveModulo(graph.tx, size)}px ${positiveModulo(graph.ty, size)}px`;
+}
+
+function positiveModulo(value, size) {
+  return ((value % size) + size) % size;
+}
+
+function currentGraphLayoutKey() {
+  return state.flowPath || state.flow?.path || state.flow?.id || state.ast?.metadata?.id || "__draft__";
+}
+
+function currentGraphLayoutOverrides() {
+  if (!state.graphLayouts || typeof state.graphLayouts !== "object" || Array.isArray(state.graphLayouts)) {
+    state.graphLayouts = {};
+  }
+  const key = currentGraphLayoutKey();
+  if (!state.graphLayouts[key] || typeof state.graphLayouts[key] !== "object") {
+    state.graphLayouts[key] = {};
+  }
+  return state.graphLayouts[key];
+}
+
+function setGraphNodeLayoutOverride(nodeKey, position) {
+  currentGraphLayoutOverrides()[nodeKey] = {
+    x: Math.round(position.x),
+    y: Math.round(position.y),
+  };
+}
+
+function saveGraphLayouts() {
+  try {
+    localStorage.setItem("lumo.graphLayouts", JSON.stringify(state.graphLayouts || {}));
+  } catch {
+    // Local layout is convenience state; ignore storage quota/privacy failures.
+  }
+}
+
+function beginGraphNodeDrag(event, nodeKey, position) {
+  if (event.button !== undefined && event.button !== 0) return;
+  const svg = $("graphSvg");
+  activeNodeDrag = {
+    key: nodeKey,
+    startX: event.clientX,
+    startY: event.clientY,
+    startPosition: { x: position.x, y: position.y },
+    // Pointer capture redirects the eventual click to the svg, so selection
+    // is handled explicitly on pointerup; below-threshold presses select,
+    // beyond-threshold presses drag.
+    moved: false,
+  };
+  svg.classList.add("is-dragging-node");
+  try {
+    svg.setPointerCapture(event.pointerId);
+  } catch {
+    // Window-level drag listeners still handle foreignObject/browser edge cases.
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function finishGraphNodeDrag(svg) {
+  if (activeNodeDrag) {
+    if (activeNodeDrag.moved) saveGraphLayouts();
+    else selectStep(parsePathKey(activeNodeDrag.key));
+  }
+  activeNodeDrag = null;
+  svg.classList.remove("is-dragging-node");
+}
+
+const DRAG_THRESHOLD_PX = 4;
+
+function zoomFromCenter(svg, factor) {
+  const rect = svg.getBoundingClientRect();
+  const next = zoomGraphAt(graph, rect.width / 2, rect.height / 2, factor);
+  graph.tx = next.tx;
+  graph.ty = next.ty;
+  graph.scale = next.scale;
+  applyGraphTransform();
+}
+
+function resetGraphView() {
+  graph.scale = 1;
+  graph.tx = 24;
+  graph.ty = 24;
+  applyGraphTransform();
+}
+
 // Graph pan + zoom
 export function bindGraphPan() {
   const svg = $("graphSvg");
+  $("graphZoomIn")?.addEventListener("click", () => zoomFromCenter(svg, 1.15));
+  $("graphZoomOut")?.addEventListener("click", () => zoomFromCenter(svg, 1 / 1.15));
+  $("graphZoomReset")?.addEventListener("click", resetGraphView);
   let panning = false;
   let startX = 0;
   let startY = 0;
   let origTx = 0;
   let origTy = 0;
+  document.addEventListener("pointerdown", (e) => {
+    const node = e.target.closest?.(".graph-node[data-step-path]");
+    if (!node) return;
+    const nodeKey = node.dataset.stepPath;
+    const pos = graph.nodePositions?.get(nodeKey);
+    if (!pos) return;
+    beginGraphNodeDrag(e, nodeKey, pos);
+  }, true);
   svg.addEventListener("pointerdown", (e) => {
-    if (e.target.closest("[data-step-path]")) return; // node drag handled elsewhere (selection)
+    if (e.button !== undefined && e.button !== 0) return;
+    const node = e.target.closest?.(".graph-node[data-step-path]");
+    if (node) {
+      const nodeKey = node.dataset.stepPath;
+      const pos = graph.nodePositions?.get(nodeKey);
+      if (!pos) return;
+      beginGraphNodeDrag(e, nodeKey, pos);
+      return;
+    }
     panning = true;
     svg.classList.add("is-panning");
     startX = e.clientX;
@@ -172,20 +305,44 @@ export function bindGraphPan() {
     origTy = graph.ty;
     svg.setPointerCapture(e.pointerId);
   });
-  svg.addEventListener("pointermove", (e) => {
+  const handlePointerMove = (e) => {
+    if (activeNodeDrag) {
+      const dx = e.clientX - activeNodeDrag.startX;
+      const dy = e.clientY - activeNodeDrag.startY;
+      if (!activeNodeDrag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      activeNodeDrag.moved = true;
+      const next = moveNodeByScreenDelta(activeNodeDrag.startPosition, graph, dx, dy);
+      setGraphNodeLayoutOverride(activeNodeDrag.key, next);
+      renderGraph();
+      return;
+    }
     if (!panning) return;
     graph.tx = origTx + (e.clientX - startX);
     graph.ty = origTy + (e.clientY - startY);
-    $("graphRoot").setAttribute("transform", `translate(${graph.tx} ${graph.ty}) scale(${graph.scale})`);
-  });
-  svg.addEventListener("pointerup", () => { panning = false; svg.classList.remove("is-panning"); });
-  svg.addEventListener("pointercancel", () => { panning = false; svg.classList.remove("is-panning"); });
+    applyGraphTransform();
+  };
+  const handlePointerEnd = () => {
+    finishGraphNodeDrag(svg);
+    panning = false;
+    svg.classList.remove("is-panning");
+  };
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", handlePointerEnd);
+  window.addEventListener("pointercancel", handlePointerEnd);
   svg.addEventListener("wheel", (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.08 : 1 / 1.08;
-    graph.scale = Math.max(0.4, Math.min(2.5, graph.scale * factor));
-    $("graphRoot").setAttribute("transform", `translate(${graph.tx} ${graph.ty}) scale(${graph.scale})`);
+    if (e.ctrlKey || e.metaKey) {
+      const rect = svg.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.08 : 1 / 1.08;
+      const next = zoomGraphAt(graph, e.clientX - rect.left, e.clientY - rect.top, factor);
+      graph.tx = next.tx;
+      graph.ty = next.ty;
+      graph.scale = next.scale;
+    } else {
+      graph.tx -= e.deltaX;
+      graph.ty -= e.deltaY;
+    }
+    applyGraphTransform();
   }, { passive: false });
 
   // Drop target for actions library

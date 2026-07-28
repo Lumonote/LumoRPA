@@ -42,6 +42,8 @@ pub fn register(r: &mut ActionRegistry) {
     // messages), reclaimed at run end. Unbound sends build a transport per call.
     r.register_teardown(Arc::new(SmtpTeardown));
     r.register_resource_factory(Arc::new(SmtpFactory));
+    r.register_teardown(Arc::new(ImapTeardown));
+    r.register_resource_factory(Arc::new(ImapFactory));
 }
 
 // ─── T3: `smtp` resource — one transport per run, reused across sends ──────────
@@ -60,11 +62,13 @@ pub fn register(r: &mut ActionRegistry) {
 // gate on `host` still runs on every send (defense in depth).
 
 pub(crate) const SMTP_KIND: &str = "smtp";
+pub(crate) const IMAP_KIND: &str = "imap";
 
 /// Transports opened for `smtp` resources, keyed `(run_id, resource name)`.
 /// `AsyncSmtpTransport` is `Send + Sync + Clone` (it shares a pool internally),
 /// so the cached `Arc` is sent straight to `send` without cloning.
 static SMTP_TRANSPORTS: ResourceStore<AsyncSmtpTransport<Tokio1Executor>> = ResourceStore::new();
+static IMAP_SESSIONS: ResourceStore<tokio::sync::Mutex<ImapSession>> = ResourceStore::new();
 
 /// The `smtp` resource the send binds to, or `None` when it binds nothing (or
 /// binds a non-`smtp` / undeclared resource) — in which case it builds a
@@ -73,6 +77,14 @@ fn smtp_slot(ctx: &StepCtx) -> Option<String> {
     let name = ctx.current_resource()?;
     match ctx.resource_decl(&name) {
         Ok(decl) if decl.kind == SMTP_KIND => Some(name),
+        _ => None,
+    }
+}
+
+fn imap_slot(ctx: &StepCtx) -> Option<String> {
+    let name = ctx.current_resource()?;
+    match ctx.resource_decl(&name) {
+        Ok(decl) if decl.kind == IMAP_KIND => Some(name),
         _ => None,
     }
 }
@@ -149,9 +161,77 @@ impl ResourceFactory for SmtpFactory {
         SMTP_KIND
     }
 
-    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
         Ok(())
     }
+}
+
+struct ImapFactory;
+
+#[async_trait]
+impl ResourceFactory for ImapFactory {
+    fn kind(&self) -> &str {
+        IMAP_KIND
+    }
+
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
+        // Credentials are vault-resolved step inputs, so the first bound IMAP
+        // action opens the live session lazily (same model as smtp).
+        Ok(())
+    }
+}
+
+struct ImapTeardown;
+
+#[async_trait]
+impl RunTeardown for ImapTeardown {
+    async fn teardown(&self, run_id: &str) {
+        close_run_imap_sessions(run_id).await;
+    }
+}
+
+async fn ensure_imap_session(
+    run_id: &str,
+    slot: &str,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<Arc<tokio::sync::Mutex<ImapSession>>, StepError> {
+    if let Some(session) = IMAP_SESSIONS.get(run_id, slot) {
+        return Ok(session);
+    }
+    let session = connect_login("email.imap", host, port, username, password).await?;
+    let candidate = Arc::new(tokio::sync::Mutex::new(session));
+    let (winner, loser) = IMAP_SESSIONS.get_or_put_reclaiming_loser(run_id, slot, candidate);
+    if let Some(loser) = loser {
+        let mut session = loser.lock().await;
+        let _ = session.logout().await;
+    }
+    Ok(winner)
+}
+
+#[doc(hidden)]
+pub async fn close_run_imap_sessions(run_id: &str) {
+    for session in IMAP_SESSIONS.take_run(run_id) {
+        let mut session = session.lock().await;
+        let _ = session.logout().await;
+    }
+}
+
+#[doc(hidden)]
+pub fn imap_session_open(run_id: &str) -> bool {
+    IMAP_SESSIONS.has_run(run_id)
 }
 
 // ─── email.send (SMTP) ─────────────────────────────────────────────────────────
@@ -181,6 +261,11 @@ struct SendIn {
     /// 可选附件,逐个本地文件路径——每个都先过 fs.read 门控再读取。
     #[serde(default)]
     attachments: Vec<String>,
+    /// Validate capabilities and message addressing without opening SMTP.
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -208,6 +293,8 @@ impl Action for SendAction {
             body,
             html,
             attachments,
+            dry_run,
+            timeout_ms,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("email.send input invalid: {e}")))?;
 
@@ -228,6 +315,22 @@ impl Action for SendAction {
             builder = builder.cc(parse_mailbox("cc", addr)?);
         }
         builder = builder.subject(subject);
+
+        // Dry-run still validates every declared capability, but does not read
+        // attachment contents or open a network connection.
+        for path in &attachments {
+            ctx.ensure_fs_read(&PathBuf::from(path))?;
+        }
+        ctx.ensure_network_url(&host)?;
+        if dry_run {
+            return Ok(ActionResult::from(serde_json::json!({
+                "ok": true,
+                "dry_run": true,
+                "would_send": true,
+                "recipients": to.len() + cc.len(),
+                "attachments": attachments.len(),
+            })));
+        }
 
         // 3) fs.read 门控:每个附件路径都要先授权,再读取。门控在触网之前。
         let mut parts: Vec<SinglePart> = Vec::new();
@@ -251,30 +354,30 @@ impl Action for SendAction {
         // 组装正文 / 多部分结构。
         let message = build_message(builder, &body, html.as_deref(), parts)?;
 
-        // 4) 网络门控:在建立任何 SMTP 连接之前 gate 远端主机。
-        ctx.ensure_network_url(&host)?;
-
         // 5) 发送:relay() 走隐式 TLS(rustls wrapper),端口可由调用方覆盖。
         // T3:绑定了 `smtp` 资源时,复用本 run 的共享 transport(连接池跨多封信
         // 保活)——首封建立、后续复用;未绑定则按原行为每封新建 transport。
-        let resp = match smtp_slot(ctx) {
-            Some(name) => {
-                let mailer =
-                    ensure_transport(ctx.run_id(), &name, &host, port, username, password).await?;
-                mailer
-                    .send(message)
-                    .await
-                    // 错误里只带 SMTP 层信息,不回显凭据。
-                    .map_err(|e| StepError::msg(format!("email.send smtp: {e}")))?
+        let resp = crate::contracts::with_timeout(timeout_ms, async {
+            match smtp_slot(ctx) {
+                Some(name) => {
+                    let mailer =
+                        ensure_transport(ctx.run_id(), &name, &host, port, username, password)
+                            .await?;
+                    mailer
+                        .send(message)
+                        .await
+                        .map_err(|e| StepError::network(format!("email.send smtp: {e}")))
+                }
+                None => {
+                    let mailer = build_transport(&host, port, username, password)?;
+                    mailer
+                        .send(message)
+                        .await
+                        .map_err(|e| StepError::network(format!("email.send smtp: {e}")))
+                }
             }
-            None => {
-                let mailer = build_transport(&host, port, username, password)?;
-                mailer
-                    .send(message)
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.send smtp: {e}")))?
-            }
-        };
+        })
+        .await?;
 
         let code = format!("{}", resp.code());
         let server_message: Vec<String> = resp.message().map(|s| s.to_string()).collect();
@@ -360,6 +463,8 @@ struct FetchIn {
     /// save_attachments_to)时生效,超限该封显式报错。默认 10 MiB。
     #[serde(default = "default_max_bytes")]
     max_bytes_per_message: u64,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 fn default_mailbox() -> String {
     "INBOX".into()
@@ -411,7 +516,32 @@ impl Action for FetchAction {
         // 3) 网络门控:在建立任何 IMAP 连接之前 gate 远端主机。
         ctx.ensure_network_url(&input.host)?;
 
-        let messages = fetch_messages(&input, save_dir.as_deref()).await?;
+        let messages = if let Some(slot) = imap_slot(ctx) {
+            let shared = crate::contracts::with_timeout(
+                input.timeout_ms,
+                ensure_imap_session(
+                    ctx.run_id(),
+                    &slot,
+                    &input.host,
+                    input.port,
+                    &input.username,
+                    &input.password,
+                ),
+            )
+            .await?;
+            let mut session = shared.lock().await;
+            crate::contracts::with_timeout(
+                input.timeout_ms,
+                fetch_messages_on(&mut session, &input, save_dir.as_deref()),
+            )
+            .await?
+        } else {
+            crate::contracts::with_timeout(
+                input.timeout_ms,
+                fetch_messages(&input, save_dir.as_deref()),
+            )
+            .await?
+        };
         Ok(ActionResult::from(Value::Array(messages)))
     }
 }
@@ -448,25 +578,25 @@ async fn connect_login(
 
     let tcp = TcpStream::connect((host, port))
         .await
-        .map_err(|e| StepError::msg(format!("{op} connect {host}:{port}: {e}")))?;
+        .map_err(|e| StepError::network(format!("{op} connect {host}:{port}: {e}")))?;
     let tls = connector
         .connect(server_name, tcp)
         .await
-        .map_err(|e| StepError::msg(format!("{op} tls handshake: {e}")))?;
+        .map_err(|e| StepError::network(format!("{op} tls handshake: {e}")))?;
 
     // Client::new 不消费问候语——按 async-imap 文档先读一次服务器 greeting。
     let mut client = async_imap::Client::new(tls);
     let _greeting = client
         .read_response()
         .await
-        .map_err(|e| StepError::msg(format!("{op} greeting: {e}")))?
+        .map_err(|e| StepError::network(format!("{op} greeting: {e}")))?
         .ok_or_else(|| StepError::msg(format!("{op}: no IMAP greeting")))?;
 
     client
         .login(username, password)
         .await
         // login 失败会把 Client 一起还回来;只回显错误,不回显凭据。
-        .map_err(|(e, _client)| StepError::msg(format!("{op} login: {e}")))
+        .map_err(|(e, _client)| StepError::network(format!("{op} login: {e}")))
 }
 
 /// 登录并取 `mailbox` 中最新 `limit` 封信。仅头部时与旧版完全一致;需要全文
@@ -482,14 +612,23 @@ async fn fetch_messages(input: &FetchIn, save_dir: Option<&Path>) -> Result<Vec<
     )
     .await?;
 
+    let result = fetch_messages_on(&mut session, input, save_dir).await;
+    let _ = session.logout().await;
+    result
+}
+
+async fn fetch_messages_on(
+    session: &mut ImapSession,
+    input: &FetchIn,
+    save_dir: Option<&Path>,
+) -> Result<Vec<Value>, StepError> {
     let mailbox = session
         .select(&input.mailbox)
         .await
-        .map_err(|e| StepError::msg(format!("email.fetch select `{}`: {e}", input.mailbox)))?;
+        .map_err(|e| StepError::network(format!("email.fetch select `{}`: {e}", input.mailbox)))?;
 
     let total = mailbox.exists;
     if total == 0 {
-        let _ = session.logout().await;
         return Ok(Vec::new());
     }
 
@@ -507,11 +646,11 @@ async fn fetch_messages(input: &FetchIn, save_dir: Option<&Path>) -> Result<Vec<
         let stream = session
             .fetch(&seq_set, query)
             .await
-            .map_err(|e| StepError::msg(format!("email.fetch FETCH: {e}")))?;
+            .map_err(|e| StepError::network(format!("email.fetch FETCH: {e}")))?;
         let fetches: Vec<_> = stream
             .try_collect()
             .await
-            .map_err(|e| StepError::msg(format!("email.fetch collect: {e}")))?;
+            .map_err(|e| StepError::network(format!("email.fetch collect: {e}")))?;
 
         // 同一目录内的重名去重要跨整批邮件统计,否则两封信的同名附件会互相覆盖。
         let mut used_names: HashSet<String> = HashSet::new();
@@ -529,7 +668,6 @@ async fn fetch_messages(input: &FetchIn, save_dir: Option<&Path>) -> Result<Vec<
     }
     .await;
 
-    let _ = session.logout().await;
     fetch_result
 }
 
@@ -547,7 +685,9 @@ async fn enrich_with_mime(
         .map(|u| u.to_string())
         .unwrap_or_else(|| format!("seq {}", f.message));
     let raw = f.body().ok_or_else(|| {
-        StepError::msg(format!("email.fetch: server returned no body for uid {uid_label}"))
+        StepError::msg(format!(
+            "email.fetch: server returned no body for uid {uid_label}"
+        ))
     })?;
     if raw.len() as u64 > input.max_bytes_per_message {
         return Err(StepError::msg(format!(
@@ -563,11 +703,15 @@ async fn enrich_with_mime(
         // 由 mail-parser 解码成 UTF-8。缺失侧输出 null,便于 flow 判空。
         obj.insert(
             "text".into(),
-            msg.body_text(0).map(|s| s.into_owned().into()).unwrap_or(Value::Null),
+            msg.body_text(0)
+                .map(|s| s.into_owned().into())
+                .unwrap_or(Value::Null),
         );
         obj.insert(
             "html".into(),
-            msg.body_html(0).map(|s| s.into_owned().into()).unwrap_or(Value::Null),
+            msg.body_html(0)
+                .map(|s| s.into_owned().into())
+                .unwrap_or(Value::Null),
         );
     }
     if let Some(dir) = save_dir {
@@ -785,6 +929,8 @@ struct MarkIn {
     /// 仅 `set: deleted` 时允许为 true。
     #[serde(default)]
     expunge: bool,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -815,51 +961,45 @@ impl Action for MarkAction {
         // 2) 网络门控:在建立任何 IMAP 连接之前 gate 远端主机。
         ctx.ensure_network_url(&input.host)?;
 
-        let mut session = connect_login(
-            "email.mark",
-            &input.host,
-            input.port,
-            &input.username,
-            &input.password,
-        )
-        .await?;
-
-        let work: Result<u64, StepError> = async {
-            session
-                .select(&input.mailbox)
-                .await
-                .map_err(|e| StepError::msg(format!("email.mark select `{}`: {e}", input.mailbox)))?;
-            {
-                // SILENT 模式仍可能有零星响应,流要喝干才能复用会话。
-                let stream = session
-                    .uid_store(&set_str, input.set.store_query())
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.mark UID STORE: {e}")))?;
-                let _: Vec<_> = stream
-                    .try_collect()
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.mark store collect: {e}")))?;
-            }
-            let mut expunged: u64 = 0;
-            if input.expunge {
-                // 注意:RFC3501 EXPUNGE 清的是邮箱里**所有** `\Deleted` 的信,
-                // 不止本次 uid 集(UID EXPUNGE 需 UIDPLUS 扩展,这里不依赖)。
-                let stream = session
-                    .expunge()
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.mark EXPUNGE: {e}")))?;
-                let seqs: Vec<_> = stream
-                    .try_collect()
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.mark expunge collect: {e}")))?;
-                expunged = seqs.len() as u64;
-            }
-            Ok(expunged)
-        }
-        .await;
-
-        let _ = session.logout().await;
-        let expunged = work?;
+        let expunged = if let Some(slot) = imap_slot(ctx) {
+            let shared = crate::contracts::with_timeout(
+                input.timeout_ms,
+                ensure_imap_session(
+                    ctx.run_id(),
+                    &slot,
+                    &input.host,
+                    input.port,
+                    &input.username,
+                    &input.password,
+                ),
+            )
+            .await?;
+            let mut session = shared.lock().await;
+            crate::contracts::with_timeout(
+                input.timeout_ms,
+                mark_on_session(&mut session, &input, &set_str),
+            )
+            .await?
+        } else {
+            let mut session = crate::contracts::with_timeout(
+                input.timeout_ms,
+                connect_login(
+                    "email.mark",
+                    &input.host,
+                    input.port,
+                    &input.username,
+                    &input.password,
+                ),
+            )
+            .await?;
+            let work = crate::contracts::with_timeout(
+                input.timeout_ms,
+                mark_on_session(&mut session, &input, &set_str),
+            )
+            .await;
+            let _ = session.logout().await;
+            work?
+        };
 
         Ok(ActionResult::from(serde_json::json!({
             "ok": true,
@@ -868,6 +1008,37 @@ impl Action for MarkAction {
             "expunged": expunged,
         })))
     }
+}
+
+async fn mark_on_session(
+    session: &mut ImapSession,
+    input: &MarkIn,
+    set_str: &str,
+) -> Result<u64, StepError> {
+    session
+        .select(&input.mailbox)
+        .await
+        .map_err(|e| StepError::network(format!("email.mark select `{}`: {e}", input.mailbox)))?;
+    let stream = session
+        .uid_store(set_str, input.set.store_query())
+        .await
+        .map_err(|e| StepError::network(format!("email.mark UID STORE: {e}")))?;
+    let _: Vec<_> = stream
+        .try_collect()
+        .await
+        .map_err(|e| StepError::network(format!("email.mark store collect: {e}")))?;
+    if !input.expunge {
+        return Ok(0);
+    }
+    let stream = session
+        .expunge()
+        .await
+        .map_err(|e| StepError::network(format!("email.mark EXPUNGE: {e}")))?;
+    let seqs: Vec<_> = stream
+        .try_collect()
+        .await
+        .map_err(|e| StepError::network(format!("email.mark expunge collect: {e}")))?;
+    Ok(seqs.len() as u64)
 }
 
 // ─── email.move (IMAP UID MOVE / COPY+EXPUNGE 回退) ─────────────────────────────
@@ -889,6 +1060,8 @@ struct MoveIn {
     uid: UidSpec,
     /// 目标邮箱(须已存在;IMAP 对不存在的目标会报 TRYCREATE)。
     to_mailbox: String,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -922,65 +1095,45 @@ impl Action for MoveAction {
         // 2) 网络门控:在建立任何 IMAP 连接之前 gate 远端主机。
         ctx.ensure_network_url(&input.host)?;
 
-        let mut session = connect_login(
-            "email.move",
-            &input.host,
-            input.port,
-            &input.username,
-            &input.password,
-        )
-        .await?;
-
-        let work: Result<&'static str, StepError> = async {
-            session
-                .select(&input.mailbox)
-                .await
-                .map_err(|e| StepError::msg(format!("email.move select `{}`: {e}", input.mailbox)))?;
-            // 服务器支持 RFC6851 MOVE 时走原子 UID MOVE;否则回退为
-            // COPY + STORE \Deleted + EXPUNGE 三步(语义同 MOVE,见 RFC6851 §3.1;
-            // 注意回退的 EXPUNGE 同样会清掉邮箱里其他已置 \Deleted 的信)。
-            let caps = session
-                .capabilities()
-                .await
-                .map_err(|e| StepError::msg(format!("email.move CAPABILITY: {e}")))?;
-            if caps.has_str("MOVE") {
-                session
-                    .uid_mv(&set_str, &input.to_mailbox)
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.move UID MOVE: {e}")))?;
-                Ok("uid_move")
-            } else {
-                session
-                    .uid_copy(&set_str, &input.to_mailbox)
-                    .await
-                    .map_err(|e| StepError::msg(format!("email.move UID COPY: {e}")))?;
-                {
-                    let stream = session
-                        .uid_store(&set_str, "+FLAGS.SILENT (\\Deleted)")
-                        .await
-                        .map_err(|e| StepError::msg(format!("email.move UID STORE: {e}")))?;
-                    let _: Vec<_> = stream
-                        .try_collect()
-                        .await
-                        .map_err(|e| StepError::msg(format!("email.move store collect: {e}")))?;
-                }
-                {
-                    let stream = session
-                        .expunge()
-                        .await
-                        .map_err(|e| StepError::msg(format!("email.move EXPUNGE: {e}")))?;
-                    let _: Vec<_> = stream
-                        .try_collect()
-                        .await
-                        .map_err(|e| StepError::msg(format!("email.move expunge collect: {e}")))?;
-                }
-                Ok("copy_expunge")
-            }
-        }
-        .await;
-
-        let _ = session.logout().await;
-        let method = work?;
+        let method = if let Some(slot) = imap_slot(ctx) {
+            let shared = crate::contracts::with_timeout(
+                input.timeout_ms,
+                ensure_imap_session(
+                    ctx.run_id(),
+                    &slot,
+                    &input.host,
+                    input.port,
+                    &input.username,
+                    &input.password,
+                ),
+            )
+            .await?;
+            let mut session = shared.lock().await;
+            crate::contracts::with_timeout(
+                input.timeout_ms,
+                move_on_session(&mut session, &input, &set_str),
+            )
+            .await?
+        } else {
+            let mut session = crate::contracts::with_timeout(
+                input.timeout_ms,
+                connect_login(
+                    "email.move",
+                    &input.host,
+                    input.port,
+                    &input.username,
+                    &input.password,
+                ),
+            )
+            .await?;
+            let work = crate::contracts::with_timeout(
+                input.timeout_ms,
+                move_on_session(&mut session, &input, &set_str),
+            )
+            .await;
+            let _ = session.logout().await;
+            work?
+        };
 
         Ok(ActionResult::from(serde_json::json!({
             "ok": true,
@@ -990,6 +1143,49 @@ impl Action for MoveAction {
             "method": method,
         })))
     }
+}
+
+async fn move_on_session(
+    session: &mut ImapSession,
+    input: &MoveIn,
+    set_str: &str,
+) -> Result<&'static str, StepError> {
+    session
+        .select(&input.mailbox)
+        .await
+        .map_err(|e| StepError::network(format!("email.move select `{}`: {e}", input.mailbox)))?;
+    let caps = session
+        .capabilities()
+        .await
+        .map_err(|e| StepError::network(format!("email.move CAPABILITY: {e}")))?;
+    if caps.has_str("MOVE") {
+        session
+            .uid_mv(set_str, &input.to_mailbox)
+            .await
+            .map_err(|e| StepError::network(format!("email.move UID MOVE: {e}")))?;
+        return Ok("uid_move");
+    }
+    session
+        .uid_copy(set_str, &input.to_mailbox)
+        .await
+        .map_err(|e| StepError::network(format!("email.move UID COPY: {e}")))?;
+    let stream = session
+        .uid_store(set_str, "+FLAGS.SILENT (\\Deleted)")
+        .await
+        .map_err(|e| StepError::network(format!("email.move UID STORE: {e}")))?;
+    let _: Vec<_> = stream
+        .try_collect()
+        .await
+        .map_err(|e| StepError::network(format!("email.move store collect: {e}")))?;
+    let stream = session
+        .expunge()
+        .await
+        .map_err(|e| StepError::network(format!("email.move EXPUNGE: {e}")))?;
+    let _: Vec<_> = stream
+        .try_collect()
+        .await
+        .map_err(|e| StepError::network(format!("email.move expunge collect: {e}")))?;
+    Ok("copy_expunge")
 }
 
 #[cfg(test)]
@@ -1022,7 +1218,10 @@ mod tests {
 
     #[test]
     fn smtp_slot_selects_only_smtp_kind_bindings() {
-        let resources = &[("mail", "kind: smtp\n"), ("db", "kind: sqlite\npath: /tmp/x\n")];
+        let resources = &[
+            ("mail", "kind: smtp\n"),
+            ("db", "kind: sqlite\npath: /tmp/x\n"),
+        ];
         assert_eq!(
             smtp_slot(&ctx_with(resources, Some("mail"))).as_deref(),
             Some("mail")
@@ -1037,6 +1236,17 @@ mod tests {
     fn smtp_factory_kind_matches() {
         assert_eq!(SmtpFactory.kind(), SMTP_KIND);
         assert_eq!(SMTP_KIND, "smtp");
+    }
+
+    #[test]
+    fn imap_slot_and_factory_match_only_imap_resources() {
+        let resources = &[("mail", "kind: imap\n"), ("smtp", "kind: smtp\n")];
+        assert_eq!(
+            imap_slot(&ctx_with(resources, Some("mail"))).as_deref(),
+            Some("mail")
+        );
+        assert_eq!(imap_slot(&ctx_with(resources, Some("smtp"))), None);
+        assert_eq!(ImapFactory.kind(), IMAP_KIND);
     }
 
     // `relay(host).build()` is lazy (no socket until `send`), so the reuse +
@@ -1186,5 +1396,21 @@ mod tests {
         used.insert(".hidden".into());
         // 点开头的名字整体当 stem,不会拆出空 stem。
         assert_eq!(dedup_filename(dir.path(), ".hidden", &used), ".hidden_1");
+    }
+
+    // ─── typed 错误分类(P0):IMAP 连接失败 → Network(retry.on 可重试) ──────
+
+    #[tokio::test]
+    async fn connect_login_refused_connect_is_network_kind() {
+        use lumo_core::error::ErrorKind;
+        // 先 bind 拿一个必然空闲的端口再放掉 ⇒ 连接被拒,快速失败。
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let err = connect_login("email.fetch", "127.0.0.1", port, "u", "p")
+            .await
+            .expect_err("nothing listens on the freed port");
+        assert_eq!(err.kind(), ErrorKind::Network, "got: {err:?}");
+        assert!(err.to_string().contains("email.fetch connect"), "got: {err}");
     }
 }

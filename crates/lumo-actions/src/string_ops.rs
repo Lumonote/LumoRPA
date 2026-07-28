@@ -565,8 +565,9 @@ impl Action for EncodeConvertAction {
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.encode_convert invalid: {e}")))?;
 
-        let from_enc = encoding_rs::Encoding::for_label(from.as_bytes())
-            .ok_or_else(|| StepError::msg(format!("string.encode_convert unknown `from`: {from}")))?;
+        let from_enc = encoding_rs::Encoding::for_label(from.as_bytes()).ok_or_else(|| {
+            StepError::msg(format!("string.encode_convert unknown `from`: {from}"))
+        })?;
         let to_enc = encoding_rs::Encoding::for_label(to.as_bytes())
             .ok_or_else(|| StepError::msg(format!("string.encode_convert unknown `to`: {to}")))?;
 

@@ -90,6 +90,21 @@ async fn click_rejects_one_sided_coordinates() {
 }
 
 #[tokio::test]
+async fn drag_rejects_zero_duration_before_actuation() {
+    let err = run_with(
+        "desktop.drag",
+        json!({"from_x": 0.0, "from_y": 0.0, "to_x": 10.0, "to_y": 10.0, "duration_ms": 0}),
+        desktop_caps(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("duration_ms") && err.contains(">= 1"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn key_rejects_unknown_token() {
     let err = run_with(
         "desktop.key",
@@ -283,6 +298,14 @@ async fn window_bounds_requires_exactly_one_selector() {
         .await
         .unwrap_err();
     assert!(err.contains("exactly one"), "got: {err}");
+}
+
+#[tokio::test]
+async fn window_control_actions_require_exactly_one_selector() {
+    for id in ["window.close", "window.minimize", "window.maximize"] {
+        let err = run_with(id, json!({}), desktop_caps()).await.unwrap_err();
+        assert!(err.contains("exactly one"), "{id}: {err}");
+    }
 }
 
 #[tokio::test]

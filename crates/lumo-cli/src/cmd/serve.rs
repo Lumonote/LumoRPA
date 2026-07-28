@@ -20,14 +20,18 @@ use axum::{
 };
 use clap::Args as ClapArgs;
 use cron::Schedule;
-use lumo_core::{FlowVm, RunOptions};
+use lumo_core::{CancelToken, RunOptions};
 use lumo_storage::Repo;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use parking_lot::Mutex;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use super::build_action_registry;
@@ -48,11 +52,74 @@ pub struct Args {
     pub token: Option<String>,
 }
 
+/// P1-1：运行中 webhook run 的取消表（run_id → CancelToken）。运行**前**登记
+/// （run_id 由宿主预生成 —— 引擎迟生成的话，取消窗口开头有缝），结束后经
+/// [`CancelGuard`] RAII 摘除；`POST /runs/:id/cancel` 查表触发协作取消。
+type CancelMap = Arc<Mutex<HashMap<String, CancelToken>>>;
+
 #[derive(Clone)]
 struct AppState {
     flows_dir: PathBuf,
     home: PathBuf,
     token: Option<String>,
+    cancels: CancelMap,
+    /// P1-1：webhook 并发上限（`LUMO_SERVE_MAX_CONCURRENCY`，默认 8）。超额
+    /// 请求在信号量上排队而不是被拒 —— 上游背压由 HTTP 客户端超时兜底。
+    permits: Arc<Semaphore>,
+}
+
+impl AppState {
+    fn new(
+        flows_dir: PathBuf,
+        home: PathBuf,
+        token: Option<String>,
+        max_concurrency: usize,
+    ) -> Self {
+        Self {
+            flows_dir,
+            home,
+            token,
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            permits: Arc::new(Semaphore::new(max_concurrency)),
+        }
+    }
+}
+
+/// `LUMO_SERVE_MAX_CONCURRENCY` 解析：默认 8；解析失败或填 0 一律回退默认
+/// （0 会永久堵死全部 webhook，按配置错误处理）。
+fn serve_max_concurrency_from(raw: Option<&str>) -> usize {
+    const DEFAULT: usize = 8;
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT)
+}
+
+fn serve_max_concurrency_from_env() -> usize {
+    serve_max_concurrency_from(std::env::var("LUMO_SERVE_MAX_CONCURRENCY").ok().as_deref())
+}
+
+/// 登记/摘除 run_id → CancelToken 的 RAII 守卫：webhook handler 无论从哪条
+/// 错误路径返回，表项都随 drop 摘除，让取消接口对「已结束」的 run 稳定返回
+/// `ok=false`（幂等），也杜绝表项泄漏。
+struct CancelGuard {
+    cancels: CancelMap,
+    run_id: String,
+}
+
+impl CancelGuard {
+    fn register(cancels: &CancelMap, run_id: &str, token: CancelToken) -> Self {
+        cancels.lock().insert(run_id.to_string(), token);
+        Self {
+            cancels: cancels.clone(),
+            run_id: run_id.to_string(),
+        }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.cancels.lock().remove(&self.run_id);
+    }
 }
 
 pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
@@ -60,11 +127,12 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
     if !args.flows.exists() {
         anyhow::bail!("--flows directory {} does not exist", args.flows.display());
     }
-    let state = AppState {
-        flows_dir: args.flows.clone(),
-        home: home.clone(),
-        token: args.token,
-    };
+    let state = AppState::new(
+        args.flows.clone(),
+        home.clone(),
+        args.token,
+        serve_max_concurrency_from_env(),
+    );
     // T-01: scan `--flows` for cron triggers and spawn one task per flow.
     // Errors are logged but never abort the server: a single bad cron string
     // shouldn't take the webhook lane down.
@@ -143,6 +211,8 @@ fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/webhook/:flow_name", post(webhook))
+        // P1-1：协作取消一个运行中的 webhook run（幂等，见 `cancel_run`）。
+        .route("/runs/:run_id/cancel", post(cancel_run))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -151,12 +221,9 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn webhook(
-    State(state): State<AppState>,
-    AxumPath(flow_name): AxumPath<String>,
-    headers: HeaderMap,
-    Json(inputs): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+/// 共享的 `X-Lumo-Token` 门禁：webhook 与取消路由同一把锁 —— 取消是改变
+/// 运行状态的操作，不能比触发更宽松。
+fn check_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     if let Some(expected) = &state.token {
         let provided = headers
             .get("x-lumo-token")
@@ -169,6 +236,38 @@ async fn webhook(
             ));
         }
     }
+    Ok(())
+}
+
+/// P1-1：`POST /runs/:run_id/cancel` —— 协作取消一个运行中的 webhook run。
+/// 幂等语义（对齐桌面端 human_respond 的迟到回执处理）：
+///   * 表中有键（运行中）→ 触发取消，`ok=true`；重复调用仍 `true`
+///     （CancelToken 自身幂等）；
+///   * 无键（run 不存在 / 已结束）→ `ok=false`，HTTP 仍 200，不报错。
+async fn cancel_run(
+    State(state): State<AppState>,
+    AxumPath(run_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
+    let token = state.cancels.lock().get(&run_id).cloned();
+    let ok = match token {
+        Some(t) => {
+            t.cancel();
+            true
+        }
+        None => false,
+    };
+    Ok(Json(serde_json::json!({ "ok": ok, "run_id": run_id })))
+}
+
+async fn webhook(
+    State(state): State<AppState>,
+    AxumPath(flow_name): AxumPath<String>,
+    headers: HeaderMap,
+    Json(inputs): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    check_token(&state, &headers)?;
     if !valid_flow_name(&flow_name) {
         return Err((StatusCode::BAD_REQUEST, "invalid flow name".into()));
     }
@@ -199,13 +298,28 @@ async fn webhook(
             "webhook body must be a JSON object (or empty/null)".into(),
         ));
     };
+    // P1-1：并发门 —— 4xx 级校验都过了才排队拿许可，坏请求不占并发额度。
+    // 许可持有到 handler 返回（含错误路径），排队等待可被客户端断连中止。
+    let _permit = state.permits.clone().acquire_owned().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("concurrency gate: {e}"),
+        )
+    })?;
     let registry = build_action_registry(&state.home, Some(&path));
     let repo = Some(
         Repo::open(state.home.join("lumo.db"))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
     );
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &state.home, &flow)
-        .with_vault(super::load_vault_identity(&state.home));
+    // P1-1：宿主预生成 run_id，先在取消表建键再启动（引擎迟生成的话，
+    // `POST /runs/:id/cancel` 在运行初期查不到键）；RAII 守卫保证任何返回
+    // 路径都摘除表项。
+    let run_id = ulid::Ulid::new().to_string();
+    let cancel = CancelToken::new();
+    let _cancel_guard = CancelGuard::register(&state.cancels, &run_id, cancel.clone());
+    // 架构 P1-1:统一走宿主组装(step_timeout/artifacts/cancel/vault/AI
+    // hooks)。webhook 是 headless 宿主:不注入 prompter(human.* 显式报错)。
+    let vm = super::host_vm(&state.home, &flow, registry, repo, cancel).with_run_id(Some(run_id));
     let report = vm
         .run(
             &flow,
@@ -379,8 +493,9 @@ async fn run_cron_flow(flow_path: &Path, home: &Path) -> anyhow::Result<()> {
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow)
-        .with_vault(super::load_vault_identity(home));
+    // 架构 P1-1:cron 是 headless 触发 —— 走宿主组装,不注入 prompter。取消
+    // 令牌每次新建(cron 无外部取消入口,step_timeout 兜底)。
+    let vm = super::host_vm(home, &flow, registry, repo, CancelToken::new());
     vm.run(
         &flow,
         RunOptions {
@@ -580,8 +695,9 @@ async fn run_file_flow(
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow)
-        .with_vault(super::load_vault_identity(home));
+    // 架构 P1-1:file 触发同 cron —— headless 宿主组装,无 prompter,取消
+    // 令牌每次新建。
+    let vm = super::host_vm(home, &flow, registry, repo, CancelToken::new());
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "trigger".into(),
@@ -642,11 +758,12 @@ spec:
     }
 
     fn test_state(flows: &TempDir, home: &TempDir, token: Option<String>) -> AppState {
-        AppState {
-            flows_dir: flows.path().to_path_buf(),
-            home: home.path().to_path_buf(),
+        AppState::new(
+            flows.path().to_path_buf(),
+            home.path().to_path_buf(),
             token,
-        }
+            8,
+        )
     }
 
     #[tokio::test]
@@ -786,6 +903,176 @@ spec:
         // axum decodes the URL → the handler sees `../etc/passwd`, which the
         // path-traversal guard rejects with 400.
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── P1-1: cancel 路由 + webhook 并发门 ──────────────────────────────
+
+    fn flow_with_webhook_sleep(id: &str, ms: u64) -> String {
+        format!(
+            r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: {id} }}
+spec:
+  triggers:
+    - {{ kind: webhook }}
+  steps:
+    - {{ id: nap, action: control.sleep, with: {{ ms: {ms} }} }}
+"#,
+        )
+    }
+
+    fn post_json(uri: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("x-lumo-token", t);
+        }
+        b.body(Body::from("{}")).unwrap()
+    }
+
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_run_returns_ok_false() {
+        let flows = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let app = build_app(test_state(&flows, &home, None));
+        let resp = app
+            .oneshot(post_json("/runs/ghost/cancel", None))
+            .await
+            .unwrap();
+        // 幂等语义:不存在(或已结束)的 run 返回 200 + ok=false,不报错。
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["run_id"], "ghost");
+    }
+
+    #[tokio::test]
+    async fn cancel_route_honors_token_gate() {
+        let flows = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let app = build_app(test_state(&flows, &home, Some("s3cret".into())));
+        let resp = app
+            .clone()
+            .oneshot(post_json("/runs/x/cancel", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp_ok = app
+            .oneshot(post_json("/runs/x/cancel", Some("s3cret")))
+            .await
+            .unwrap();
+        assert_eq!(resp_ok.status(), StatusCode::OK);
+        assert_eq!(json_body(resp_ok).await["ok"], false);
+    }
+
+    /// 全链路:webhook 启动一个 30s 长睡 run → 取消表出现键(宿主预生成
+    /// run_id,启动前登记)→ POST cancel 返回 ok=true → 原请求以 500 +
+    /// "cancelled" 收场 → 表项随 RAII 守卫摘除,再取消返回 ok=false(幂等)。
+    #[tokio::test]
+    async fn cancel_running_webhook_run_is_cooperative_and_idempotent() {
+        let flows = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        write_flow(
+            flows.path(),
+            "sleepy",
+            &flow_with_webhook_sleep("sleepy", 30_000),
+        );
+        let state = test_state(&flows, &home, None);
+        let app = build_app(state.clone());
+
+        let handle = tokio::spawn(app.clone().oneshot(post_json("/webhook/sleepy", None)));
+
+        // 等待取消表出现键(run 已登记并启动)。上限 10s,防挂死。
+        let run_id = {
+            let mut found = None;
+            for _ in 0..400 {
+                if let Some(id) = state.cancels.lock().keys().next().cloned() {
+                    found = Some(id);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("run must register its cancel token before running")
+        };
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(&format!("/runs/{run_id}/cancel"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["ok"], true);
+
+        // 原 webhook 请求以 500 + "cancelled" 收场(协作取消打断长睡)。
+        let webhook_resp = handle.await.unwrap().unwrap();
+        assert_eq!(webhook_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(webhook_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("cancelled"), "got body: {text}");
+
+        // RAII 守卫已摘表项 ⇒ 再取消同一 run 返回 ok=false(已结束幂等)。
+        assert!(state.cancels.lock().is_empty(), "guard must clear the map");
+        let resp_again = app
+            .oneshot(post_json(&format!("/runs/{run_id}/cancel"), None))
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp_again).await["ok"], false);
+    }
+
+    /// 并发门:max_concurrency=1 时,占住唯一许可的情况下第二个请求排队
+    /// (300ms 内不完成);释放许可后它继续执行并成功。
+    #[tokio::test]
+    async fn webhook_concurrency_gate_queues_requests() {
+        let flows = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        write_flow(flows.path(), "ping", &flow_with_webhook("ping"));
+        let state = AppState::new(
+            flows.path().to_path_buf(),
+            home.path().to_path_buf(),
+            None,
+            1,
+        );
+        let app = build_app(state.clone());
+
+        // 手动占住唯一许可,模拟一个在跑的 webhook。
+        let permit = state.permits.clone().acquire_owned().await.unwrap();
+
+        let mut handle = tokio::spawn(app.oneshot(post_json("/webhook/ping", None)));
+        let parked = tokio::time::timeout(std::time::Duration::from_millis(300), &mut handle).await;
+        assert!(parked.is_err(), "request must queue while the gate is full");
+
+        drop(permit); // 释放 ⇒ 排队请求继续
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("queued request must proceed after release")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn serve_max_concurrency_parses_env_shape() {
+        assert_eq!(serve_max_concurrency_from(None), 8, "未设置 ⇒ 默认 8");
+        assert_eq!(serve_max_concurrency_from(Some("3")), 3);
+        assert_eq!(
+            serve_max_concurrency_from(Some("0")),
+            8,
+            "0 会永久堵死 webhook,按配置错误回退默认"
+        );
+        assert_eq!(serve_max_concurrency_from(Some("nah")), 8);
     }
 
     // ─── cron scheduler tests ────────────────────────────────────────────

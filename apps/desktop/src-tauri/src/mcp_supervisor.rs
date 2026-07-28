@@ -141,7 +141,9 @@ fn store_token(
         .put(&access_ref, &token.access_token)
         .map_err(SupervisorError::Vault)?;
     if let (Some(reference), Some(value)) = (&refresh_ref, &token.refresh_token) {
-        vault.put(reference, value).map_err(SupervisorError::Vault)?;
+        vault
+            .put(reference, value)
+            .map_err(SupervisorError::Vault)?;
     }
     let seconds = i64::try_from(token.expires_in_secs).unwrap_or(i64::MAX);
     let expires_at = now
@@ -313,10 +315,7 @@ impl ReqwestOAuthTransport {
         }
     }
 
-    async fn token_request(
-        &self,
-        form: &[(&str, &str)],
-    ) -> Result<OAuthTokenResponse, OAuthError> {
+    async fn token_request(&self, form: &[(&str, &str)]) -> Result<OAuthTokenResponse, OAuthError> {
         let response = self
             .client
             .post(&self.metadata.token_endpoint)
@@ -422,7 +421,10 @@ impl std::fmt::Display for SupervisorError {
             Self::Browser(error) => write!(formatter, "OAuth browser failed: {error}"),
             Self::Vault(error) => write!(formatter, "OAuth Vault failed: {error}"),
             Self::PendingOAuthMissing(server) => {
-                write!(formatter, "pending OAuth session for MCP server `{server}` is missing")
+                write!(
+                    formatter,
+                    "pending OAuth session for MCP server `{server}` is missing"
+                )
             }
             Self::InvalidServerId(server) => write!(formatter, "invalid MCP server id `{server}`"),
         }

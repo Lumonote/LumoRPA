@@ -237,7 +237,9 @@ pub(crate) async fn send_value(
         .map_err(|e| StepError::msg(format!("{label} input invalid: {e}")))?;
     ctx.ensure_network_url(&url)?;
     if text.is_none() && payload.is_none() {
-        return Err(StepError::msg(format!("{label} requires `text` or `payload`")));
+        return Err(StepError::msg(format!(
+            "{label} requires `text` or `payload`"
+        )));
     }
     deliver(
         ctx, &provider, &url, text, payload, title, &msgtype, secret, timeout_ms,
@@ -281,9 +283,7 @@ async fn deliver(
         .await
         .map_err(|e| {
             if e.is_redirect() {
-                StepError::msg(
-                    "notify: blocked redirect to ungranted host (network capability)",
-                )
+                StepError::msg("notify: blocked redirect to ungranted host (network capability)")
             } else {
                 // reqwest 的 Error::Display 会带上完整 URL(含 query);dingtalk 带
                 // secret 时 URL 含 ?sign=<HMAC>。without_url() 剥掉 URL,防签名落日志/快照。
@@ -352,7 +352,9 @@ async fn robot_execute(
         .map_err(|e| StepError::msg(format!("{action} input invalid: {e}")))?;
     ctx.ensure_network_url(&url)?;
     if text.is_none() && payload.is_none() {
-        return Err(StepError::msg(format!("{action} requires `text` or `payload`")));
+        return Err(StepError::msg(format!(
+            "{action} requires `text` or `payload`"
+        )));
     }
     deliver(
         ctx, provider, &url, text, payload, title, &msgtype, secret, timeout_ms,

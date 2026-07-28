@@ -179,6 +179,47 @@ async fn management_actions_cover_common_file_workflows() {
 }
 
 #[tokio::test]
+async fn list_limit_reports_truncation_and_rejects_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let caps = fs_caps(dir.path());
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+
+    let out = ok_with(
+        "file.list",
+        json!({"path": dir.path(), "limit": 2}),
+        caps.clone(),
+    )
+    .await;
+    assert_eq!(out["count"], json!(2));
+    assert_eq!(out["truncated"], json!(true));
+    assert_eq!(out["entries"].as_array().unwrap().len(), 2);
+
+    let err = run_with("file.list", json!({"path": dir.path(), "limit": 0}), caps)
+        .await
+        .unwrap_err();
+    assert!(err.contains("limit") && err.contains(">= 1"), "got: {err}");
+}
+
+#[tokio::test]
+async fn delete_dry_run_previews_without_mutating() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keep.txt");
+    std::fs::write(&path, "keep").unwrap();
+    let out = ok_with(
+        "file.delete",
+        json!({"path": path, "dry_run": true}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(out["dry_run"], json!(true));
+    assert_eq!(out["would_delete"], json!(true));
+    assert_eq!(out["deleted"], json!(false));
+    assert!(path.exists(), "dry_run must not remove the file");
+}
+
+#[tokio::test]
 async fn recursive_delete_requires_write_grants_for_children() {
     let dir = tempfile::tempdir().unwrap();
     let child = dir.path().join("child.txt");
@@ -388,4 +429,52 @@ async fn append_denied_without_fs_write_grant() {
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
     assert!(err.contains("fs.write"), "should name fs.write: {err}");
+}
+
+// ─── typed error classification (retry.on contract) ─────────────────────────
+
+#[tokio::test]
+async fn read_missing_file_classifies_as_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent.txt");
+    let kind = common::err_kind_with("file.read", json!({"path": path}), fs_caps(dir.path())).await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Io);
+}
+
+#[tokio::test]
+async fn mkdir_without_parent_classifies_as_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a/b/c");
+    let kind = common::err_kind_with(
+        "file.mkdir",
+        json!({"path": path, "recursive": false}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Io);
+}
+
+#[tokio::test]
+async fn wait_timeout_classifies_as_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("never.txt");
+    let kind = common::err_kind_with(
+        "file.wait",
+        json!({"path": path, "timeout_ms": 50, "poll_ms": 10}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Timeout);
+}
+
+#[tokio::test]
+async fn input_validation_stays_kind_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let kind = common::err_kind_with(
+        "file.rename",
+        json!({"path": dir.path().join("x.txt"), "new_name": "a/b"}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Other);
 }

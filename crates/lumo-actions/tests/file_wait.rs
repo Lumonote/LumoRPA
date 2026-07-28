@@ -83,8 +83,15 @@ async fn times_out_with_a_clear_message_when_the_file_never_appears() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("file.wait timeout after"), "got: {err}");
-    assert!(err.contains("file does not exist"), "got: {err}");
+    // typed 错误约定:file.wait 超时是 `timeout` kind(诊断细节走 run 日志)。
+    assert!(err.contains("timed out after 200ms"), "got: {err}");
+    let kind = common::err_kind_with(
+        "file.wait",
+        json!({"path": dir.path().join("never2.txt"), "timeout_ms": 60, "poll_ms": 20}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Timeout);
 }
 
 #[tokio::test]
@@ -111,7 +118,7 @@ async fn times_out_reporting_still_changing_when_size_never_settles() {
     .await
     .unwrap_err();
     writer.abort();
-    assert!(err.contains("size still changing"), "got: {err}");
+    assert!(err.contains("timed out after 400ms"), "got: {err}");
 }
 
 #[tokio::test]
@@ -133,13 +140,16 @@ async fn must_exist_new_rejects_a_pre_existing_unchanged_file() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("must_exist_new"), "got: {err}");
+    assert!(err.contains("timed out after 250ms"), "got: {err}");
 }
 
 #[tokio::test]
 async fn wait_denied_without_fs_grant() {
-    let err = run("file.wait", json!({"path": "/etc/hosts", "timeout_ms": 100}))
-        .await
-        .unwrap_err();
+    let err = run(
+        "file.wait",
+        json!({"path": "/etc/hosts", "timeout_ms": 100}),
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
 }

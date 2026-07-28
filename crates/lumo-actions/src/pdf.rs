@@ -29,6 +29,8 @@ pub struct ExtractTextAction;
 #[serde(deny_unknown_fields)]
 struct ExtractTextIn {
     path: PathBuf,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -44,16 +46,19 @@ impl Action for ExtractTextAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ExtractTextIn { path } = serde_json::from_value(input)
+        let ExtractTextIn { path, timeout_ms } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("pdf.extract_text input invalid: {e}")))?;
         // 先校验能力，再碰文件 —— 未授权路径即使不存在也要先失败。
         ctx.ensure_fs_read(&path)?;
 
         // lopdf 解析是 CPU 密集且同步，挪到阻塞线程池避免占用 async 执行器。
         let path_for_blocking = path.clone();
-        let (text, pages) = tokio::task::spawn_blocking(move || extract(&path_for_blocking))
-            .await
-            .map_err(|e| StepError::msg(format!("pdf.extract_text join: {e}")))??;
+        let (text, pages) = crate::contracts::with_timeout(timeout_ms, async move {
+            tokio::task::spawn_blocking(move || extract(&path_for_blocking))
+                .await
+                .map_err(|e| StepError::io(format!("pdf.extract_text join: {e}")))?
+        })
+        .await?;
 
         Ok(ActionResult::from(serde_json::json!({
             "text": text,
@@ -83,6 +88,8 @@ pub struct InfoAction;
 #[serde(deny_unknown_fields)]
 struct InfoIn {
     path: PathBuf,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -98,14 +105,17 @@ impl Action for InfoAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let InfoIn { path } = serde_json::from_value(input)
+        let InfoIn { path, timeout_ms } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("pdf.info input invalid: {e}")))?;
         ctx.ensure_fs_read(&path)?;
 
         let path_for_blocking = path.clone();
-        let (pages, version) = tokio::task::spawn_blocking(move || info(&path_for_blocking))
-            .await
-            .map_err(|e| StepError::msg(format!("pdf.info join: {e}")))??;
+        let (pages, version) = crate::contracts::with_timeout(timeout_ms, async move {
+            tokio::task::spawn_blocking(move || info(&path_for_blocking))
+                .await
+                .map_err(|e| StepError::io(format!("pdf.info join: {e}")))?
+        })
+        .await?;
 
         Ok(ActionResult::from(serde_json::json!({
             "pages": pages,
@@ -140,6 +150,8 @@ struct WriteIn {
     /// 字号（pt），默认 12。
     #[serde(default)]
     font_size: Option<f32>,
+    #[serde(default = "crate::contracts::default_action_timeout_ms")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -160,6 +172,7 @@ impl Action for WriteAction {
             text,
             lines,
             font_size,
+            timeout_ms,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("pdf.write input invalid: {e}")))?;
         // 先校验写能力，再创建文件（与 browser.screenshot 同样的 "gate before work"）。
@@ -184,9 +197,14 @@ impl Action for WriteAction {
         let path_for_blocking = path.clone();
         // P0-2:中断句柄进闭包,`write_pdf` 在落盘前设检查点。
         let interrupt = ctx.step_interrupt();
-        tokio::task::spawn_blocking(move || write_pdf(&path_for_blocking, &body, size, &interrupt))
+        crate::contracts::with_timeout(timeout_ms, async move {
+            tokio::task::spawn_blocking(move || {
+                write_pdf(&path_for_blocking, &body, size, &interrupt)
+            })
             .await
-            .map_err(|e| StepError::msg(format!("pdf.write join: {e}")))??;
+            .map_err(|e| StepError::io(format!("pdf.write join: {e}")))?
+        })
+        .await?;
 
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
     }

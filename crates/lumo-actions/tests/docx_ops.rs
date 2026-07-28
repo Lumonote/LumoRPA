@@ -12,6 +12,16 @@ use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 
+#[test]
+fn blocking_docx_actions_expose_timeout_ms() {
+    let mut registry = lumo_core::ActionRegistry::new();
+    lumo_actions::register_all(&mut registry);
+    for id in ["docx.read_text", "docx.replace_placeholders"] {
+        let schema = registry.get(id).unwrap().schema().clone();
+        assert!(schema["properties"].get("timeout_ms").is_some(), "{id}");
+    }
+}
+
 /// Write a minimal but structurally valid .docx whose body is `document_xml`
 /// (the `<w:body>` inner content). Includes the `[Content_Types].xml` Word needs
 /// so the file is a real OOXML package, not just a bag of bytes.
@@ -55,7 +65,12 @@ async fn read_text_extracts_paragraphs_in_order() {
     let caps = fs_caps(dir.path());
     write_docx(
         &path,
-        &format!("{}{}{}", para("First line"), para("Second line"), para("第三行")),
+        &format!(
+            "{}{}{}",
+            para("First line"),
+            para("Second line"),
+            para("第三行")
+        ),
     );
 
     let out = ok_with("docx.read_text", json!({ "path": path }), caps).await;
@@ -116,7 +131,10 @@ async fn replace_placeholders_fills_template_then_reads_back() {
         text.contains("Your invoice total is 1280."),
         "non-string value stringified, got: {text}"
     );
-    assert!(!text.contains("{{"), "no leftover placeholders, got: {text}");
+    assert!(
+        !text.contains("{{"),
+        "no leftover placeholders, got: {text}"
+    );
 }
 
 #[tokio::test]

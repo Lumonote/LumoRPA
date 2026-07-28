@@ -177,6 +177,8 @@ fn schedule_job(
         utterance: request.utterance,
         profile_id: request.profile_id,
         supplied_plan: Some(request.plan),
+        conversation_id: None,
+        conversation_context: Vec::new(),
     })
     .map_err(|error| error.to_string())?;
     repo.enqueue_job(&NewAgentJob {

@@ -40,9 +40,7 @@ impl Action for Snap {
     }
     async fn execute(&self, ctx: &mut StepCtx, _input: Value) -> Result<ActionResult, StepError> {
         let id = ctx.attach_artifact("screenshot", "image/png", PNG_STUB)?;
-        Ok(ActionResult::from(
-            serde_json::json!({ "artifact_id": id }),
-        ))
+        Ok(ActionResult::from(serde_json::json!({ "artifact_id": id })))
     }
 }
 
@@ -117,7 +115,10 @@ async fn attach_artifact_without_artifacts_dir_is_a_harmless_noop() {
 
     // 步骤输出里回显的 id 为空串 —— 即 attach_artifact 的 no-op 返回值契约。
     let steps = repo.list_steps(&report.run_id).expect("list steps");
-    let snap = steps.iter().find(|s| s.step_id == "snap").expect("snap row");
+    let snap = steps
+        .iter()
+        .find(|s| s.step_id == "snap")
+        .expect("snap row");
     let output = snap.output_json.as_ref().expect("snap output persisted");
     assert_eq!(
         output.get("artifact_id").and_then(Value::as_str),

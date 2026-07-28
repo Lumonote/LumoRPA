@@ -11,10 +11,83 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use ulid::Ulid;
+
+/// P2-1:run 级日志缓冲的环形上限(条数)。超出丢最旧并累计 dropped 计数,
+/// 防止长循环流程里 `ctx.log`(如 `control.log`)无界增长吃内存。
+pub const LOG_BUFFER_MAX: usize = 1000;
+
+/// P2-1:带上限的日志环。`log_buffer` 原为无界 `Vec<String>` 且只写不读;
+/// 收敛为定容环 —— 超上限丢最旧、`dropped` 计数,宿主可据此提示"日志有截断"。
+#[derive(Default)]
+struct LogBuffer {
+    entries: std::collections::VecDeque<String>,
+    dropped: u64,
+}
+
+impl LogBuffer {
+    fn push(&mut self, line: String) {
+        if self.entries.len() >= LOG_BUFFER_MAX {
+            self.entries.pop_front();
+            self.dropped += 1;
+        }
+        self.entries.push_back(line);
+    }
+}
+
+/// P2-7(进度事件,引擎侧 API):经 [`crate::FlowVm::with_on_step`] 注册的
+/// 观察者收到的事件。
+///
+/// 发出时机:
+///   * `StepStarted` —— 步骤通过取消/断点闸门后、`when` 求值前(控制流容器与
+///     叶子动作都会发);
+///   * `StepFinished` —— 步骤结果持久化点(`persist_step`),`state` 与
+///     step_runs 行一致(ok/failed/skipped/retrying/cached/ai_healed/caught/
+///     cancelled/timeout);无 repo 时事件照发,只是不落库;
+///   * `Log` —— 每次 [`StepCtx::log`](如 `control.log` 动作)。
+///
+/// 边界:run 取消时,首个观察到取消的步骤只发 `StepFinished(cancelled)` 不发
+/// `StepStarted`;断点暂停的步骤两者皆不发(该步未执行、也不落库)。
+/// `control.break` / `control.continue` 是跳转信号,只发 `StepStarted`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepEvent {
+    StepStarted {
+        run_id: String,
+        path: String,
+        step_id: String,
+        action: String,
+    },
+    StepFinished {
+        run_id: String,
+        path: String,
+        step_id: String,
+        state: String,
+        attempt: i64,
+        error: Option<String>,
+    },
+    Log {
+        run_id: String,
+        step_path: Option<String>,
+        line: String,
+    },
+}
+
+/// P2-7:on_step 观察者。引擎执行线程上同步调用,必须快速返回(重活请自行
+/// 转队列/通道);`Arc` 包裹以便跨 `control.parallel` 分支 fork 共享。
+pub type StepObserver = Arc<dyn Fn(&StepEvent) + Send + Sync>;
+
+/// P1-3(vars_json 治理):vars 状态的全局单调版本号。取代"每 fork 一条计数
+/// 线"的方案:任何一次 vars 变更(set_var / remove_var / merge_branch)都领取
+/// 一个进程内唯一的新版本号,因此**版本号相等 ⇔ vars 状态确同**(fork 复制
+/// 版本号时双方经 `Arc` 共享同一张 map)——持久化去重可以只比版本号。
+static VARS_REV: AtomicU64 = AtomicU64::new(1);
+
+fn next_vars_rev() -> u64 {
+    VARS_REV.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Cooperative cancellation handle for a run (P1-1). Clone it, hand one clone to
 /// [`crate::FlowVm::with_cancel`], and call [`CancelToken::cancel`] from
@@ -82,6 +155,13 @@ pub struct StepInterrupt {
 }
 
 impl StepInterrupt {
+    /// Mark this attempt as dead. Action-internal deadlines use the same flag
+    /// as the VM so orphaned blocking work observes the timeout at its next
+    /// checkpoint and cannot commit a side effect after the action returned.
+    pub fn interrupt(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
     /// 本次 attempt 是否已被引擎判定超时,或整个运行已被取消。
     pub fn is_interrupted(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
@@ -99,6 +179,27 @@ impl StepInterrupt {
 /// for each step about to actually execute (past resume replay) and, when it
 /// fires, [`Self::mark_paused`] latches a sticky flag so the rest of the run
 /// short-circuits and unwinds.
+/// 去掉路径每段末尾的 `[N]` 序号（循环迭代 `loop[3]`、并行分支 `branch[1]`），
+/// 得到与 Studio 静态 step 链可比的形态。
+fn normalize_debug_path(path: &str) -> String {
+    path.split('/')
+        .map(strip_index_suffix)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn strip_index_suffix(segment: &str) -> &str {
+    let Some(open) = segment.rfind('[') else {
+        return segment;
+    };
+    match segment[open + 1..].strip_suffix(']') {
+        Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+            &segment[..open]
+        }
+        _ => segment,
+    }
+}
+
 #[derive(Clone)]
 pub struct DebugController {
     breakpoints: Arc<std::collections::HashSet<String>>,
@@ -148,12 +249,30 @@ impl DebugController {
         if !self.armed.swap(true, Ordering::SeqCst) {
             return false; // resume step-off: let the step we paused on last run proceed
         }
-        self.step_mode || self.breakpoints.contains(path)
+        self.step_mode || self.matches_breakpoint(path)
+    }
+
+    /// 断点命中策略（宽进）：① 运行期路径完全相等；② 叶子 step id 相等
+    /// （Studio 断点存的是裸 id）；③ 双方每段去掉 `[N]` 迭代/分支序号后
+    /// 相等（`loop[3]/click` ↔ `loop/click`）。序号剥离会让同名步骤在不同
+    /// 迭代/分支上都命中——调试工具宁可多停，不可从不停。
+    fn matches_breakpoint(&self, path: &str) -> bool {
+        if self.breakpoints.contains(path) {
+            return true;
+        }
+        if let Some(leaf) = path.rsplit('/').next() {
+            if self.breakpoints.contains(leaf) {
+                return true;
+            }
+        }
+        let normalized = normalize_debug_path(path);
+        self.breakpoints
+            .iter()
+            .any(|breakpoint| normalize_debug_path(breakpoint) == normalized)
     }
 
     /// Latch the sticky pause at `path` (first writer wins).
-    fn mark_paused(&self, path: &str) {
-        self.paused.store(true, Ordering::SeqCst);
+    fn mark_paused(&self, path: &str) {        self.paused.store(true, Ordering::SeqCst);
         let mut at = self.paused_at.lock();
         if at.is_none() {
             *at = Some(path.to_string());
@@ -254,6 +373,15 @@ pub struct StepCtx {
     /// [`StepCtx::human_prompter`] 取用。`None` ⇒ 宿主不支持人机交互，
     /// 动作立刻报错而非静默挂起。
     human: Option<Arc<dyn crate::human::HumanPrompter>>,
+    /// P2-7:宿主注册的进度观察者(由 VM 从 `FlowVm::with_on_step` 播种)。
+    /// fork 共享同一 `Arc`,parallel 分支的事件汇入同一通道。`None` ⇒ 零开销。
+    on_step: Option<StepObserver>,
+    /// P1-3(vars_json 治理):持久化 vars 去重游标 —— 记录最近一条已持久化
+    /// step 行的 vars 版本号。经 `Arc` 跨 parallel 分支 fork 共享(与 `seq`
+    /// 同理):seq 分配与去重判定在 [`StepCtx::next_seq_with_vars`] 的同一临界
+    /// 区完成,保证"NULL = 与前一条 seq 行的 vars 相同"即使分支交错持久化也
+    /// 成立。
+    vars_persist: Arc<Mutex<Option<u64>>>,
     inner: Arc<Mutex<CtxInner>>,
 }
 
@@ -268,7 +396,11 @@ struct CtxInner {
     /// inline 渲染共 2-3 次)直接克隆缓存——`TemplateCtx` 字段全是 `Arc`,克隆是
     /// O(1),且克隆间共享内部的 minijinja scope 缓存,重复 serialize 一并消除。
     tpl_cache: Option<TemplateCtx>,
-    log_buffer: Vec<String>,
+    /// P1-3:vars 状态版本号(全局唯一,见 [`next_vars_rev`])。set_var /
+    /// remove_var / merge_branch 换新;fork 原样复制(此刻 vars 经 Arc 共享,
+    /// 状态确同)。持久化侧只比版本号即可判断"vars 自上一条持久化行以来没变"。
+    vars_rev: u64,
+    log_buffer: LogBuffer,
     stats: RunStats,
     /// Step id currently being executed. Set by the VM right before
     /// `Action::execute`; lets actions (e.g. `ai.chat`) attribute cost rows
@@ -333,13 +465,16 @@ impl StepCtx {
             resume_memo: None,
             debug: None,
             human: None,
+            on_step: None,
+            vars_persist: Arc::new(Mutex::new(None)),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: Arc::new(inputs),
                 steps: Arc::new(Map::new()),
                 vars: Arc::new(Map::new()),
                 bindings: Arc::new(Map::new()),
                 tpl_cache: None,
-                log_buffer: Vec::new(),
+                vars_rev: next_vars_rev(),
+                log_buffer: LogBuffer::default(),
                 stats: RunStats::default(),
                 current_step_id: None,
                 current_step_path: None,
@@ -369,6 +504,12 @@ impl StepCtx {
     pub fn with_vault(mut self, identity: Option<Arc<lumo_storage::VaultIdentity>>) -> Self {
         self.vault_identity = identity;
         self
+    }
+
+    /// 架构 P0-1:vault 解密身份,供子流程 VM（[`crate::FlowVm::child_of`]）
+    /// 继承 —— 子流程里 `${{ vault.* }}` 不因裸建 VM 断链。`None` ⇒ env-only。
+    pub fn vault_identity(&self) -> Option<Arc<lumo_storage::VaultIdentity>> {
+        self.vault_identity.clone()
     }
 
     /// T3: seed the flow-level resource declarations (`spec.resources`) so steps
@@ -484,6 +625,28 @@ impl StepCtx {
     /// 不持有上下文借用）。`None` ⇒ 动作侧报"宿主不支持人机交互"。
     pub fn human_prompter(&self) -> Option<Arc<dyn crate::human::HumanPrompter>> {
         self.human.clone()
+    }
+
+    /// P2-7:注册宿主进度观察者(由 VM 从 `FlowVm::with_on_step` 播种)。
+    /// `None` ⇒ 不发事件,行为与旧版逐字节一致。
+    pub fn with_on_step(mut self, obs: Option<StepObserver>) -> Self {
+        self.on_step = obs;
+        self
+    }
+
+    /// P2-7:当前注册的进度观察者,供子流程 VM([`crate::FlowVm::child_of`])
+    /// 继承 —— 子流程步骤事件汇入同一通道(事件带各自 run_id,宿主可分流)。
+    pub fn on_step(&self) -> Option<StepObserver> {
+        self.on_step.clone()
+    }
+
+    /// P2-7:向观察者投递一条进度事件。未注册时闭包不执行、零分配(向后
+    /// 兼容:不设回调行为不变)。观察者在引擎线程同步调用,期间不持有任何
+    /// ctx 内部锁,回调里可安全再调 ctx 方法。
+    pub fn emit_event(&self, make: impl FnOnce() -> StepEvent) {
+        if let Some(obs) = &self.on_step {
+            obs(&make());
+        }
     }
 
     /// F-20: whether a breakpoint has already fired (sticky). The VM checks this
@@ -603,6 +766,7 @@ impl StepCtx {
     pub fn set_var(&self, key: &str, value: Value) {
         let mut g = self.inner.lock();
         g.tpl_cache = None; // vars 变更 ⇒ 失效,下次渲染必须看到新值
+        g.vars_rev = next_vars_rev(); // P1-3:vars 状态换代
         Arc::make_mut(&mut g.vars).insert(key.to_string(), value);
     }
 
@@ -612,11 +776,15 @@ impl StepCtx {
     pub fn remove_var(&self, key: &str) -> Option<Value> {
         let mut g = self.inner.lock();
         g.tpl_cache = None; // vars 变更 ⇒ 失效,下次渲染必须看到新值
+        g.vars_rev = next_vars_rev(); // P1-3:vars 状态换代(空移除也保守换代)
         Arc::make_mut(&mut g.vars).remove(key)
     }
 
+    /// vars 命名空间的深拷贝快照。P1-3:锁内只克隆 `Arc`(O(1)),真正的
+    /// 深拷贝在锁外做 —— 大 vars 不再让持锁方(含 parallel 分支)排队。
     pub fn vars_snapshot(&self) -> Value {
-        Value::Object((*self.inner.lock().vars).clone())
+        let vars = self.inner.lock().vars.clone();
+        Value::Object((*vars).clone())
     }
 
     pub fn outputs_snapshot(&self) -> Value {
@@ -637,7 +805,38 @@ impl StepCtx {
 
     pub fn log(&self, line: impl Into<String>) {
         let line = line.into();
-        self.inner.lock().log_buffer.push(line);
+        if let Some(obs) = &self.on_step {
+            // P2-7:log 行进宿主进度通道(如 `control.log`)。锁先释放再回调,
+            // 观察者内可安全再调 ctx 方法(parking_lot Mutex 不可重入)。
+            let step_path = {
+                let mut g = self.inner.lock();
+                g.log_buffer.push(line.clone());
+                g.current_step_path.clone()
+            };
+            obs(&StepEvent::Log {
+                run_id: self.run_id.clone(),
+                step_path,
+                line,
+            });
+        } else {
+            self.inner.lock().log_buffer.push(line);
+        }
+    }
+
+    /// P2-1:当前日志环快照(最旧 → 最新,至多 [`LOG_BUFFER_MAX`] 条)。
+    pub fn logs(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .log_buffer
+            .entries
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// P2-1:因环形上限被丢弃的最旧日志条数(含并入的 parallel 分支)。
+    pub fn logs_dropped(&self) -> u64 {
+        self.inner.lock().log_buffer.dropped
     }
 
     pub fn lookup_action(&self, id: &str) -> Option<ActionRef> {
@@ -646,6 +845,27 @@ impl StepCtx {
 
     pub fn next_step_seq(&self) -> i64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// P1-3(vars_json 治理):一次临界区里领取持久化 seq 并做 vars 快照去重
+    /// 判定。返回 `(seq, Some(vars))` ⇒ 本行写全量快照(锁内只克隆 `Arc`,
+    /// 深拷贝/截断/序列化全部移到锁外的阻塞线程);`(seq, None)` ⇒ vars 自
+    /// 上一条持久化行(全局按 seq)以来未变,落 NULL,读取侧
+    /// (`Repo::list_steps`)向前回溯补齐。seq 分配与判定同锁,保证
+    /// "NULL = 与前一条 seq 行相同"在 parallel 分支交错持久化时依然成立
+    /// (交错处版本号不同,自动退回写全量)。
+    pub fn next_seq_with_vars(&self) -> (i64, Option<Arc<Map<String, Value>>>) {
+        let mut last = self.vars_persist.lock();
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let g = self.inner.lock();
+        let rev = g.vars_rev;
+        let vars = if *last == Some(rev) {
+            None
+        } else {
+            Some(g.vars.clone())
+        };
+        *last = Some(rev);
+        (seq, vars)
     }
 
     /// P0-4: produce an isolated child context for a `control.parallel` branch.
@@ -675,6 +895,11 @@ impl StepCtx {
             resume_memo: self.resume_memo.clone(),
             debug: self.debug.clone(),
             human: self.human.clone(),
+            // P2-7:分支事件汇入同一观察者通道(Arc 共享)。
+            on_step: self.on_step.clone(),
+            // P1-3:与 `seq` 同理跨分支共享 —— 去重判定必须看全局最近一条
+            // 持久化行,而非本分支的。
+            vars_persist: self.vars_persist.clone(),
             inner: Arc::new(Mutex::new(CtxInner {
                 inputs: g.inputs.clone(),
                 steps: g.steps.clone(),
@@ -683,7 +908,11 @@ impl StepCtx {
                 // 分支不继承父缓存:fork 后分支内首个渲染重建自己的快照,
                 // 之后分支内 set_var 走写时复制,不会污染父/兄弟分支。
                 tpl_cache: None,
-                log_buffer: Vec::new(),
+                // P1-3:fork 时 vars 经 Arc 共享、状态确同 ⇒ 版本号原样复制,
+                // 分支首次持久化若 vars 仍未变可继续去重;分支内首次写时复制
+                // 会换新版本号。
+                vars_rev: g.vars_rev,
+                log_buffer: LogBuffer::default(),
                 stats: RunStats::default(),
                 current_step_id: g.current_step_id.clone(),
                 current_step_path: g.current_step_path.clone(),
@@ -704,6 +933,7 @@ impl StepCtx {
         let b = branch.inner.lock();
         let mut g = self.inner.lock();
         g.tpl_cache = None; // 合并写入 steps/vars ⇒ 失效
+        g.vars_rev = next_vars_rev(); // P1-3:vars 状态换代(合并即变更)
         {
             let steps = Arc::make_mut(&mut g.steps);
             for (k, v) in b.steps.iter() {
@@ -722,7 +952,11 @@ impl StepCtx {
         g.stats.skipped += b.stats.skipped;
         g.stats.retried += b.stats.retried;
         g.stats.caught += b.stats.caught;
-        g.log_buffer.extend(b.log_buffer.iter().cloned());
+        // P2-1:分支日志经带上限的 push 汇入父环,dropped 计数一并累计。
+        for line in &b.log_buffer.entries {
+            g.log_buffer.push(line.clone());
+        }
+        g.log_buffer.dropped += b.log_buffer.dropped;
     }
 
     /// Stash the step id about to run so `Action::execute` can read it back
@@ -749,6 +983,12 @@ impl StepCtx {
     pub fn with_artifacts_dir(mut self, dir: PathBuf) -> Self {
         self.artifacts_dir = Some(dir);
         self
+    }
+
+    /// 架构 P0-1:artifacts 落盘根目录,供子流程 VM 继承 —— 子流程的
+    /// `attach_artifact` 与父运行落同一根目录。`None` ⇒ 未开启落盘。
+    pub fn artifacts_dir(&self) -> Option<&PathBuf> {
+        self.artifacts_dir.as_ref()
     }
 
     /// Attach a blob artifact (screenshot, DOM, HAR, etc.) to the current step.
@@ -1513,10 +1753,114 @@ mod tests {
         ctx.set_current_resource(Some("browser"));
         let child = ctx.fork();
         assert!(child.has_resource("browser"));
-        assert_eq!(
-            child.resource_decl("browser").unwrap().kind,
-            "chromium.cdp"
-        );
+        assert_eq!(child.resource_decl("browser").unwrap().kind, "chromium.cdp");
         assert_eq!(child.current_resource().as_deref(), Some("browser"));
+    }
+
+    #[test]
+    fn log_buffer_is_a_capped_ring_that_counts_drops() {
+        // P2-1: the run log must not grow unbounded — past LOG_BUFFER_MAX the
+        // oldest line is dropped and accounted for.
+        let ctx = test_ctx();
+        for i in 0..(LOG_BUFFER_MAX + 5) {
+            ctx.log(format!("line-{i}"));
+        }
+        let logs = ctx.logs();
+        assert_eq!(logs.len(), LOG_BUFFER_MAX, "ring is capped");
+        assert_eq!(ctx.logs_dropped(), 5, "overflow drops are counted");
+        assert_eq!(
+            logs.first().map(String::as_str),
+            Some("line-5"),
+            "oldest dropped first"
+        );
+        assert_eq!(
+            logs.last().map(String::as_str),
+            Some(format!("line-{}", LOG_BUFFER_MAX + 4).as_str()),
+            "newest kept"
+        );
+    }
+
+    #[test]
+    fn merge_branch_folds_logs_through_the_cap() {
+        // P2-1: branch logs merge through the capped push, dropped counts add up.
+        let parent = test_ctx();
+        parent.log("p0");
+        let child = parent.fork();
+        child.log("c0");
+        child.log("c1");
+        parent.merge_branch(&child);
+        assert_eq!(parent.logs(), vec!["p0", "c0", "c1"]);
+        assert_eq!(parent.logs_dropped(), 0);
+    }
+
+    #[test]
+    fn log_event_reaches_on_step_observer() {
+        // P2-7: ctx.log (the `control.log` channel) must surface as a Log event.
+        let events: Arc<Mutex<Vec<StepEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let ctx = test_ctx().with_on_step(Some(Arc::new(move |e: &StepEvent| {
+            sink.lock().push(e.clone());
+        })));
+        ctx.set_current_step_path("a/b");
+        ctx.log("hello");
+        let got = events.lock();
+        assert_eq!(
+            *got,
+            vec![StepEvent::Log {
+                run_id: "run-test".into(),
+                step_path: Some("a/b".into()),
+                line: "hello".into(),
+            }]
+        );
+        // The line also still lands in the ring buffer.
+        drop(got);
+        assert_eq!(ctx.logs(), vec!["hello"]);
+    }
+
+    #[test]
+    fn next_seq_with_vars_dedups_until_vars_change() {
+        // P1-3: unchanged vars ⇒ NULL reference row; any mutation ⇒ full snapshot.
+        let ctx = test_ctx();
+        ctx.set_var("a", Value::from(1));
+        let (s0, v0) = ctx.next_seq_with_vars();
+        assert_eq!(s0, 0);
+        assert!(
+            v0.is_some(),
+            "first persisted row always writes the full snapshot"
+        );
+        let (s1, v1) = ctx.next_seq_with_vars();
+        assert_eq!(s1, 1);
+        assert!(v1.is_none(), "unchanged vars dedup to a NULL reference");
+        ctx.set_var("a", Value::from(2));
+        let (_, v2) = ctx.next_seq_with_vars();
+        assert!(v2.is_some(), "a set_var re-writes the full snapshot");
+        ctx.remove_var("a");
+        let (_, v3) = ctx.next_seq_with_vars();
+        assert!(v3.is_some(), "remove_var also counts as a vars change");
+    }
+
+    #[test]
+    fn next_seq_with_vars_dedup_spans_undiverged_forks_and_resets_on_divergence() {
+        // P1-3: at fork time vars are Arc-shared and rev is copied, so an
+        // undiverged branch may keep referencing the parent's snapshot; once a
+        // branch writes, its rev diverges and interleaved persists fall back to
+        // full snapshots (the "NULL = previous seq row" invariant).
+        let parent = test_ctx();
+        parent.set_var("a", Value::from(1));
+        let (_, p0) = parent.next_seq_with_vars();
+        assert!(p0.is_some());
+        let child = parent.fork();
+        let (_, c0) = child.next_seq_with_vars();
+        assert!(c0.is_none(), "undiverged fork shares the same vars state");
+        child.set_var("b", Value::from(2));
+        let (_, c1) = child.next_seq_with_vars();
+        assert!(c1.is_some(), "diverged branch writes full");
+        // Parent persists after the child: tracker holds the child's rev, the
+        // parent's differs ⇒ full snapshot again (never a wrong NULL).
+        let (_, p1) = parent.next_seq_with_vars();
+        assert!(
+            p1.is_some(),
+            "interleaved branch persist must not dedup across states"
+        );
     }
 }

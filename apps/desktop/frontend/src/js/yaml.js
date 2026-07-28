@@ -13,6 +13,14 @@ export function parseYaml(text) {
     const m = line.match(/^( *)/);
     return m ? m[1].length : 0;
   }
+  function nextContentLine(start) {
+    for (let j = start; j < lines.length; j++) {
+      if (isBlank(lines[j])) continue;
+      const indent = indentOf(lines[j]);
+      return { indent, line: lines[j].slice(indent) };
+    }
+    return null;
+  }
 
   while (i < lines.length) {
     const raw = lines[i];
@@ -40,8 +48,23 @@ export function parseYaml(text) {
           if (parent.kind === "map") parent.value[parent.lastKey] = top.value;
         }
       }
-      const after = line.slice(2);
+      const after = line === "-" ? "" : line.slice(2);
+      if (after.startsWith("- ") || after === "-") {
+        const arr = [];
+        top.value.push(arr);
+        stack.push({ indent: ind, value: arr, kind: "list", lastKey: null });
+        lines[i] = " ".repeat(ind + 2) + after;
+        continue;
+      }
       if (after === "" || /^\s*$/.test(after)) {
+        const next = nextContentLine(i + 1);
+        if (next && next.indent > ind && (next.line.startsWith("- ") || next.line === "-")) {
+          const arr = [];
+          top.value.push(arr);
+          stack.push({ indent: ind, value: arr, kind: "list", lastKey: null });
+          i++;
+          continue;
+        }
         // Empty item: object whose keys come at deeper indent
         const obj = {};
         top.value.push(obj);
@@ -171,13 +194,37 @@ export function extractSteps(ast) {
   return ast?.spec?.steps || [];
 }
 
+export const STEP_CHILD_KINDS = ["do", "else", "catch", "finally"];
+
+export function childStepBlocks(step) {
+  const blocks = STEP_CHILD_KINDS
+    .filter((kind) => Array.isArray(step?.[kind]) && step[kind].length)
+    .map((kind) => ({
+      kind,
+      label: kind,
+      path: [kind],
+      steps: step[kind],
+    }));
+  if (Array.isArray(step?.branches)) {
+    step.branches.forEach((branch, index) => {
+      if (!Array.isArray(branch) || !branch.length) return;
+      blocks.push({
+        kind: "branches",
+        label: `branch[${index}]`,
+        path: ["branches", index],
+        steps: branch,
+      });
+    });
+  }
+  return blocks;
+}
+
 export function walkSteps(steps, cb, parent = null, depth = 0) {
   steps.forEach((step, idx) => {
-    cb(step, { parent, idx, depth, path: parent ? [...parent, idx] : [idx] });
-    ["do", "else", "catch", "finally"].forEach((kind) => {
-      if (Array.isArray(step[kind])) {
-        walkSteps(step[kind], cb, parent ? [...parent, idx, kind] : [idx, kind], depth + 1);
-      }
+    const path = parent ? [...parent, idx] : [idx];
+    cb(step, { parent, idx, depth, path });
+    childStepBlocks(step).forEach((block) => {
+      walkSteps(block.steps, cb, [...path, ...block.path], depth + 1);
     });
   });
 }
@@ -188,11 +235,17 @@ export function findStepByPath(steps, path) {
   for (let i = 0; i < path.length; i++) {
     const seg = path[i];
     if (typeof seg === "number") {
+      if (!Array.isArray(cur)) return null;
       parent = cur[seg];
+      if (!parent || Array.isArray(parent)) return null;
       if (i === path.length - 1) return parent;
       cur = parent;
+    } else if (seg === "branches") {
+      const branchIndex = path[++i];
+      if (typeof branchIndex !== "number") return null;
+      cur = parent?.branches?.[branchIndex] || [];
     } else {
-      cur = parent[seg] || [];
+      cur = parent?.[seg] || [];
     }
   }
   return parent;
@@ -210,10 +263,19 @@ export function stepIdChain(steps, path) {
   for (let i = 0; i < path.length; i++) {
     const seg = path[i];
     if (typeof seg === "number") {
+      if (!Array.isArray(cur)) return null;
       node = cur ? cur[seg] : null;
-      if (!node) return null;
+      if (!node || Array.isArray(node)) return null;
       ids.push(node.id);
       cur = node;
+    } else if (seg === "branches") {
+      const branchIndex = path[++i];
+      if (typeof branchIndex !== "number") return null;
+      // vm.rs run_parallel names each branch scope `branch[i]` in the path,
+      // so the chain must include it or branch-nested breakpoints never match.
+      ids.push(`branch[${branchIndex}]`);
+      cur = node?.branches?.[branchIndex] || null;
+      node = null;
     } else {
       cur = node ? node[seg] : null;
     }
@@ -381,6 +443,21 @@ export function emitStep(step, baseIndent) {
       out += `${cIndent}${kind}:\n`;
       for (const child of arr) {
         out += emitStep(child, baseIndent + 4) + "\n";
+      }
+    }
+  }
+  if (Array.isArray(step.branches) && step.branches.length) {
+    const branchIndent = baseIndent + 4;
+    const branchPad = " ".repeat(branchIndent);
+    out += `${cIndent}branches:\n`;
+    for (const branch of step.branches) {
+      if (!Array.isArray(branch) || !branch.length) {
+        out += `${branchPad}- []\n`;
+        continue;
+      }
+      out += `${branchPad}-\n`;
+      for (const child of branch) {
+        out += emitStep(child, branchIndent + 2) + "\n";
       }
     }
   }

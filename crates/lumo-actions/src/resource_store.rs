@@ -184,7 +184,10 @@ mod tests {
         let winner = store.get_or_put("run", "x", Arc::new(Counted(1)));
         // A second open of the same slot: loser is dropped here, winner returned.
         let again = store.get_or_put("run", "x", Arc::new(Counted(2)));
-        assert!(Arc::ptr_eq(&winner, &again), "both callers see the same handle");
+        assert!(
+            Arc::ptr_eq(&winner, &again),
+            "both callers see the same handle"
+        );
         assert_eq!(
             DROPS.load(Ordering::SeqCst),
             1,
@@ -219,7 +222,10 @@ mod tests {
         // is handed back (not silently dropped) so we can close it gracefully — this
         // is what FTP uses to `QUIT` the redundant session.
         let (w2, loser2) = store.get_or_put_reclaiming_loser("run", "x", Arc::new(2));
-        assert!(Arc::ptr_eq(&w1, &w2), "the slot still holds the first winner");
+        assert!(
+            Arc::ptr_eq(&w1, &w2),
+            "the slot still holds the first winner"
+        );
         assert_eq!(
             loser2.as_deref(),
             Some(&2),
@@ -228,7 +234,11 @@ mod tests {
         // The plain wrapper keeps its old semantics (loser dropped, winner kept).
         let w3 = store.get_or_put("run", "x", Arc::new(3));
         assert!(Arc::ptr_eq(&w1, &w3));
-        assert_eq!(store.take_run("run").len(), 1, "only ever one handle in the slot");
+        assert_eq!(
+            store.take_run("run").len(),
+            1,
+            "only ever one handle in the slot"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -253,6 +263,10 @@ mod tests {
             1,
             "every racer must observe the same single winner, got {winners:?}"
         );
-        assert_eq!(store.take_run("run").len(), 1, "exactly one handle is stored");
+        assert_eq!(
+            store.take_run("run").len(),
+            1,
+            "exactly one handle is stored"
+        );
     }
 }

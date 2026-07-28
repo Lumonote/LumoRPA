@@ -41,6 +41,9 @@ struct ZipIn {
     dest: String,
     #[serde(default)]
     base_dir: Option<String>,
+    /// Optional WinZip AES-256 password. The password is never included in output.
+    #[serde(default)]
+    password: Option<String>,
 }
 
 /// Entry name for a top-level input path. With `base_dir`, the name is the path
@@ -102,6 +105,7 @@ fn collect_entries(
 fn write_zip(
     dest: &Path,
     entries: Vec<(PathBuf, String)>,
+    password: Option<String>,
     interrupt: &StepInterrupt,
 ) -> Result<(u64, u64), StepError> {
     if let Some(parent) = dest.parent() {
@@ -123,7 +127,11 @@ fn write_zip(
         if interrupt.is_interrupted() {
             return Err(StepError::msg("archive.zip cancelled"));
         }
-        zw.start_file(name.clone(), opts)
+        let file_opts = match password.as_deref() {
+            Some(password) => opts.with_aes_encryption(zip::AesMode::Aes256, password),
+            None => opts,
+        };
+        zw.start_file(name.clone(), file_opts)
             .map_err(|e| StepError::msg(format!("archive.zip start `{name}`: {e}")))?;
         let mut f = std::fs::File::open(&abs)
             .map_err(|e| StepError::msg(format!("archive.zip open {}: {e}", abs.display())))?;
@@ -162,6 +170,7 @@ impl Action for ZipAction {
             paths,
             dest,
             base_dir,
+            password,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("archive.zip input invalid: {e}")))?;
         if paths.is_empty() {
@@ -182,7 +191,7 @@ impl Action for ZipAction {
 
         let cancel = ctx.step_interrupt();
         let (count, bytes) =
-            tokio::task::spawn_blocking(move || write_zip(&dest_path, entries, &cancel))
+            tokio::task::spawn_blocking(move || write_zip(&dest_path, entries, password, &cancel))
                 .await
                 .map_err(|e| StepError::msg(format!("archive.zip task: {e}")))??;
 
@@ -205,6 +214,25 @@ struct UnzipIn {
     max_total_bytes: Option<u64>,
     #[serde(default)]
     max_entries: Option<u64>,
+    /// Password for encrypted entries. Supplying it for a plain archive is harmless.
+    #[serde(default)]
+    password: Option<String>,
+}
+
+fn zip_entry<'a, R: Read + std::io::Seek>(
+    archive: &'a mut zip::ZipArchive<R>,
+    index: usize,
+    password: Option<&str>,
+) -> Result<zip::read::ZipFile<'a>, StepError> {
+    match password {
+        Some(password) => archive.by_index_decrypt(index, password.as_bytes()),
+        None => archive.by_index(index),
+    }
+    .map_err(|e| {
+        StepError::msg(format!(
+            "archive.unzip entry {index}: decrypt/password error: {e}"
+        ))
+    })
 }
 
 /// Resolve a zip entry name to a path under `dest`, rejecting any entry that
@@ -248,6 +276,7 @@ fn extract_zip(
     src: &Path,
     dest: &Path,
     max_total: u64,
+    password: Option<String>,
     interrupt: &StepInterrupt,
 ) -> Result<u64, StepError> {
     let file = std::fs::File::open(src)
@@ -261,9 +290,7 @@ fn extract_zip(
         if interrupt.is_interrupted() {
             return Err(StepError::msg("archive.unzip cancelled"));
         }
-        let mut entry = zr
-            .by_index(i)
-            .map_err(|e| StepError::msg(format!("archive.unzip entry {i}: {e}")))?;
+        let mut entry = zip_entry(&mut zr, i, password.as_deref())?;
         let raw = entry.name().to_string();
         let target = safe_join(dest, &raw)?;
         if entry.is_dir() {
@@ -324,6 +351,7 @@ impl Action for UnzipAction {
             dest,
             max_total_bytes,
             max_entries,
+            password,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("archive.unzip input invalid: {e}")))?;
         let src_path = PathBuf::from(&src);
@@ -350,9 +378,7 @@ impl Action for UnzipAction {
                 )));
             }
             for i in 0..zr.len() {
-                let entry = zr
-                    .by_index(i)
-                    .map_err(|e| StepError::msg(format!("archive.unzip entry {i}: {e}")))?;
+                let entry = zip_entry(&mut zr, i, password.as_deref())?;
                 let name = entry.name().to_string();
                 // Cap-check EVERY target (files and directories): a dir-only
                 // archive must not create trees outside the fs_write grant.
@@ -363,8 +389,9 @@ impl Action for UnzipAction {
 
         let dp = dest_path.clone();
         let cancel = ctx.step_interrupt();
+        let extract_password = password.clone();
         let count = tokio::task::spawn_blocking(move || {
-            extract_zip(&src_path, &dp, max_total, &cancel)
+            extract_zip(&src_path, &dp, max_total, extract_password, &cancel)
         })
         .await
         .map_err(|e| StepError::msg(format!("archive.unzip task: {e}")))??;

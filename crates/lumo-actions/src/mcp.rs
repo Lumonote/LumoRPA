@@ -4,6 +4,8 @@
 pub mod oauth;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
@@ -11,6 +13,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
@@ -28,6 +31,10 @@ pub enum McpTransportConfig {
         env: BTreeMap<String, String>,
     },
     StreamableHttp {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+    Sse {
         url: String,
         headers: BTreeMap<String, String>,
     },
@@ -72,6 +79,13 @@ enum McpTransport {
         url: reqwest::Url,
         headers: reqwest::header::HeaderMap,
         session_id: Option<String>,
+    },
+    Sse {
+        client: reqwest::Client,
+        post_url: reqwest::Url,
+        headers: reqwest::header::HeaderMap,
+        stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+        buffer: String,
     },
 }
 
@@ -141,6 +155,46 @@ impl McpClient {
                     url,
                     headers: parsed_headers,
                     session_id: None,
+                }
+            }
+            McpTransportConfig::Sse { url, headers } => {
+                let url = parse_mcp_url(&url, "SSE")?;
+                let parsed_headers = parse_caller_headers(headers)?;
+                let client = reqwest::Client::new();
+                let response = client
+                    .get(url.clone())
+                    .headers(parsed_headers.clone())
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .send()
+                    .await
+                    .map_err(|error| McpError::Transport {
+                        message: format!("SSE connection failed: {}", error.without_url()),
+                    })?;
+                if !response.status().is_success() {
+                    return Err(McpError::Transport {
+                        message: format!(
+                            "SSE server returned status {}",
+                            response.status().as_u16()
+                        ),
+                    });
+                }
+                let mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+                    Box::pin(response.bytes_stream());
+                let mut buffer = String::new();
+                let post_url = timeout(
+                    operation_timeout,
+                    read_legacy_sse_endpoint(&mut stream, &mut buffer, &url),
+                )
+                .await
+                .map_err(|_| McpError::Timeout {
+                    duration_ms: duration_millis(operation_timeout),
+                })??;
+                McpTransport::Sse {
+                    client,
+                    post_url,
+                    headers: parsed_headers,
+                    stream,
+                    buffer,
                 }
             }
         };
@@ -403,6 +457,36 @@ impl McpClient {
                     }
                 }
             }
+            McpTransport::Sse {
+                client,
+                post_url,
+                headers,
+                stream,
+                buffer,
+            } => {
+                let response = client
+                    .post(post_url.clone())
+                    .headers(headers.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .json(&message)
+                    .send()
+                    .await
+                    .map_err(|error| McpError::Transport {
+                        message: format!("SSE message POST failed: {}", error.without_url()),
+                    })?;
+                if !response.status().is_success() {
+                    return Err(McpError::Transport {
+                        message: format!(
+                            "SSE message endpoint returned status {}",
+                            response.status().as_u16()
+                        ),
+                    });
+                }
+                match response_id {
+                    Some(id) => read_legacy_sse_response(stream, buffer, id).await.map(Some),
+                    None => Ok(None),
+                }
+            }
         }
     }
 
@@ -429,6 +513,135 @@ impl Drop for McpClient {
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn parse_mcp_url(value: &str, transport: &str) -> Result<reqwest::Url, McpError> {
+    let url = reqwest::Url::parse(value).map_err(|_| McpError::Transport {
+        message: format!("invalid {transport} URL"),
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(McpError::Transport {
+            message: format!("{transport} URL must be HTTP(S) and must not contain credentials"),
+        });
+    }
+    Ok(url)
+}
+
+fn parse_caller_headers(
+    headers: BTreeMap<String, String>,
+) -> Result<reqwest::header::HeaderMap, McpError> {
+    let mut parsed = reqwest::header::HeaderMap::new();
+    for (name, value) in headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            McpError::Transport {
+                message: "invalid caller header name".to_string(),
+            }
+        })?;
+        let value =
+            reqwest::header::HeaderValue::from_str(&value).map_err(|_| McpError::Transport {
+                message: "invalid caller header value".to_string(),
+            })?;
+        parsed.insert(name, value);
+    }
+    parsed.remove(reqwest::header::CONTENT_TYPE);
+    parsed.remove(reqwest::header::ACCEPT);
+    Ok(parsed)
+}
+
+async fn read_legacy_sse_endpoint(
+    stream: &mut Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    buffer: &mut String,
+    source_url: &reqwest::Url,
+) -> Result<reqwest::Url, McpError> {
+    loop {
+        let (event, data) = read_sse_event(stream, buffer).await?;
+        if event.as_deref() != Some("endpoint") {
+            continue;
+        }
+        let endpoint = source_url
+            .join(data.trim())
+            .map_err(|_| McpError::Protocol {
+                message: "legacy SSE endpoint event contained an invalid URL".to_string(),
+            })?;
+        if endpoint.scheme() != source_url.scheme()
+            || endpoint.host_str() != source_url.host_str()
+            || endpoint.port_or_known_default() != source_url.port_or_known_default()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+        {
+            return Err(McpError::Transport {
+                message: "legacy SSE message endpoint must be same-origin".to_string(),
+            });
+        }
+        return Ok(endpoint);
+    }
+}
+
+async fn read_legacy_sse_response(
+    stream: &mut Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    buffer: &mut String,
+    response_id: u64,
+) -> Result<Value, McpError> {
+    loop {
+        let (_, data) = read_sse_event(stream, buffer).await?;
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if response_matches_id(&value, response_id) {
+            return Ok(value);
+        }
+    }
+}
+
+async fn read_sse_event(
+    stream: &mut Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    buffer: &mut String,
+) -> Result<(Option<String>, String), McpError> {
+    loop {
+        if let Some((frame, consumed)) = take_sse_frame(buffer) {
+            let frame = frame.to_string();
+            buffer.drain(..consumed);
+            let mut event = None;
+            let mut data = Vec::new();
+            for line in frame.lines() {
+                if let Some(value) = line.strip_prefix("event:") {
+                    event = Some(value.trim().to_string());
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push(value.trim_start().to_string());
+                }
+            }
+            if !data.is_empty() {
+                return Ok((event, data.join("\n")));
+            }
+            continue;
+        }
+        let chunk = stream
+            .next()
+            .await
+            .ok_or_else(|| McpError::Transport {
+                message: "legacy SSE stream closed".to_string(),
+            })?
+            .map_err(|error| McpError::Transport {
+                message: format!("legacy SSE stream failed: {}", error.without_url()),
+            })?;
+        let text = std::str::from_utf8(&chunk).map_err(|_| McpError::Protocol {
+            message: "legacy SSE stream was not UTF-8".to_string(),
+        })?;
+        buffer.push_str(text);
+    }
+}
+
+fn take_sse_frame(buffer: &str) -> Option<(&str, usize)> {
+    if let Some(index) = buffer.find("\r\n\r\n") {
+        Some((&buffer[..index], index + 4))
+    } else {
+        buffer
+            .find("\n\n")
+            .map(|index| (&buffer[..index], index + 2))
+    }
 }
 
 async fn write_stdio_message(stdin: &mut ChildStdin, value: &Value) -> Result<(), McpError> {
@@ -778,6 +991,39 @@ mod tests {
         }
         let candidate = path.join(if cfg!(windows) { "lumo.exe" } else { "lumo" });
         candidate.exists().then_some(candidate)
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_reads_same_origin_endpoint_and_json_rpc_response() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![Ok(Bytes::from_static(
+            b"event: endpoint\ndata: /messages?id=7\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+        ))];
+        let mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+            Box::pin(futures_util::stream::iter(chunks));
+        let mut buffer = String::new();
+        let source = reqwest::Url::parse("https://example.test/sse").unwrap();
+        let endpoint = read_legacy_sse_endpoint(&mut stream, &mut buffer, &source)
+            .await
+            .unwrap();
+        assert_eq!(endpoint.as_str(), "https://example.test/messages?id=7");
+        let response = read_legacy_sse_response(&mut stream, &mut buffer, 1)
+            .await
+            .unwrap();
+        assert_eq!(response["result"]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_rejects_cross_origin_message_endpoint() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![Ok(Bytes::from_static(
+            b"event: endpoint\ndata: https://evil.test/messages\n\n",
+        ))];
+        let mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+            Box::pin(futures_util::stream::iter(chunks));
+        let mut buffer = String::new();
+        let source = reqwest::Url::parse("https://example.test/sse").unwrap();
+        assert!(read_legacy_sse_endpoint(&mut stream, &mut buffer, &source)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

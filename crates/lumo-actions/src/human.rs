@@ -33,10 +33,12 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(ApproveAction);
 }
 
-/// human.* 默认等待 1 小时 —— 远大于常规步骤；宿主的全局步级超时
-/// （`LUMO_STEP_TIMEOUT_MS`）仍是硬上限，需要更长审批时间时同步调大它。
+/// human.* 默认等待 1 小时 —— 远大于常规步骤。P1-4 起 VM 对 "human." 前缀
+/// 步骤把步级超时抬到 max(全局步级超时, 本值/显式 `timeout_ms`)，长审批不再
+/// 被更短的宿主全局步级超时（如桌面端默认 10 分钟）提前截杀；常量与 VM 共用
+/// `lumo_core::human::DEFAULT_HUMAN_TIMEOUT_MS` 防漂移。
 fn default_timeout_ms() -> u64 {
-    3_600_000
+    lumo_core::human::DEFAULT_HUMAN_TIMEOUT_MS
 }
 
 /// 与 vm.rs 的 `wait_cancel` 同形：无取消令牌时永不分辨，在 `select!` 里安静闲置。
@@ -346,14 +348,8 @@ mod tests {
         // 未注入 prompter 的宿主必须立刻显式报错，绝不静默挂起。
         let mut c = ctx();
         for (action, input) in [
-            (
-                "human.input",
-                serde_json::json!({ "message": "name?" }),
-            ),
-            (
-                "human.confirm",
-                serde_json::json!({ "message": "go?" }),
-            ),
+            ("human.input", serde_json::json!({ "message": "name?" })),
+            ("human.confirm", serde_json::json!({ "message": "go?" })),
             (
                 "human.approve",
                 serde_json::json!({ "message": "ship it?" }),

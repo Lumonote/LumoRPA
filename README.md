@@ -4,14 +4,14 @@ LumoRPA is an early-stage, local-first RPA runtime built around flow-as-code YAM
 
 ## Current Scope
 
-- Cargo workspace with DSL, VM, storage, actions, AI router, skills, recorder skeleton, CLI, and desktop crates.
+- Cargo workspace with DSL, VM, storage, actions, AI router, skills, browser/desktop recorder, CLI, and desktop crates.
 - LumoFlow YAML parsing, templating, structural validation, and CLI validation.
-- Built-in actions for control flow, local data shaping, file, HTTP, Excel, browser, AI chat, and skill invocation, with action schemas exposed through `lumo actions --show`.
+- Built-in actions for control flow, local data shaping, file, HTTP, Excel, browser, PDF/DOCX, email, database, MCP, AI chat, human-in-the-loop, and skill invocation, with action schemas exposed through `lumo actions --show`.
 - SQLite-backed run history for local execution, including nested paths for control-flow and loop iterations.
 - Claude-style `SKILL.md` loading and `skill.invoke` sub-flows.
 - Tauri desktop workbench for validating, running, inspecting, and packaging local automation flows.
 
-The browser recorder (Chromium CDP), the scheduler (cron/file-watch/webhook), and the MCP server are implemented. Desktop recording backends (macOS AccessKit/osascript, Windows) exist in `lumo-recorder` but are not yet wired into the desktop app. Multi-worker/cloud orchestration (M3/M4) remains planned.
+The browser recorder (Chromium CDP), desktop recorder lane, scheduler (cron/file-watch/webhook/hotkey), and MCP server are implemented. The desktop app now wires `DesktopRecorder` for `desktop` and `mixed` recording targets; `mixed` currently captures the desktop lane only rather than running browser and desktop capture simultaneously. Multi-worker/cloud orchestration (M3/M4) remains planned.
 
 ## Requirements
 
@@ -175,7 +175,7 @@ crates/lumo-actions   Built-in deterministic actions
 crates/lumo-ai        Provider config, AI router, ai.chat action
 crates/lumo-skills    SKILL.md loader and skill.invoke action
 crates/lumo-storage   SQLite schema and repository
-crates/lumo-recorder  Browser CDP recorder (event capture + selector scoring) and desktop a11y backends; NoopRecorder is only the desktop/mixed fallback
+crates/lumo-recorder  Browser CDP recorder (event capture + selector scoring) and desktop a11y backends; NoopRecorder is only the unknown-target fallback
 crates/lumo-cli       lumo command-line interface
 apps/desktop          Tauri desktop workbench and package config
 examples/             Runnable flow examples
@@ -185,7 +185,7 @@ docs/                 Product and architecture design notes
 ## Development Priorities
 
 1. Keep `cargo fmt`, `cargo clippy -D warnings`, and workspace tests green.
-2. Expand action-specific JSON schemas for richer Studio form generation.
-3. Add encrypted vault storage and management commands.
-4. Wire `DesktopRecorder` into the desktop/mixed `recorder_start` branch (currently falls back to `NoopRecorder`) and let `desktop.*` events feed the element library. (The browser CDP recorder is done.)
-5. Add scheduler/MCP entry points on top of the durable run store.
+2. Keep Studio feature/status metadata synchronized with the registered action set and shipped runtime paths.
+3. Add stronger end-to-end smoke tests for Tauri, real Chrome, desktop feature builds, recorder flows, and packaged examples.
+4. Implement true mixed recording with a composite browser + desktop recorder.
+5. Add multi-worker/cloud orchestration on top of the durable run store.

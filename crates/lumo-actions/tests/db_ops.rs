@@ -3,7 +3,7 @@
 //! `db.sqlite_query`; reads honor `fs.read`, writes honor `fs.write`.
 
 mod common;
-use common::{fs_caps, ok_with, run_with};
+use common::{fs_caps, ok_with, run_with, Capabilities};
 use serde_json::json;
 
 #[tokio::test]
@@ -101,6 +101,56 @@ async fn query_is_denied_without_an_fs_grant() {
 }
 
 #[tokio::test]
+async fn sqlite_exec_dry_run_does_not_mutate() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("dry.db");
+    let caps = fs_caps(dir.path());
+    ok_with(
+        "db.sqlite_exec",
+        json!({"db": db, "sql": "CREATE TABLE t (id INTEGER)"}),
+        caps.clone(),
+    )
+    .await;
+    let out = ok_with(
+        "db.sqlite_exec",
+        json!({"db": db, "sql": "INSERT INTO t VALUES (?)", "args": [7], "dry_run": true}),
+        caps.clone(),
+    )
+    .await;
+    assert_eq!(out["dry_run"], json!(true));
+    assert_eq!(out["would_execute"], json!(true));
+    let rows = ok_with(
+        "db.sqlite_query",
+        json!({"db": db, "sql": "SELECT COUNT(*) AS n FROM t"}),
+        caps,
+    )
+    .await;
+    assert_eq!(rows["rows"][0]["n"], json!(0));
+}
+
+#[tokio::test]
+async fn sqlite_batch_dry_run_previews_without_creating_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("batch-dry.sqlite");
+    let out = ok_with(
+        "db.sqlite_batch",
+        json!({
+            "db": db,
+            "statements": [
+                {"sql": "CREATE TABLE t(v INTEGER)"},
+                {"sql": "INSERT INTO t VALUES (?)", "args": [7]}
+            ],
+            "dry_run": true
+        }),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(out["dry_run"], json!(true));
+    assert_eq!(out["statements"], json!(2));
+    assert!(!db.exists(), "dry-run must not create the SQLite file");
+}
+
+#[tokio::test]
 async fn batch_commits_all_statements_in_one_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("batch.db");
@@ -190,13 +240,9 @@ async fn batch_requires_at_least_one_statement() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("empty.db");
     let caps = fs_caps(dir.path());
-    let err = run_with(
-        "db.sqlite_batch",
-        json!({"db": db, "statements": []}),
-        caps,
-    )
-    .await
-    .unwrap_err();
+    let err = run_with("db.sqlite_batch", json!({"db": db, "statements": []}), caps)
+        .await
+        .unwrap_err();
     assert!(err.contains("at least one"), "got: {err}");
 }
 
@@ -317,4 +363,99 @@ async fn bound_sqlite_query_cannot_write_despite_shared_rw_connection() {
     );
 
     lumo_actions::db_ops::close_run_connections(run_id);
+}
+
+// ─── db.postgres_batch / db.mysql_batch:离线可验证的输入校验与网络门禁 ────────
+// (事务提交/回滚/超时语义需要真库,见 tests/db_remote.rs 的 DSN 门控测试。)
+
+#[tokio::test]
+async fn remote_batch_rejects_empty_statements_before_connecting() {
+    // 空 statements 在建池/连库之前就报错 —— 无需真库、无需 dsn 即可验证。
+    for action in ["db.postgres_batch", "db.mysql_batch"] {
+        let err = run_with(action, json!({"statements": []}), Capabilities::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("at least one statement"),
+            "{action} should reject an empty batch; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_batch_requires_dsn_when_unbound() {
+    for action in ["db.postgres_batch", "db.mysql_batch"] {
+        let err = run_with(
+            action,
+            json!({"statements": [{"sql": "SELECT 1"}]}),
+            Capabilities::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("dsn"),
+            "{action} without a dsn should say so; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_batch_gates_dsn_host_by_network_capability() {
+    // 门禁先于连接:未授权 host 直接拒绝,永远走不到 connect(与 *_exec 同一闸)。
+    for (action, dsn) in [
+        (
+            "db.postgres_batch",
+            "postgres://u:p@evil.example.com:5432/app",
+        ),
+        ("db.mysql_batch", "mysql://u:p@evil.example.com:3306/app"),
+    ] {
+        let err = run_with(
+            action,
+            json!({"dsn": dsn, "statements": [{"sql": "SELECT 1"}]}),
+            Capabilities::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("network") || err.contains("capability") || err.contains("denied"),
+            "{action} must be network-gated; got: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_mutation_dry_runs_do_not_connect() {
+    let caps = Capabilities {
+        network: vec!["db.invalid".into()],
+        ..Default::default()
+    };
+    for (action, dsn, input) in [
+        (
+            "db.postgres_exec",
+            "postgres://u:p@db.invalid:5432/app",
+            json!({"sql": "DELETE FROM t", "dry_run": true}),
+        ),
+        (
+            "db.mysql_exec",
+            "mysql://u:p@db.invalid:3306/app",
+            json!({"sql": "DELETE FROM t", "dry_run": true}),
+        ),
+        (
+            "db.postgres_batch",
+            "postgres://u:p@db.invalid:5432/app",
+            json!({"statements": [{"sql": "DELETE FROM t"}], "dry_run": true}),
+        ),
+        (
+            "db.mysql_batch",
+            "mysql://u:p@db.invalid:3306/app",
+            json!({"statements": [{"sql": "DELETE FROM t"}], "dry_run": true}),
+        ),
+    ] {
+        let mut input = input;
+        input["dsn"] = json!(dsn);
+        let out = run_with(action, input, caps.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{action} dry-run should not connect: {error}"));
+        assert_eq!(out["dry_run"], json!(true), "{action}");
+    }
 }

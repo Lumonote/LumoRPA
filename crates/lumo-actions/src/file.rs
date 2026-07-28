@@ -52,7 +52,7 @@ impl Action for ReadAction {
         ctx.ensure_fs_read(&path)?;
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(|e| StepError::msg(format!("read {}: {e}", path.display())))?;
+            .map_err(|e| StepError::io(format!("read {}: {e}", path.display())))?;
         Ok(ActionResult::from(Value::String(content)))
     }
 }
@@ -97,14 +97,14 @@ impl Action for WriteAction {
                 .append(true)
                 .open(&path)
                 .await
-                .map_err(|e| StepError::msg(format!("open append {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("open append {}: {e}", path.display())))?;
             f.write_all(content.as_bytes())
                 .await
-                .map_err(|e| StepError::msg(format!("write {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("write {}: {e}", path.display())))?;
         } else {
             tokio::fs::write(&path, content.as_bytes())
                 .await
-                .map_err(|e| StepError::msg(format!("write {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("write {}: {e}", path.display())))?;
         }
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
     }
@@ -156,6 +156,8 @@ struct ListIn {
     sort_by: ListSortBy,
     #[serde(default)]
     descending: bool,
+    #[serde(default = "crate::contracts::default_collection_limit")]
+    limit: usize,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -197,10 +199,12 @@ impl Action for ListAction {
             include_hidden,
             sort_by,
             descending,
+            limit,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("file.list input invalid: {e}")))?;
+        let limit = crate::contracts::checked_limit("file.list", limit)?;
         ctx.ensure_fs_read(&path)?;
-        let entries = list_entries(
+        let mut entries = list_entries(
             ctx,
             &path,
             recursive,
@@ -211,10 +215,13 @@ impl Action for ListAction {
             descending,
         )
         .await?;
+        let truncated = crate::contracts::truncate_with_flag(&mut entries, limit);
         let count = entries.len();
         Ok(ActionResult::from(serde_json::json!({
             "path": path,
             "count": count,
+            "limit": limit,
+            "truncated": truncated,
             "entries": entries,
         })))
     }
@@ -248,11 +255,11 @@ impl Action for MkdirAction {
         if recursive {
             tokio::fs::create_dir_all(&path)
                 .await
-                .map_err(|e| StepError::msg(format!("file.mkdir {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("file.mkdir {}: {e}", path.display())))?;
         } else {
             tokio::fs::create_dir(&path)
                 .await
-                .map_err(|e| StepError::msg(format!("file.mkdir {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("file.mkdir {}: {e}", path.display())))?;
         }
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
     }
@@ -291,7 +298,7 @@ impl Action for CopyAction {
         ctx.ensure_fs_write(&to)?;
         let meta = tokio::fs::symlink_metadata(&from)
             .await
-            .map_err(|e| StepError::msg(format!("file.copy stat {}: {e}", from.display())))?;
+            .map_err(|e| StepError::io(format!("file.copy stat {}: {e}", from.display())))?;
         if meta.is_dir() {
             return Err(StepError::msg(
                 "file.copy supports files only; use archive.zip/archive.unzip for directories",
@@ -304,7 +311,7 @@ impl Action for CopyAction {
         }
         prepare_destination(ctx, &to, overwrite, "file.copy", false).await?;
         let bytes = tokio::fs::copy(&from, &to).await.map_err(|e| {
-            StepError::msg(format!(
+            StepError::io(format!(
                 "file.copy {} -> {}: {e}",
                 from.display(),
                 to.display()
@@ -351,7 +358,7 @@ impl Action for MoveAction {
         ctx.ensure_fs_write(&to)?;
         prepare_destination(ctx, &to, overwrite, "file.move", true).await?;
         tokio::fs::rename(&from, &to).await.map_err(|e| {
-            StepError::msg(format!(
+            StepError::io(format!(
                 "file.move {} -> {}: {e}",
                 from.display(),
                 to.display()
@@ -400,7 +407,7 @@ impl Action for RenameAction {
         ctx.ensure_fs_write(&to)?;
         prepare_destination(ctx, &to, overwrite, "file.rename", true).await?;
         tokio::fs::rename(&path, &to).await.map_err(|e| {
-            StepError::msg(format!(
+            StepError::io(format!(
                 "file.rename {} -> {}: {e}",
                 path.display(),
                 to.display()
@@ -422,6 +429,8 @@ struct DeleteIn {
     recursive: bool,
     #[serde(default)]
     missing_ok: bool,
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[async_trait]
@@ -441,6 +450,7 @@ impl Action for DeleteAction {
             path,
             recursive,
             missing_ok,
+            dry_run,
         } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("file.delete input invalid: {e}")))?;
         ctx.ensure_fs_write(&path)?;
@@ -449,19 +459,25 @@ impl Action for DeleteAction {
                 if recursive && meta.is_dir() && !meta.file_type().is_symlink() {
                     ensure_tree(ctx, &path, false, true, "file.delete").await?;
                 }
-                remove_path(&path, recursive, "file.delete").await?;
+                if !dry_run {
+                    remove_path(&path, recursive, "file.delete").await?;
+                }
                 Ok(ActionResult::from(serde_json::json!({
                     "path": path,
-                    "deleted": true,
+                    "dry_run": dry_run,
+                    "would_delete": true,
+                    "deleted": !dry_run,
                 })))
             }
             Err(e) if e.kind() == ErrorKind::NotFound && missing_ok => {
                 Ok(ActionResult::from(serde_json::json!({
                     "path": path,
+                    "dry_run": dry_run,
+                    "would_delete": false,
                     "deleted": false,
                 })))
             }
-            Err(e) => Err(StepError::msg(format!(
+            Err(e) => Err(StepError::io(format!(
                 "file.delete stat {}: {e}",
                 path.display()
             ))),
@@ -494,7 +510,7 @@ impl Action for MetadataAction {
         ctx.ensure_fs_read(&path)?;
         let meta = tokio::fs::symlink_metadata(&path)
             .await
-            .map_err(|e| StepError::msg(format!("file.metadata {}: {e}", path.display())))?;
+            .map_err(|e| StepError::io(format!("file.metadata {}: {e}", path.display())))?;
         Ok(ActionResult::from(metadata_value(path, meta)))
     }
 }
@@ -539,14 +555,14 @@ impl Action for AppendAction {
             .append(true)
             .open(&path)
             .await
-            .map_err(|e| StepError::msg(format!("file.append open {}: {e}", path.display())))?;
+            .map_err(|e| StepError::io(format!("file.append open {}: {e}", path.display())))?;
         f.write_all(content.as_bytes())
             .await
-            .map_err(|e| StepError::msg(format!("file.append write {}: {e}", path.display())))?;
+            .map_err(|e| StepError::io(format!("file.append write {}: {e}", path.display())))?;
         if newline {
-            f.write_all(b"\n")
-                .await
-                .map_err(|e| StepError::msg(format!("file.append write {}: {e}", path.display())))?;
+            f.write_all(b"\n").await.map_err(|e| {
+                StepError::io(format!("file.append write {}: {e}", path.display()))
+            })?;
         }
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
     }
@@ -617,12 +633,13 @@ impl Action for WaitAction {
         let stable = std::time::Duration::from_millis(stable_ms);
 
         // must_exist_new:记录调用时刻的存在性与 mtime,作为"新文件"的判定基线。
-        let initial_mtime: Option<SystemTime> = match tokio::fs::metadata(&path).await {
-            Ok(m) => Some(m.modified().map_err(|e| {
-                StepError::msg(format!("file.wait mtime {}: {e}", path.display()))
-            })?),
-            Err(_) => None,
-        };
+        let initial_mtime: Option<SystemTime> =
+            match tokio::fs::metadata(&path).await {
+                Ok(m) => Some(m.modified().map_err(|e| {
+                    StepError::io(format!("file.wait mtime {}: {e}", path.display()))
+                })?),
+                Err(_) => None,
+            };
 
         // size 稳定性追踪:记录最近一次观测到的 size 以及它首次出现的时刻。
         let mut last_size: Option<u64> = None;
@@ -668,7 +685,9 @@ impl Action for WaitAction {
             }
             let elapsed = started.elapsed();
             if elapsed.as_millis() as u64 >= timeout_ms {
-                return Err(StepError::msg(format!(
+                // typed 错误约定:动作内超时用 `StepError::Timeout`,让
+                // `retry.on: [timeout]` 能捕获。诊断细节记进 run 日志。
+                tracing::warn!(
                     "file.wait timeout after {}ms waiting for {} (last state: {})",
                     elapsed.as_millis(),
                     path.display(),
@@ -680,7 +699,8 @@ impl Action for WaitAction {
                         _ => "file pre-existed and was not replaced (must_exist_new=true)"
                             .to_string(),
                     }
-                )));
+                );
+                return Err(StepError::Timeout { ms: timeout_ms });
             }
             tokio::time::sleep(poll).await;
         }
@@ -712,7 +732,7 @@ async fn list_entries(
 ) -> Result<Vec<Value>, StepError> {
     let root_meta = tokio::fs::symlink_metadata(root)
         .await
-        .map_err(|e| StepError::msg(format!("file.list stat {}: {e}", root.display())))?;
+        .map_err(|e| StepError::io(format!("file.list stat {}: {e}", root.display())))?;
     if root_meta.file_type().is_symlink() {
         return Err(StepError::msg("file.list refuses to list a symlink path"));
     }
@@ -729,17 +749,17 @@ async fn list_entries(
         ctx.ensure_fs_read(&dir)?;
         let mut rd = tokio::fs::read_dir(&dir)
             .await
-            .map_err(|e| StepError::msg(format!("file.list read_dir {}: {e}", dir.display())))?;
+            .map_err(|e| StepError::io(format!("file.list read_dir {}: {e}", dir.display())))?;
         while let Some(ent) = rd
             .next_entry()
             .await
-            .map_err(|e| StepError::msg(format!("file.list dir entry {}: {e}", dir.display())))?
+            .map_err(|e| StepError::io(format!("file.list dir entry {}: {e}", dir.display())))?
         {
             let path = ent.path();
             ctx.ensure_fs_read(&path)?;
             let meta = tokio::fs::symlink_metadata(&path)
                 .await
-                .map_err(|e| StepError::msg(format!("file.list stat {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("file.list stat {}: {e}", path.display())))?;
             if recursive && meta.is_dir() && !meta.file_type().is_symlink() {
                 dirs.push(path.clone());
             }
@@ -786,13 +806,13 @@ async fn prepare_destination(
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
                     tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        StepError::msg(format!("{action} mkdir {}: {e}", parent.display()))
+                        StepError::io(format!("{action} mkdir {}: {e}", parent.display()))
                     })?;
                 }
             }
             Ok(())
         }
-        Err(e) => Err(StepError::msg(format!(
+        Err(e) => Err(StepError::io(format!(
             "{action} stat {}: {e}",
             path.display()
         ))),
@@ -802,21 +822,21 @@ async fn prepare_destination(
 async fn remove_path(path: &Path, recursive: bool, action: &str) -> Result<(), StepError> {
     let meta = tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|e| StepError::msg(format!("{action} stat {}: {e}", path.display())))?;
+        .map_err(|e| StepError::io(format!("{action} stat {}: {e}", path.display())))?;
     if meta.is_dir() && !meta.file_type().is_symlink() {
         if recursive {
             tokio::fs::remove_dir_all(path).await.map_err(|e| {
-                StepError::msg(format!("{action} remove_dir_all {}: {e}", path.display()))
+                StepError::io(format!("{action} remove_dir_all {}: {e}", path.display()))
             })
         } else {
             tokio::fs::remove_dir(path)
                 .await
-                .map_err(|e| StepError::msg(format!("{action} remove_dir {}: {e}", path.display())))
+                .map_err(|e| StepError::io(format!("{action} remove_dir {}: {e}", path.display())))
         }
     } else {
         tokio::fs::remove_file(path)
             .await
-            .map_err(|e| StepError::msg(format!("{action} remove_file {}: {e}", path.display())))
+            .map_err(|e| StepError::io(format!("{action} remove_file {}: {e}", path.display())))
     }
 }
 
@@ -835,7 +855,7 @@ async fn ensure_tree(
     }
     let root_meta = tokio::fs::symlink_metadata(root)
         .await
-        .map_err(|e| StepError::msg(format!("{action} stat {}: {e}", root.display())))?;
+        .map_err(|e| StepError::io(format!("{action} stat {}: {e}", root.display())))?;
     if !root_meta.is_dir() || root_meta.file_type().is_symlink() {
         return Ok(());
     }
@@ -844,11 +864,11 @@ async fn ensure_tree(
     while let Some(dir) = dirs.pop() {
         let mut rd = tokio::fs::read_dir(&dir)
             .await
-            .map_err(|e| StepError::msg(format!("{action} read_dir {}: {e}", dir.display())))?;
+            .map_err(|e| StepError::io(format!("{action} read_dir {}: {e}", dir.display())))?;
         while let Some(ent) = rd
             .next_entry()
             .await
-            .map_err(|e| StepError::msg(format!("{action} dir entry {}: {e}", dir.display())))?
+            .map_err(|e| StepError::io(format!("{action} dir entry {}: {e}", dir.display())))?
         {
             let path = ent.path();
             if need_read {
@@ -859,7 +879,7 @@ async fn ensure_tree(
             }
             let meta = tokio::fs::symlink_metadata(&path)
                 .await
-                .map_err(|e| StepError::msg(format!("{action} stat {}: {e}", path.display())))?;
+                .map_err(|e| StepError::io(format!("{action} stat {}: {e}", path.display())))?;
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 dirs.push(path);
             }

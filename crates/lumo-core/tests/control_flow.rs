@@ -262,6 +262,82 @@ spec:
 }
 
 #[tokio::test]
+async fn control_parallel_respects_max_concurrency() {
+    let flow = parse_str(
+        r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  steps:
+    - id: par
+      action: control.parallel
+      with: { max_concurrency: 2 }
+      branches:
+        - - { id: s1, action: control.sleep, with: { ms: 80 } }
+        - - { id: s2, action: control.sleep, with: { ms: 80 } }
+        - - { id: s3, action: control.sleep, with: { ms: 80 } }
+        - - { id: s4, action: control.sleep, with: { ms: 80 } }
+"#,
+    )
+    .unwrap();
+    let mut reg = ActionRegistry::new();
+    register_all(&mut reg);
+    let t0 = std::time::Instant::now();
+    FlowVm::new(reg, None)
+        .run(&flow, RunOptions::default())
+        .await
+        .unwrap();
+    let elapsed = t0.elapsed().as_millis();
+    assert!(
+        elapsed >= 130,
+        "limit 2 should require two waves, got {elapsed}ms"
+    );
+    assert!(
+        elapsed < 300,
+        "two waves should remain concurrent, got {elapsed}ms"
+    );
+}
+
+#[tokio::test]
+async fn control_for_each_parallel_uses_bounded_concurrency() {
+    let flow = parse_str(
+        r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t }
+spec:
+  steps:
+    - id: each
+      action: control.for_each
+      with:
+        in: [1, 2, 3, 4]
+        parallel: true
+        max_concurrency: 2
+      do:
+        - { id: sleep, action: control.sleep, with: { ms: 80 } }
+"#,
+    )
+    .unwrap();
+    let mut reg = ActionRegistry::new();
+    register_all(&mut reg);
+    let t0 = std::time::Instant::now();
+    FlowVm::new(reg, None)
+        .run(&flow, RunOptions::default())
+        .await
+        .unwrap();
+    let elapsed = t0.elapsed().as_millis();
+    assert!(
+        elapsed >= 130,
+        "limit 2 should require two waves, got {elapsed}ms"
+    );
+    assert!(
+        elapsed < 300,
+        "parallel for_each should beat sequential, got {elapsed}ms"
+    );
+}
+
+#[tokio::test]
 async fn control_parallel_back_compat_do_each_is_branch() {
     // Without `branches:`, each top-level step in `do:` becomes its own branch.
     let flow = parse_str(

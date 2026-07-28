@@ -51,7 +51,10 @@ fn run_bench(steps_n: usize, payload_kib: usize) -> std::time::Duration {
         lumo_dsl::render(&json!("{{ inputs.who }}"), &tc).unwrap();
 
         // 步骤完成:大输出进 steps map,外加一次 set_var(bind 语义)。
-        ctx.record_step_output(&format!("s{i}"), &json!({ "size": i, "body": payload.clone() }));
+        ctx.record_step_output(
+            &format!("s{i}"),
+            &json!({ "size": i, "body": payload.clone() }),
+        );
         ctx.set_var("last", json!(i));
     }
     started.elapsed()

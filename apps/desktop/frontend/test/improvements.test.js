@@ -26,3 +26,10 @@ test("renders shadow control comparison and blocks approval below sample gate", 
   assert.match(html, /latency regression/);
   assert.doesNotMatch(html, /批准并创建新版本/);
 });
+
+test("failed structural evaluation exposes reasons and blocks approval", () => {
+  const html = renderImprovementProposals([{ id: "p3", target: "skill_patch", patchHash: "h3", evaluation: { passed: false, failures: ["permission expansion above L1"] } }]);
+  assert.match(html, /permission expansion above L1/);
+  assert.doesNotMatch(html, /批准并创建新版本/);
+  assert.match(html, /评估未通过/);
+});

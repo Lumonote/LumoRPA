@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.0.6", features = [] }
 
 [dependencies]
-lumo-actions.workspace = true
+lumo-actions = { workspace = true, features = ["desktop"] }
 lumo-agent.workspace = true
 lumo-ai.workspace = true
 lumo-core.workspace = true
@@ -35,11 +35,15 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 tauri = { version = "2.3.1", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2.10.1"
 tokio.workspace = true
 tokio-util = "0.7"
+tracing.workspace = true
 ulid.workspace = true
+pinyin = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

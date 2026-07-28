@@ -158,10 +158,14 @@ mod tests {
             run_id: "r".into(),
             step_path: "s".into(),
         };
-        assert!(render_prompt(&req(HumanPromptKind::Confirm, Some(Value::Bool(true))))
-            .contains("[Y/n]"));
-        assert!(render_prompt(&req(HumanPromptKind::Confirm, Some(Value::Bool(false))))
-            .contains("[y/N]"));
+        assert!(
+            render_prompt(&req(HumanPromptKind::Confirm, Some(Value::Bool(true))))
+                .contains("[Y/n]")
+        );
+        assert!(
+            render_prompt(&req(HumanPromptKind::Confirm, Some(Value::Bool(false))))
+                .contains("[y/N]")
+        );
         assert!(render_prompt(&req(HumanPromptKind::Approve, None)).contains("approve"));
         assert!(render_prompt(&req(
             HumanPromptKind::Input,

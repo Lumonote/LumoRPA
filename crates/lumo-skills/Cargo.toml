@@ -19,8 +19,10 @@ thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 once_cell.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt"] }
 dirs = "5"
 
 [dev-dependencies]
+lumo-storage.workspace = true
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

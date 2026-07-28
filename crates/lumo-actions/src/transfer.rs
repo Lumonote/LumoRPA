@@ -38,12 +38,74 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(FtpDownloadAction);
     r.register(S3PutAction);
     r.register(S3GetAction);
+    // 一致性清单第 5 项:传输动词三套并存(ftp.upload/download、s3.put/get、
+    // http.upload/download)。不改断既有 id,注册别名把两套动词对齐:
+    // `ftp.put`/`ftp.get` ≙ `ftp.upload`/`ftp.download`,`s3.upload`/`s3.download`
+    // ≙ `s3.put`/`s3.get`。别名共享底层实现与 schema(单一真源),caps.rs 与
+    // docs/05 有对应条目/交叉引用。
+    r.register(FtpPutAlias);
+    r.register(FtpGetAlias);
+    r.register(S3UploadAlias);
+    r.register(S3DownloadAlias);
     // T3: a `spec.resources.<name>` of kind `ftp` is one logged-in session reused
     // by every ftp.* step that binds to it (skipping reconnect+relogin), QUIT at
     // run end. Unbound ftp.* steps connect+login+quit per call (back-compat).
     r.register_teardown(Arc::new(FtpTeardown));
     r.register_resource_factory(Arc::new(FtpFactory));
 }
+
+/// 动词别名:`$alias` 与 `$target` 完全同参同义,execute/schema 全部转发到
+/// 目标动作 —— 别名没有自己的实现,永不漂移。
+macro_rules! alias_action {
+    ($name:ident, $alias:literal, $target:expr, $summary:literal) => {
+        pub struct $name;
+
+        #[async_trait]
+        impl Action for $name {
+            fn id(&self) -> &'static str {
+                $alias
+            }
+            fn summary(&self) -> &'static str {
+                $summary
+            }
+            fn schema(&self) -> &'static serde_json::Value {
+                $target.schema()
+            }
+            async fn execute(
+                &self,
+                ctx: &mut StepCtx,
+                input: Value,
+            ) -> Result<ActionResult, StepError> {
+                $target.execute(ctx, input).await
+            }
+        }
+    };
+}
+
+alias_action!(
+    FtpPutAlias,
+    "ftp.put",
+    FtpUploadAction,
+    "Alias of `ftp.upload` (same inputs/outputs)"
+);
+alias_action!(
+    FtpGetAlias,
+    "ftp.get",
+    FtpDownloadAction,
+    "Alias of `ftp.download` (same inputs/outputs)"
+);
+alias_action!(
+    S3UploadAlias,
+    "s3.upload",
+    S3PutAction,
+    "Alias of `s3.put` (same inputs/outputs)"
+);
+alias_action!(
+    S3DownloadAlias,
+    "s3.download",
+    S3GetAction,
+    "Alias of `s3.get` (same inputs/outputs)"
+);
 
 fn default_ftp_port() -> u16 {
     21
@@ -394,7 +456,12 @@ impl ResourceFactory for FtpFactory {
         FTP_KIND
     }
 
-    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
         Ok(())
     }
 }
@@ -687,7 +754,10 @@ mod tests {
 
     #[test]
     fn ftp_slot_selects_only_ftp_kind_bindings() {
-        let resources = &[("files", "kind: ftp\n"), ("db", "kind: sqlite\npath: /tmp/x\n")];
+        let resources = &[
+            ("files", "kind: ftp\n"),
+            ("db", "kind: sqlite\npath: /tmp/x\n"),
+        ];
         assert_eq!(
             ftp_slot(&ctx_with(resources, Some("files"))).as_deref(),
             Some("files")
@@ -702,6 +772,22 @@ mod tests {
     fn ftp_factory_kind_matches() {
         assert_eq!(FtpFactory.kind(), FTP_KIND);
         assert_eq!(FTP_KIND, "ftp");
+    }
+
+    #[test]
+    fn transfer_verb_aliases_share_id_and_schema_with_targets() {
+        // 别名与目标动作同 schema(单一真源转发,绝不漂移),id 是别名动词。
+        assert_eq!(FtpPutAlias.id(), "ftp.put");
+        assert!(std::ptr::eq(FtpPutAlias.schema(), FtpUploadAction.schema()));
+        assert_eq!(FtpGetAlias.id(), "ftp.get");
+        assert!(std::ptr::eq(
+            FtpGetAlias.schema(),
+            FtpDownloadAction.schema()
+        ));
+        assert_eq!(S3UploadAlias.id(), "s3.upload");
+        assert!(std::ptr::eq(S3UploadAlias.schema(), S3PutAction.schema()));
+        assert_eq!(S3DownloadAlias.id(), "s3.download");
+        assert!(std::ptr::eq(S3DownloadAlias.schema(), S3GetAction.schema()));
     }
 
     #[tokio::test]

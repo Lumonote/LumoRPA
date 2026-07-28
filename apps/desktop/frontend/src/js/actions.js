@@ -19,9 +19,9 @@ export function renderActions() {
   const query = ($("actionSearch").value || "").trim().toLowerCase();
   const box = $("actionLibrary");
   const order = [
-    "browser","desktop","image","pdf","condition","loop","wait","excel","file",
-    "archive","clipboard","http","transfer","email","notify","mcp","ai","skill",
-    "flow","data","string","regex","date","math","list","json","csv","hash",
+    "browser","desktop","image","pdf","docx","condition","loop","wait","excel","file",
+    "archive","clipboard","http","transfer","email","human","notify","mcp","ai","skill",
+    "flow","data","string","regex","date","math","list","json","xml","csv","hash",
     "util","system","db","control","misc",
   ];
   const byCategory = new Map();

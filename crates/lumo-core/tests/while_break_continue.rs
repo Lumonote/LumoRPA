@@ -151,7 +151,10 @@ spec:
     )
     .await;
     assert!(err.contains("max_iterations=3"), "got: {err}");
-    assert_eq!(hits, 3, "body runs exactly max_iterations rounds before erroring");
+    assert_eq!(
+        hits, 3,
+        "body runs exactly max_iterations rounds before erroring"
+    );
 }
 
 // ─── break:三种循环容器各消化一次 ──────────────────────────────────────────
@@ -258,7 +261,11 @@ spec:
     .await;
     assert!(report.success);
     assert_eq!(hits, 3, "rounds 0/2/3 reach mark; round 1 is skipped");
-    assert_eq!(iterations_of(&report, "loop"), 4, "continue 的那轮也计入轮次");
+    assert_eq!(
+        iterations_of(&report, "loop"),
+        4,
+        "continue 的那轮也计入轮次"
+    );
 }
 
 // ─── 契约钉子:break 穿过 try 不被 catch 捕获 ───────────────────────────────
@@ -291,7 +298,10 @@ spec:
 "#,
     )
     .await;
-    assert!(report.success, "break 穿过 try 后由 while 消化,run 必须成功");
+    assert!(
+        report.success,
+        "break 穿过 try 后由 while 消化,run 必须成功"
+    );
     assert_eq!(hits, 1, "finally 必须执行恰好一次(catch 不得执行)");
 }
 

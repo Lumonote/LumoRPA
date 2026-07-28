@@ -1,7 +1,7 @@
 use clap::Args as ClapArgs;
 use colored::Colorize;
 use lumo_ai::ProvidersConfig;
-use lumo_core::{CancelToken, ExecError, FlowVm, RunOptions};
+use lumo_core::{CancelToken, ExecError, RunOptions};
 use lumo_dsl::Step;
 use lumo_storage::Repo;
 use std::path::PathBuf;
@@ -81,19 +81,13 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
         });
     }
 
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), &home, &flow)
-        .with_vault(super::load_vault_identity(&home))
+    let vm = super::host_vm(&home, &flow, registry, repo, cancel)
         .with_resume_from(args.resume)
-        // X-07:CLI run 同样接 artifacts 落盘(与桌面端 execute_flow 对齐,固定写
-        // `$LUMO_HOME/artifacts`)。`--no-store` 没有 repo,归档只会留下没有表行
-        // 的孤儿 blob,索性一并关掉(attach 退化为 no-op)。
-        .with_artifacts_dir((!args.no_store).then(|| home.join("artifacts")))
         // P1(人机交互):CLI 宿主的 stdin prompter。非 TTY 场景在 prompt 时
-        // 立刻报错(human.* 步骤才会触发,不影响无人值守流程)。
-        .with_human_prompter(Some(std::sync::Arc::new(
-            super::human::CliPrompter::new(),
-        )))
-        .with_cancel(cancel);
+        // 立刻报错(human.* 步骤才会触发,不影响无人值守流程)。这是唯一注入
+        // prompter 的宿主线 —— headless 的 serve/mcp/hotkey 不接,交由引擎对
+        // human.* 显式报错。
+        .with_human_prompter(Some(std::sync::Arc::new(super::human::CliPrompter::new())));
     let report = match vm.run(&flow, opts).await {
         Ok(report) => report,
         Err(ExecError::Cancelled) => {

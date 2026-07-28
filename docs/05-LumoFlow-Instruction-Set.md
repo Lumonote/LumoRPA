@@ -145,13 +145,16 @@ share a handle.
 | `mysql` | `db.mysql_*` | One pooled MySQL connection | — DSN/credentials come from the step (see below) |
 | `http` | `http.*` | One pooled HTTP client (keep-alive) | `timeout_ms` (optional); `proxy` (optional http/https/socks5 URL — the proxy URL itself is gated by the `network` capability, like any target URL) |
 | `smtp` | `email.send` | One pooled SMTP transport | — host/credentials come from the step (see below) |
+| `imap` | `email.fetch`, `email.mark`, `email.move` | One authenticated IMAP session | — host/credentials come from the first bound step |
 | `ftp` | `ftp.*` | One authenticated FTP session | — host/credentials come from the step (see below) |
+| `xlsx` | `excel.*` | One shared workbook path for the run | `path` (the workbook file); bound actions may omit `file` |
 
 A bound step omits the per-call field it would otherwise pass: a `sqlite`-bound
 `db.sqlite_*` step omits `db:` (the decl `path` wins); a `chromium.cdp`-bound
-`browser.open` omits launch options (`headless`/`profile` come from the decl).
-(The IMAP actions `email.fetch`/`email.mark`/`email.move` and `s3.*` are not
-resource-backed and behave as before.)
+`browser.open` omits launch options (`headless`/`profile` come from the decl);
+an `xlsx`-bound `excel.*` step omits `file`. IMAP credentials are supplied by
+the first bound step and the authenticated session is then reused by later
+`email.fetch` / `email.mark` / `email.move` steps. `s3.*` remains per-call.
 
 ### Profiles
 
@@ -172,7 +175,7 @@ effect today).
   every step still checks `network` / `fs.read` / `fs.write` as before.
 - **Resource config is static YAML and is never template-rendered.** `{{ … }}` and
   `${{ vault.… }}` do **not** resolve inside a decl — never put secrets there.
-  Credential-bearing kinds (`smtp`, `ftp`, `postgres`, `mysql`) take their host and
+  Credential-bearing kinds (`smtp`, `imap`, `ftp`, `postgres`, `mysql`) take their host and
   credentials from the **first bound step's** inputs (which *are* vault-resolved),
   not from the decl. (`postgres`/`mysql` take a `dsn` such as
   `postgres://user:pass@host:5432/db`; its host is gated by `network`.)
@@ -238,19 +241,19 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | --- | --- |
 | AI | `ai.chat` |
 | Archive | `archive.zip`, `archive.unzip` |
-| Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
+| Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.back`, `browser.forward`, `browser.reload`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
 | Clipboard | `clipboard.get`, `clipboard.set` |
 | Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.while`, `control.break`, `control.continue`, `control.try`, `control.parallel`, `control.fail` |
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
 | Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
 | Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |
-| Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.mysql_query`, `db.mysql_exec` |
+| Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.postgres_batch`, `db.mysql_query`, `db.mysql_exec`, `db.mysql_batch` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
 | Email | `email.send`, `email.fetch`, `email.mark`, `email.move` |
-| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `excel.lookup` |
+| Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `excel.lookup`, `excel.add_sheet`, `excel.delete_sheet`, `excel.rename_sheet`, `excel.insert_rows`, `excel.delete_rows`, `excel.insert_columns`, `excel.delete_columns` |
 | File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append`, `file.wait` |
 | Flow | `flow.call` |
-| FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` |
+| FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` (verb aliases: `ftp.put`, `ftp.get`, `s3.upload`, `s3.download`) |
 | Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.url_encode`, `util.url_decode`, `util.uuid` |
 | HTTP | `http.request`, `http.download`, `http.upload`, `http.oauth2_token`, `http.paginate` |
 | Human | `human.input`, `human.confirm`, `human.approve` |
@@ -268,12 +271,67 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | XML | `xml.parse`, `xml.build`, `xml.xpath` |
 <!-- ACTIONS_END -->
 
+### Cross-action contracts
+
+- Stable retry kinds include `timeout`, `io`, and `network` in addition to the
+  selector/condition/capability kinds. Action-internal deadlines return
+  `timeout`; local filesystem/process failures return `io`; remote transport or
+  protocol failures return `network`. These names are accepted by `retry.on`.
+- Collection actions are bounded by default. `file.list`, `excel.read_rows`,
+  and `browser.extract_table` accept a positive `limit` (default 1000) and
+  return `count`, `limit`, and `truncated` metadata. The latter two return their
+  records under `rows`; callers should not expect the former bare-array shape.
+- Destructive actions support validation-only previews through `dry_run: true`:
+  `file.delete`, `db.sqlite_exec`, all database batch/remote exec mutations,
+  `system.process_kill`, and `email.send`. Capability checks and input
+  validation still run, but no file, database, process, SMTP connection, or
+  remote database connection is mutated/opened for the operation.
+- Email actions and blocking Excel/PDF/DOCX actions accept `timeout_ms`
+  (default 60,000). Excel timeouts also trip the current attempt's cooperative
+  interrupt, so orphaned blocking work cannot pass its write-back checkpoint.
+  Human actions retain their longer action-specific defaults and hard
+  ceiling. `control.parallel.with.max_concurrency` and parallel
+  `control.for_each` default to 8 while preserving deterministic result order;
+  `control.for_each` remains sequential unless `parallel: true` is set.
+
+`data.json_parse` / `data.json_format` are the document-oriented parse/format
+helpers; `json.get` / `json.set` / `json.merge` / `json.keys` / `json.values` /
+`json.delete` manipulate an already parsed JSON value. They overlap by history
+but are not silent aliases. Transfer verbs historically diverged per backend —
+`ftp.upload` ≈ `s3.put` ≈ `http.upload`, `ftp.download` ≈ `s3.get` ≈
+`http.download` — so the ftp/s3 families now also register the opposite verb as
+a true alias: `ftp.put` / `ftp.get` and `s3.upload` / `s3.download` share the
+exact inputs, outputs, capability gates, and implementation of their targets
+(`ftp.upload` / `ftp.download` / `s3.put` / `s3.get`). Use whichever verb reads
+best; `http.*` keeps only `upload` / `download` (its `put`/`get` are HTTP
+methods on `http.request`).
+
+Hash actions accept exactly one of `text` or `path`; file hashing requires
+`fs.read`. `archive.zip` / `archive.unzip` accept an optional `password` and use
+WinZip AES-256 when it is present.
+
 `util.url_encode` percent-encodes text — by default with `encodeURIComponent`
 semantics (structure characters like `/?&=#` are escaped; spaces become `%20`);
 pass `component: false` for `encodeURI` semantics (URL structure characters are
 preserved, so a whole URL can be encoded without breaking it). `util.url_decode`
 reverses percent encoding; `+` is left as-is (treating `+` as a space is form
 encoding, not URL decoding).
+
+`db.sqlite_batch` / `db.postgres_batch` / `db.mysql_batch` run their
+`statements` array (each `{sql, args}` for sqlite, `{sql, params}` for
+postgres/mysql) inside **one explicit transaction**: every statement must
+succeed for the batch to commit; any failure — a bad statement, a run cancel
+mid-batch, or (postgres/mysql) a `timeout_ms` expiry — rolls the whole batch
+back, so nothing is partially written. Output is the per-statement
+`rows_affected` array plus `total_affected`. The postgres/mysql variants take
+the same `dsn` / resource binding and pass the same `network` capability gate
+as `db.postgres_exec` / `db.mysql_exec`.
+
+`excel.set_formula` writes the formula string but does **not** evaluate it —
+the workbook carries no cached result, and the calculation only happens when
+the file is opened in Excel/WPS. Reading that cell back with `excel.read_cell`
+/ `excel.read_rows` therefore yields the stored formula text or an empty
+value, never the computed result.
 
 ### HTTP proxy and mTLS
 
@@ -309,11 +367,12 @@ Waiting semantics:
   auto-approves — the step fails with a timeout error (`retry.on: [timeout]`
   applies as usual).
 - The host's global per-step timeout (`LUMO_STEP_TIMEOUT_MS`; the desktop
-  host defaults it to 10 minutes) is still enforced by the VM on top of
-  `timeout_ms`, so the effective wait ceiling is the smaller of the two. A
-  wait killed by the *global* ceiling is a hard step timeout (the `default`
-  fallback does not run) — raise `LUMO_STEP_TIMEOUT_MS` when approvals may
-  take longer than the global step budget.
+  host defaults it to 10 minutes) no longer cuts a human wait short: for
+  `human.*` steps the VM raises the effective step ceiling to
+  max(global step timeout, the step's `timeout_ms`) plus a small grace, so
+  the action's own timeout semantics above (the `default` fallback / the
+  approve timeout error) always resolve first. Other steps keep the global
+  ceiling unchanged.
 - Cancelling the run interrupts the wait immediately.
 - Hosts without an interactive channel fail the step immediately with
   "host does not support human interaction" — a prompt never hangs silently.
@@ -356,14 +415,20 @@ the CLI's `--no-store` path), archiving is a harmless no-op and `artifact_id`
 is `null` — artifact archiving never fails the action itself.
 
 The optional `desktop` feature adds `desktop.move`, `desktop.click`,
-`desktop.scroll`, `desktop.key`, `desktop.type`, plus native screen capture and
+`desktop.drag`, `desktop.scroll`, `desktop.key`, `desktop.type`, plus native screen capture and
 window management: `desktop.screenshot` (full-screen or `region` capture of a
 `display` to a PNG `path` — the path is gated by `fs.write`, output
 `{path, width, height}`), `window.list` (visible windows with
 `{id, title, app, x, y, width, height, minimized}`), `window.activate` (bring a
 window to the foreground by `id` or `title_contains`; multiple matches use the
 first and report `matched`), and `window.bounds` (read a window's geometry,
-optionally moving/resizing it via `set: {x, y, width, height}`).
+optionally moving/resizing it via `set: {x, y, width, height}`), and
+`window.close` / `window.minimize` / `window.maximize` for first-class window
+lifecycle control. Window-targeting misses (`id` / `title_contains` matching no
+window) fail with `selector_not_found`, and OS-level window operation failures
+(missing Accessibility/`wmctrl` support, denied permission) fail with `io`, so
+`retry.on: [selector_not_found]` waits for a window to appear without retrying
+hard platform errors.
 
 `desktop.click_text` clicks on-screen text located via OCR: it captures the
 screen (same `region` / `display` options as `desktop.screenshot`, kept
@@ -405,6 +470,37 @@ ModelScope OCR preset configured in `ocr_model` (for example
 `modelscope/ZhipuAI/GLM-OCR`, `modelscope/PaddlePaddle/PaddleOCR-VL-1.6`, or
 `modelscope/deepseek-ai/DeepSeek-OCR-2`). The desktop Models page lists the
 supported OCR presets and can download them into the local model cache.
+
+### Driving iframes (`frame:` on browser actions)
+
+`browser.extract`, `browser.eval`, `browser.click`, and `browser.type` take an
+optional `frame:` object addressing an `<iframe>`: `url_includes` (first frame
+whose URL contains the substring), `name` (exact frame name), or `index`
+(zero-based position in the page's frame list). `browser.frame` exposes the
+same addressing as a standalone eval/extract action. Omitting `frame:` keeps
+the action on the main frame, exactly as before.
+
+For `browser.click` / `browser.type` the element is located **inside the
+frame** (same strategy order as the main-frame resolver: id, data_testid, css,
+aria_label, text_includes, xpath — the winner is reported in `resolved_by`,
+plus `frame: true`), its rect center is translated to top-level viewport
+coordinates by accumulating each ancestor `<iframe>`'s offset, and the click /
+keystrokes are then dispatched as **real top-level CDP input** — the page sees
+genuine trusted events (`isTrusted: true`), not synthetic in-frame JS events.
+`browser.type` focuses the element with a real click first; `clear: true`
+empties the field in-frame before typing. A selector that matches nothing
+inside the frame fails with `selector_not_found`, so
+`retry.on: [selector_not_found]` works unchanged.
+
+Cross-origin limitation: translating in-frame coordinates walks
+`window.frameElement`, which browsers only permit across **same-origin**
+frame chains. A cross-origin iframe (e.g. a third-party payment widget) fails
+with an explicit error; drive those with in-frame JS via `browser.frame`
+(`op: eval`) or `browser.eval` + `frame:` instead — noting that such JS
+dispatches synthetic (`isTrusted: false`) events, and that fully site-isolated
+(out-of-process) frames may be unreachable even for the JS bridge. The vision
+fallback (`prompt:`) applies only to main-frame resolution and is skipped when
+`frame:` is set.
 
 ### XML conventions (`xml.parse` / `xml.build` / `xml.xpath`)
 

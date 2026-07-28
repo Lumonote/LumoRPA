@@ -25,7 +25,7 @@
 //! `rdev` / `windows`.
 
 use async_trait::async_trait;
-use lumo_core::{FlowVm, RunOptions};
+use lumo_core::{CancelToken, RunOptions};
 use lumo_storage::Repo;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -250,8 +250,10 @@ pub async fn run_hotkey_flow(flow_path: &Path, home: &Path, label: &str) -> anyh
     lumo_dsl::validate(&flow)?;
     let registry = build_action_registry(home, Some(flow_path));
     let repo = Some(Repo::open(home.join("lumo.db"))?);
-    let vm = super::attach_ai_hooks(FlowVm::new(registry, repo), home, &flow)
-        .with_vault(super::load_vault_identity(home));
+    // 架构 P1-1:统一走宿主组装(step_timeout/artifacts/cancel/vault/AI
+    // hooks)。hotkey 是 headless 宿主:不注入 prompter(human.* 显式报错),
+    // 取消令牌每次派发新建(暂无外部取消入口,timeout 仍兜底)。
+    let vm = super::host_vm(home, &flow, registry, repo, CancelToken::new());
     let mut inputs = serde_json::Map::new();
     inputs.insert(
         "trigger".into(),

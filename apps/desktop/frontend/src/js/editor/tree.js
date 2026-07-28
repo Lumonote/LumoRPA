@@ -2,7 +2,7 @@
 
 import { $, html } from "../dom.js";
 import { state } from "../state.js";
-import { extractSteps, pathKey } from "../yaml.js";
+import { childStepBlocks, extractSteps, pathKey } from "../yaml.js";
 import { selectStep } from "./inspector.js";
 
 export function renderTree() {
@@ -18,8 +18,8 @@ function renderTreeList(list, parentPath) {
   list.forEach((step, idx) => {
     const path = parentPath ? [...parentPath, idx] : [idx];
     const key = pathKey(path);
-    const childKinds = ["do", "else", "catch", "finally"].filter((k) => Array.isArray(step[k]) && step[k].length);
-    const hasChildren = childKinds.length > 0;
+    const childBlocks = childStepBlocks(step);
+    const hasChildren = childBlocks.length > 0;
     const selected = pathKey(state.selectedStepPath || []) === key;
     const node = document.createElement("div");
     node.className = `tree-node ${hasChildren ? "" : "is-leaf"} ${selected ? "is-selected" : ""}`;
@@ -46,14 +46,14 @@ function renderTreeList(list, parentPath) {
     if (hasChildren) {
       const childWrap = document.createElement("div");
       childWrap.className = "tree-children";
-      childKinds.forEach((kind) => {
+      childBlocks.forEach((block) => {
         const label = document.createElement("div");
         label.style.fontSize = "10.5px";
         label.style.color = "var(--accent-2)";
         label.style.padding = "4px 4px 2px";
-        label.textContent = `▿ ${kind}`;
+        label.textContent = `▿ ${block.label}`;
         childWrap.appendChild(label);
-        childWrap.appendChild(renderTreeList(step[kind], [...path, kind]));
+        childWrap.appendChild(renderTreeList(block.steps, [...path, ...block.path]));
       });
       wrap.appendChild(childWrap);
     }

@@ -84,20 +84,28 @@ impl Action for InvokeAction {
             lumo_core::clamp_capabilities(&skill.flow.spec.capabilities, ctx.capabilities());
 
         // Run the skill's flow with the *same* action registry — so any
-        // built-in / ai / skill actions stay available recursively — but with
-        // the depth bumped and capabilities clamped.
-        let vm = FlowVm::new(ctx.registry.clone(), None)
-            .with_skill_depth(depth + 1)
-            .with_capability_override(clamped);
-        let report = vm
-            .run(
-                &skill.flow,
+        // built-in / ai / skill actions stay available recursively.
+        // 架构 P0-1:子 VM 经 child_of 继承父运行的执行环境(同一 cancel 令牌、
+        // step_timeout、artifacts、human prompter、repo、vault、AI provider,
+        // depth 内建 +1),不再裸 new 丢环境;能力仍按声明 clamp 后只收不放。
+        let vm = FlowVm::child_of(ctx).with_capability_override(clamped);
+        // 同 flow.call:spawn 隔离父级取消的 future drop,子任务经共享 cancel
+        // 令牌自行判死并完成 teardown,子流程资源不泄漏。
+        let flow = skill.flow.clone();
+        let trigger_kind = format!("skill:{}", name);
+        let handle = tokio::spawn(async move {
+            vm.run(
+                &flow,
                 RunOptions {
                     inputs,
-                    trigger_kind: format!("skill:{}", name),
+                    trigger_kind,
                 },
             )
             .await
+        });
+        let report = handle
+            .await
+            .map_err(|e| StepError::msg(format!("skill `{name}` task: {e}")))?
             .map_err(|e| StepError::msg(format!("skill `{name}`: {e}")))?;
 
         Ok(ActionResult::from(serde_json::json!({

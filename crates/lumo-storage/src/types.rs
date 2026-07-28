@@ -155,7 +155,15 @@ pub struct StepRunRow {
     pub input_hash: Vec<u8>,
     pub output_json: Option<serde_json::Value>,
     /// F-19 variable watch: snapshot of the `vars` (set_var) environment as of
-    /// after this step. `None` for rows written before the column existed.
+    /// after this step.
+    ///
+    /// P1-3(vars_json 治理)后的取值语义:
+    ///   * `Some(map)` —— 全量快照;
+    ///   * `Some({"__truncated__": true, "bytes": N})` —— 快照序列化超过引擎
+    ///     侧上限(lumo-core `VARS_JSON_MAX_BYTES`),只存截断标记;
+    ///   * `None`(库内 NULL)—— vars 与同 run 前一条 seq 行相同(写入侧去
+    ///     重)。[`crate::Repo::list_steps`] 读取时已向前回溯补齐,调用方通常
+    ///     看不到这种 `None`;仅 v3 之前的老行(整跑无快照)保持 `None`。
     pub vars_json: Option<serde_json::Value>,
     pub error: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
@@ -214,4 +222,33 @@ pub struct VaultRow {
     pub age_ciphertext: Vec<u8>,
     pub metadata: String,
     pub updated_at: i64,
+}
+
+/// 架构 P2(runs retention):[`crate::Repo::prune_runs`] 的保留策略。
+/// running / queued / paused 状态的 run 在任一策略下都不删(还在写行 /
+/// 可续跑)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrunePolicy {
+    /// 保留最近 N 天内启动的 run(按 `started_at`),更早的删除。
+    KeepDays(u32),
+    /// 按 `started_at` 倒序保留最新 N 条 run,其余删除。
+    KeepCount(u32),
+}
+
+/// 架构 P2:一次 [`crate::Repo::prune_runs`] 删除了什么。行删除(flow_runs
+/// 及级联的 step_runs / artifacts / ai_calls)在同一事务内完成;artifacts 的
+/// blob **文件**无法参与 SQLite 事务,其路径经 `blob_paths` 返回,由调用方在
+/// 提交后自行 best-effort 清理。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// 删除的 flow_runs 行数。
+    pub runs: usize,
+    /// 级联删除的 step_runs 行数。
+    pub steps: usize,
+    /// 级联删除的 artifacts 行数(= `blob_paths.len()`)。
+    pub artifacts: usize,
+    /// 级联删除的 ai_calls 行数。
+    pub ai_calls: usize,
+    /// 被删 artifacts 记录指向的 blob 文件路径,供调用方清理磁盘。
+    pub blob_paths: Vec<String>,
 }

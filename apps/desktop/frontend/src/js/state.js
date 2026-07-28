@@ -24,6 +24,7 @@ export const state = {
   actions: [],
   actionsByFamily: new Map(),
   actionFamilyCollapsed: loadJson("lumo.actionFamilies", {}),
+  graphLayouts: loadJson("lumo.graphLayouts", {}),
   flowPath: "",
   flow: null,            // FlowSummary
   source: "",            // raw YAML
@@ -33,6 +34,7 @@ export const state = {
   runs: [],
   activeRun: null,
   activeRunSteps: [],
+  liveRunProgress: null,
   activeStepRun: null,
   activeArtifacts: [],        // X-07: blob artifacts for the active run
   artifactBlobCache: new Map(), // artifactId -> data URL (lazy-loaded)

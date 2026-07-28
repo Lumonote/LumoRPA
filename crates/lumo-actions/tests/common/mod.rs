@@ -112,6 +112,27 @@ pub async fn run_bound(
         .map_err(|e| e.to_string())
 }
 
+/// Invoke `id` with `input` and return the typed [`ErrorKind`] of the failure.
+/// Panics if the action unexpectedly succeeds. Used by the typed-error
+/// classification tests (`retry.on` matches on these kinds, so drift from
+/// `other` → `io`/`timeout` is contract, not cosmetics).
+pub async fn err_kind_with(
+    id: &str,
+    input: Value,
+    caps: Capabilities,
+) -> lumo_core::error::ErrorKind {
+    let mut reg = ActionRegistry::new();
+    lumo_actions::register_all(&mut reg);
+    let action = reg
+        .get(id)
+        .unwrap_or_else(|| panic!("action `{id}` is not registered"));
+    let mut ctx = ctx_with(caps);
+    match action.execute(&mut ctx, input).await {
+        Ok(_) => panic!("`{id}` should fail but succeeded"),
+        Err(e) => e.kind(),
+    }
+}
+
 /// Grant read+write over everything under `dir` — the standard sandbox for the
 /// tempdir-based `file.*`/`csv.*`/`db.*`/`excel.*` tests.
 pub fn fs_caps(dir: &std::path::Path) -> Capabilities {

@@ -17,12 +17,12 @@ pub mod vm;
 pub use action::{Action, ActionResult};
 pub use ai_hook::{AiCallUsage, AiHookProvider, Decision, HealedSelector, LocatedTarget, SoMMark};
 pub use ctx::{
-    clamp_capabilities, host_matches_grants, CancelToken, ResumeMemo, RunStats, StepCtx,
-    StepInterrupt,
+    clamp_capabilities, host_matches_grants, CancelToken, ResumeMemo, RunStats, StepCtx, StepEvent,
+    StepInterrupt, StepObserver, LOG_BUFFER_MAX,
 };
 pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use human::{HumanPromptKind, HumanPromptRequest, HumanPrompter, HumanResponse};
 pub use registry::{ActionRegistry, RunTeardown};
 pub use resource::ResourceFactory;
 pub use validate::validate_steps;
-pub use vm::{FlowVm, RunHandle, RunOptions, RunReport};
+pub use vm::{FlowVm, RunHandle, RunOptions, RunReport, VARS_JSON_MAX_BYTES};

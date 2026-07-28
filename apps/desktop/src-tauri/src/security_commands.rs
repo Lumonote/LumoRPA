@@ -54,7 +54,9 @@ pub(super) struct DesktopSecurityRuntime {
 }
 
 impl Default for DesktopSecurityRuntime {
-    fn default() -> Self { Self::new(Arc::new(RejectingAuthenticator)) }
+    fn default() -> Self {
+        Self::new(Arc::new(RejectingAuthenticator))
+    }
 }
 
 impl DesktopSecurityRuntime {

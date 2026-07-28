@@ -70,7 +70,10 @@ async fn process_list_includes_this_test_process() {
     assert!(first["pid"].as_u64().is_some(), "pid present: {first}");
     assert!(first["name"].as_str().is_some(), "name present: {first}");
     assert!(first["cpu"].as_f64().is_some(), "cpu present: {first}");
-    assert!(first["memory"].as_u64().is_some(), "memory present: {first}");
+    assert!(
+        first["memory"].as_u64().is_some(),
+        "memory present: {first}"
+    );
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 use clap::{Args as ClapArgs, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
-use lumo_storage::Repo;
+use lumo_storage::{PrunePolicy, Repo};
 use std::path::PathBuf;
 
 #[derive(Debug, ClapArgs)]
@@ -34,6 +34,15 @@ enum Sub {
         #[arg(long)]
         json: bool,
     },
+    /// Prune old runs (step / artifact / AI-call records cascade, one transaction)
+    Prune {
+        /// Keep runs started within the last N days; prune older ones
+        #[arg(long, value_name = "N", conflicts_with = "keep")]
+        keep_days: Option<u32>,
+        /// Keep only the newest N runs; prune the rest
+        #[arg(long, value_name = "N")]
+        keep: Option<u32>,
+    },
 }
 
 pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
@@ -46,6 +55,7 @@ pub async fn run(home: PathBuf, args: Args) -> anyhow::Result<()> {
             json,
         } => show(&repo, &run_id, outputs, json),
         Sub::Cost { run_id, json } => cost(&repo, run_id.as_deref(), json),
+        Sub::Prune { keep_days, keep } => prune(&repo, keep_days, keep),
     }
 }
 
@@ -249,4 +259,32 @@ fn cost_summary(repo: &Repo, json: bool) -> anyhow::Result<()> {
 fn usd(micro: i64) -> String {
     let dollars = micro as f64 / 1_000_000.0;
     format!("${dollars:.4}")
+}
+
+/// 架构 P2(runs retention):`lumo runs prune --keep-days N | --keep N`。
+/// 行删除由 `Repo::prune_runs` 在一个事务内完成(running/queued/paused 永不
+/// 删);artifacts 的 blob 文件不在事务内,提交后在这里 best-effort 清理
+/// (文件已缺失/不可删只影响计数,不报错)。
+fn prune(repo: &Repo, keep_days: Option<u32>, keep: Option<u32>) -> anyhow::Result<()> {
+    let policy = match (keep_days, keep) {
+        (Some(d), None) => PrunePolicy::KeepDays(d),
+        (None, Some(n)) => PrunePolicy::KeepCount(n),
+        _ => anyhow::bail!("specify exactly one of --keep-days <N> or --keep <N>"),
+    };
+    let report = repo.prune_runs(policy)?;
+    if report.runs == 0 {
+        println!("nothing to prune (running/queued/paused runs are always kept)");
+        return Ok(());
+    }
+    let mut blobs_removed = 0usize;
+    for path in &report.blob_paths {
+        if std::fs::remove_file(path).is_ok() {
+            blobs_removed += 1;
+        }
+    }
+    println!(
+        "pruned {} run(s) · {} step row(s) · {} artifact record(s) · {} ai-call row(s); removed {}/{} artifact blob(s)",
+        report.runs, report.steps, report.artifacts, report.ai_calls, blobs_removed, report.blob_paths.len()
+    );
+    Ok(())
 }

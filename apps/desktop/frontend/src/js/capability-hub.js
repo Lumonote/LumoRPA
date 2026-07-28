@@ -1,6 +1,7 @@
 import { renderImprovementProposals, runImprovementAction } from "./improvements.js";
-import { buildMcpApplyRequest, renderMcpGovernance, renderMcpImportWorkspace, runMcpGovernanceAction } from "./mcp-manager.js";
+import { buildMcpApplyRequest, collectMcpToolArguments, renderMcpGovernance, renderMcpImportWorkspace, renderMcpToolCall, runMcpGovernanceAction } from "./mcp-manager.js";
 import { renderSecurityCenter, runSecurityAction } from "./security-center.js";
+import { renderJobs, runJobAction } from "./job-manager.js";
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -26,7 +27,7 @@ export function renderServerRows(servers = []) {
 
 export function renderSkillRows(skills = []) {
   if (!skills.length) return emptyRow("No skills installed");
-  return skills.map((skill) => `<article class="hub-row"><div><strong>${escapeHtml(skill.name || "Unnamed skill")}</strong><span>${escapeHtml(skill.description || "No description")}</span></div><span class="hub-tag">${escapeHtml(label(skill.status || "available"))}</span></article>`).join("");
+  return skills.map((skill) => `<article class="hub-row"><div><strong>${escapeHtml(skill.name || "Unnamed skill")}</strong><span>${escapeHtml(skill.description || "No description")}</span><small>${escapeHtml(skill.hash || skill.version || "legacy")}</small></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(label(skill.status || (skill.enabled === false ? "disabled" : "active")))}</span>${skill.hash ? `<button data-skill-action="validate" data-skill-name="${escapeHtml(skill.name)}" data-skill-hash="${escapeHtml(skill.hash)}">Validate</button><button data-skill-action="rollback" data-skill-name="${escapeHtml(skill.name)}">Rollback</button><button data-skill-action="toggle" data-skill-name="${escapeHtml(skill.name)}" data-enabled="${Boolean(skill.enabled)}">${skill.enabled === false ? "Enable" : "Disable"}</button>` : ""}</div></article>`).join("");
 }
 
 export function renderAgentProfileRows(profiles = []) {
@@ -53,7 +54,7 @@ export function renderImportPreview(batch = {}) {
 
 const sections = {
   overview: "Overview", skills: "Skills", servers: "MCP Servers", catalog: "Capability Catalog",
-  profiles: "Agent Profiles", permissions: "Permissions", audit: "Audit", proposals: "Improvement Proposals",
+  profiles: "Agent Profiles", jobs: "Jobs", permissions: "Permissions", audit: "Audit", proposals: "Improvement Proposals",
 };
 
 function overviewMarkup(data) {
@@ -62,15 +63,16 @@ function overviewMarkup(data) {
 
 export function mountCapabilityHub({ call, root }) {
   if (!root) return { refresh: async () => {} };
-  const data = { servers: [], skills: [], profiles: [], proposals: [], errors: [] };
+  const data = { servers: [], skills: [], profiles: [], proposals: [], jobs: [], security: {}, errors: [] };
   let active = "overview";
   const content = root.querySelector("[data-hub-content]");
   const render = () => {
     root.querySelectorAll("[data-hub-section]").forEach((button) => button.classList.toggle("is-active", button.dataset.hubSection === active));
     if (active === "overview") content.innerHTML = overviewMarkup(data);
-    else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Protocol fabric</span><h3>MCP Servers</h3></div><button class="primary" data-open-import>Import server</button></header>${renderServerRows(data.servers)}</section>`;
-    else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Local intelligence</span><h3>Skills</h3></div></header>${renderSkillRows(data.skills)}</section>`;
+    else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Protocol fabric</span><h3>MCP Servers</h3></div><button class="primary" data-open-import>Import server</button></header>${renderServerRows(data.servers)}<div data-mcp-tool-call></div></section>`;
+    else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Local intelligence</span><h3>Skills</h3></div></header><div class="hub-import-editor"><input data-skill-local-path placeholder="本地 SKILL.md 或目录路径"><button data-skill-import-local>导入本地 Skill</button><input data-skill-git-url placeholder="Git repository URL"><input data-skill-git-revision placeholder="revision（可选）"><button data-skill-import-git>导入 Git Skill</button></div>${renderSkillRows(data.skills)}</section>`;
     else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Execution policy</span><h3>Agent Profiles</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
+    else if (active === "jobs") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Durable scheduler</span><h3>Agent Jobs</h3></div></header>${renderJobs(data.jobs)}</section>`;
     else if (active === "permissions") content.innerHTML = `<section class="hub-card">${renderSecurityCenter(data.security || {})}</section>`;
     else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Supervised evolution</span><h3>改进提案</h3><p>所有变更先评估、再人工批准，并以新版本应用。</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
     else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sections[active])}</span><h3>Policy-ready workspace</h3><p>This surface is ready for backend data and actions. Empty state is intentional while commands are being connected.</p></section>`;
@@ -106,9 +108,35 @@ export function mountCapabilityHub({ call, root }) {
       data.servers = await call("list_mcp_servers"); render();
     }
     const tool = event.target.closest("[data-mcp-tool]");
-    if (tool) await call("call_mcp_tool", { id: tool.dataset.serverId, tool: tool.dataset.mcpTool, arguments: {} });
+    if (tool) {
+      const server = data.servers.find((item) => item.id === tool.dataset.serverId);
+      const definition = (server?.tools || []).find((item) => item.name === tool.dataset.mcpTool) || { name: tool.dataset.mcpTool };
+      root.querySelector("[data-mcp-tool-call]").innerHTML = renderMcpToolCall(tool.dataset.serverId, definition);
+    }
     const security = event.target.closest("[data-security-action]");
     if (security) await runSecurityAction({ action: security.dataset.securityAction, grantId: security.dataset.grantId }, call);
+    const job = event.target.closest("[data-job-action]");
+    if (job) {
+      await runJobAction({ action: job.dataset.jobAction, jobId: job.dataset.jobId }, call);
+      data.jobs = await call("job_list");
+      render();
+    }
+    if (event.target.closest("[data-skill-import-local]")) {
+      await call("skill_import_local", { path: root.querySelector("[data-skill-local-path]").value });
+      data.skills = await call("list_skills"); render();
+    }
+    if (event.target.closest("[data-skill-import-git]")) {
+      await call("skill_import_git", { url: root.querySelector("[data-skill-git-url]").value, revision: root.querySelector("[data-skill-git-revision]").value || null });
+      data.skills = await call("list_skills"); render();
+    }
+    const skillAction = event.target.closest("[data-skill-action]");
+    if (skillAction) {
+      const action = skillAction.dataset.skillAction;
+      if (action === "validate") await call("skill_validate", { name: skillAction.dataset.skillName, hash: skillAction.dataset.skillHash });
+      if (action === "rollback") await call("skill_rollback", { name: skillAction.dataset.skillName });
+      if (action === "toggle") await call("skill_set_enabled", { name: skillAction.dataset.skillName, enabled: skillAction.dataset.enabled !== "true" });
+      data.skills = await call("list_skills"); render();
+    }
     const governance = event.target.closest("[data-mcp-governance-action]");
     if (governance) await runMcpGovernanceAction({ action: governance.dataset.mcpGovernanceAction, serverId: governance.dataset.serverId, tool: governance.dataset.tool, schemaHash: governance.dataset.schemaHash }, call);
     const improvement = event.target.closest("[data-improvement-action]");
@@ -122,9 +150,16 @@ export function mountCapabilityHub({ call, root }) {
       } finally { improvement.disabled = false; }
     }
   });
+  root.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-mcp-call-server]");
+    if (!form) return;
+    event.preventDefault();
+    const result = await call("call_mcp_tool", { id: form.dataset.mcpCallServer, tool: form.dataset.mcpCallTool, arguments: collectMcpToolArguments(form.querySelectorAll("[data-mcp-argument]")) });
+    form.querySelector("[data-mcp-call-result]").textContent = JSON.stringify(result, null, 2);
+  });
   const refresh = async () => {
     data.errors = [];
-    const requests = [["servers", "list_mcp_servers"], ["skills", "list_skills"], ["profiles", "list_agent_profiles"], ["proposals", "list_improvement_proposals"]];
+    const requests = [["servers", "list_mcp_servers"], ["skills", "list_skills"], ["profiles", "list_agent_profiles"], ["proposals", "list_improvement_proposals"], ["jobs", "job_list"], ["security", "security_list"]];
     await Promise.all(requests.map(async ([key, command]) => {
       try { const result = await call(command); data[key] = Array.isArray(result) ? result : result?.items || []; }
       catch { data[key] = []; data.errors.push(label(key)); }

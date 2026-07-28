@@ -4,9 +4,7 @@ use super::mcp_supervisor::{
 };
 use super::{app_home, open_repo, DesktopState};
 use chrono::{DateTime, Utc};
-use lumo_actions::mcp::oauth::{
-    OAuthClientMetadata, StoredOAuthTokenRefs,
-};
+use lumo_actions::mcp::oauth::{OAuthClientMetadata, StoredOAuthTokenRefs};
 use lumo_actions::mcp::{McpClient, McpTool, McpTransportConfig};
 use lumo_agent::{
     import_bytes, ConfigValue, ImportWarning, McpImportBatch, McpPublisherMetadata, McpRelease,
@@ -151,7 +149,11 @@ pub(crate) fn mcp_oauth_start(
     let repo = open_repo(&app)?;
     let mut row = require_server(&repo, &id)?;
     let metadata = metadata
-        .or_else(|| stored_config(&row).ok().and_then(|config| extension(&config, "oauthClient").ok()))
+        .or_else(|| {
+            stored_config(&row)
+                .ok()
+                .and_then(|config| extension(&config, "oauthClient").ok())
+        })
         .ok_or_else(|| format!("MCP server `{id}` has no OAuth client metadata"))?;
     let nonce = ulid::Ulid::new().to_string();
     let verifier = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new());
@@ -271,9 +273,23 @@ pub(crate) fn approve_mcp_schema_change(
     schema_hash: String,
 ) -> Result<McpToolRow, String> {
     let approved = {
-        let mut supervisor = state.mcp.lock().map_err(|_| "MCP supervisor state is unavailable".to_string())?;
-        let release_version = release_version.or_else(|| supervisor.schemas.registry().pending_tool(&id, &tool).map(|pending| pending.release_version)).ok_or_else(|| format!("no pending schema change for `{id}:{tool}`"))?;
-        supervisor.schemas.approve(&id, &tool, &release_version, &schema_hash).map_err(|error| error.to_string())?
+        let mut supervisor = state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP supervisor state is unavailable".to_string())?;
+        let release_version = release_version
+            .or_else(|| {
+                supervisor
+                    .schemas
+                    .registry()
+                    .pending_tool(&id, &tool)
+                    .map(|pending| pending.release_version)
+            })
+            .ok_or_else(|| format!("no pending schema change for `{id}:{tool}`"))?;
+        supervisor
+            .schemas
+            .approve(&id, &tool, &release_version, &schema_hash)
+            .map_err(|error| error.to_string())?
     };
     let repo = open_repo(&app)?;
     require_server(&repo, &id)?;
@@ -387,15 +403,13 @@ pub(crate) fn apply_mcp_import(
 
     let home = app_home(&app)?;
     let repo = open_repo(&app)?;
-    persist_secret_choices(&repo, &home, choices)?;
     let now = Utc::now();
-    let mut rows = Vec::with_capacity(drafts.len());
-    for draft in drafts.into_values() {
-        let row = server_row_from_draft(draft, now)?;
-        repo.upsert_mcp_server(&row)
-            .map_err(|error| error.to_string())?;
-        rows.push(row);
-    }
+    let mut rows = drafts
+        .into_values()
+        .map(|draft| server_row_from_draft(draft, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    persist_secret_choices(&repo, &home, choices)?;
+    persist_import_rows_atomically(&repo, &rows)?;
     rows.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
@@ -403,6 +417,37 @@ pub(crate) fn apply_mcp_import(
             .then_with(|| left.id.cmp(&right.id))
     });
     rows.into_iter().map(|row| server_dto(&repo, row)).collect()
+}
+
+fn persist_import_rows_atomically(repo: &Repo, rows: &[McpServerRow]) -> Result<(), String> {
+    let previous = rows
+        .iter()
+        .map(|row| {
+            repo.get_mcp_server(&row.id)
+                .map(|value| (row.id.clone(), value))
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let mut applied: Vec<String> = Vec::new();
+    for row in rows {
+        if let Err(error) = repo.upsert_mcp_server(row) {
+            for id in applied.into_iter().rev() {
+                match previous.get(&id).and_then(|value| value.as_ref()) {
+                    Some(old) => {
+                        let _ = repo.upsert_mcp_server(old);
+                    }
+                    None => {
+                        let _ = repo.delete_mcp_server(&id);
+                    }
+                }
+            }
+            return Err(format!(
+                "MCP import rolled back after storage failure: {error}"
+            ));
+        }
+        applied.push(row.id.clone());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -505,9 +550,9 @@ pub(crate) async fn discover_mcp_tools(
                     tool,
                     None,
                     discovered_at,
-                    pending
-                        .map(|tool| tool.schema_hash)
-                        .ok_or_else(|| "discovered MCP tool is missing from registry".to_string())?,
+                    pending.map(|tool| tool.schema_hash).ok_or_else(|| {
+                        "discovered MCP tool is missing from registry".to_string()
+                    })?,
                     false,
                 ),
             }
@@ -665,11 +710,7 @@ fn stored_config(row: &McpServerRow) -> Result<StoredMcpConfig, String> {
         .map_err(|error| format!("MCP server `{}` has invalid stored config: {error}", row.id))
 }
 
-fn set_server_extension(
-    row: &mut McpServerRow,
-    key: &str,
-    value: Value,
-) -> Result<(), String> {
+fn set_server_extension(row: &mut McpServerRow, key: &str, value: Value) -> Result<(), String> {
     let mut stored = stored_config(row)?;
     stored.extensions.insert(key.into(), value);
     row.config = serde_json::to_value(stored).map_err(|error| error.to_string())?;
@@ -870,10 +911,10 @@ pub(super) fn runtime_transport(
                 headers: resolve_config_values(repo, identity, headers)?,
             })
         }
-        McpTransportDraft::Sse { .. } => Err(format!(
-            "MCP server `{}` uses legacy SSE transport; legacy SSE transport is not supported for calls yet",
-            row.id
-        )),
+        McpTransportDraft::Sse { url, headers } => Ok(McpTransportConfig::Sse {
+            url,
+            headers: resolve_config_values(repo, identity, headers)?,
+        }),
     }
 }
 
@@ -1158,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sse_profile_returns_an_unsupported_transport_error() {
+    fn legacy_sse_profile_round_trips_to_runtime_transport() {
         let row = McpServerRow {
             id: "legacy".into(),
             name: "Legacy".into(),
@@ -1176,10 +1217,9 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         let repo = Repo::open_in_memory().unwrap();
-        let error = runtime_transport(&repo, None, &row).unwrap_err();
+        let transport = runtime_transport(&repo, None, &row).unwrap();
         assert!(
-            error.contains("legacy SSE transport is not supported"),
-            "unexpected error: {error}"
+            matches!(transport, McpTransportConfig::Sse { url, headers } if url == "https://example.test/sse" && headers.is_empty())
         );
     }
 }

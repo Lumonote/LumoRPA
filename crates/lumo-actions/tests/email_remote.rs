@@ -103,7 +103,10 @@ async fn fetch_with_body_and_attachments_round_trip() {
     .expect("fetch with body should succeed");
 
     let arr = out.as_array().expect("array of messages");
-    assert!(!arr.is_empty(), "test mailbox must hold at least one message");
+    assert!(
+        !arr.is_empty(),
+        "test mailbox must hold at least one message"
+    );
     for msg in arr {
         assert!(msg.get("uid").is_some(), "uid present: {msg}");
         // include_body 时 text/html 字段必在(可为 null),attachments 必为数组。

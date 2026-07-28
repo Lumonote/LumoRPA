@@ -5,7 +5,10 @@
 
 use async_trait::async_trait;
 use lumo_core::error::{ExecError, StepError};
-use lumo_core::{Action, ActionRegistry, ActionResult, CancelToken, FlowVm, RunOptions, StepCtx};
+use lumo_core::{
+    Action, ActionRegistry, ActionResult, CancelToken, FlowVm, HumanPromptRequest, HumanPrompter,
+    HumanResponse, RunOptions, StepCtx,
+};
 use lumo_dsl::parse_str;
 use lumo_storage::Repo;
 use serde_json::Value;
@@ -285,8 +288,7 @@ async fn retry_on_timeout_retries_and_succeeds() {
     });
     let repo = Repo::open_in_memory().expect("repo");
     let flow = parse_str(&retry_flow("{ times: 2, initial_ms: 1, on: [timeout] }")).unwrap();
-    let vm =
-        FlowVm::new(reg, Some(repo.clone())).with_step_timeout(Duration::from_millis(40));
+    let vm = FlowVm::new(reg, Some(repo.clone())).with_step_timeout(Duration::from_millis(40));
     let report = vm
         .run(&flow, RunOptions::default())
         .await
@@ -346,8 +348,7 @@ async fn exhausted_timeout_retries_persist_timeout_state() {
     reg.register(AlwaysSlow);
     let repo = Repo::open_in_memory().expect("repo");
     let flow = parse_str(&retry_flow("{ times: 1, initial_ms: 1, on: [timeout] }")).unwrap();
-    let vm =
-        FlowVm::new(reg, Some(repo.clone())).with_step_timeout(Duration::from_millis(40));
+    let vm = FlowVm::new(reg, Some(repo.clone())).with_step_timeout(Duration::from_millis(40));
     let err = vm
         .run(&flow, RunOptions::default())
         .await
@@ -358,4 +359,140 @@ async fn exhausted_timeout_retries_persist_timeout_state() {
     let rows = repo.list_steps(&run.id).expect("list steps");
     let states: Vec<&str> = rows.iter().map(|r| r.state.as_str()).collect();
     assert_eq!(states, vec!["retrying", "timeout"], "rows: {rows:?}");
+}
+
+// ─── P1-4:human.* 步骤不被更短的全局步级超时截杀 ────────────────────────────
+//
+// human.* 的等待上限（自身 `timeout_ms`，默认 1 小时）通常远大于宿主全局
+// 步级超时（桌面端默认 10 分钟）。VM 对 "human." 前缀步骤取
+// max(全局步级超时, 自身等待上限 + 小幅余量)，其余步骤维持原语义。这里用
+// 真实的 `human.input` 动作（lumo-actions dev-dep）+ 延迟应答的 prompter 桩
+// 驱动完整 select 竞速路径。
+
+/// 延迟 `delay_ms` 后回执固定值的 prompter 桩 —— 模拟"真人过了一会儿才答"。
+struct DelayedPrompter {
+    delay_ms: u64,
+    value: Value,
+}
+#[async_trait]
+impl HumanPrompter for DelayedPrompter {
+    async fn prompt(&self, _req: HumanPromptRequest) -> Result<HumanResponse, StepError> {
+        tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+        Ok(HumanResponse {
+            value: self.value.clone(),
+            by: None,
+            comment: None,
+        })
+    }
+}
+
+/// 永不回执的 prompter 桩 —— 驱动 human 自身超时路径。
+struct NeverPrompter;
+#[async_trait]
+impl HumanPrompter for NeverPrompter {
+    async fn prompt(&self, _req: HumanPromptRequest) -> Result<HumanResponse, StepError> {
+        std::future::pending().await
+    }
+}
+
+fn human_reg() -> ActionRegistry {
+    let mut r = ActionRegistry::new();
+    lumo_actions::register_all(&mut r);
+    r
+}
+
+fn human_flow(with: &str) -> lumo_dsl::Flow {
+    parse_str(&format!(
+        r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: human-t }}
+spec:
+  steps:
+    - {{ id: ask, action: human.input, with: {with} }}
+"#
+    ))
+    .expect("parse human flow")
+}
+
+#[tokio::test]
+async fn human_step_survives_shorter_global_step_timeout() {
+    // 全局步级超时 40ms << 应答延迟 250ms << 自身 timeout_ms 60s。
+    // 修复前：步级超时在 40ms 硬杀等待（approve 语义下即"误拒"）。
+    // 修复后：有效上限抬到 max(40ms, 60s+余量)，真人应答照常送达。
+    let vm = FlowVm::new(human_reg(), None)
+        .with_step_timeout(Duration::from_millis(40))
+        .with_human_prompter(Some(Arc::new(DelayedPrompter {
+            delay_ms: 250,
+            value: Value::String("Alice".into()),
+        })));
+    let flow = human_flow(r#"{ message: "name?", timeout_ms: 60000 }"#);
+    let report = vm
+        .run(&flow, RunOptions::default())
+        .await
+        .expect("human step must outlive the shorter global step timeout");
+    assert!(report.success);
+    assert_eq!(
+        report
+            .outputs
+            .expect("outputs")
+            .pointer("/ask/result/value")
+            .and_then(Value::as_str),
+        Some("Alice")
+    );
+}
+
+#[tokio::test]
+async fn human_default_wait_ceiling_applies_without_explicit_timeout_ms() {
+    // 不配 `timeout_ms` 时走 DEFAULT_HUMAN_TIMEOUT_MS（1 小时）分支：40ms 的
+    // 全局步级超时同样不得截杀 250ms 后到达的应答。
+    let vm = FlowVm::new(human_reg(), None)
+        .with_step_timeout(Duration::from_millis(40))
+        .with_human_prompter(Some(Arc::new(DelayedPrompter {
+            delay_ms: 250,
+            value: Value::String("Bob".into()),
+        })));
+    let flow = human_flow(r#"{ message: "name?" }"#);
+    let report = vm
+        .run(&flow, RunOptions::default())
+        .await
+        .expect("default 1h human ceiling must raise the 40ms step limit");
+    assert!(report.success);
+    assert_eq!(
+        report
+            .outputs
+            .expect("outputs")
+            .pointer("/ask/result/value")
+            .and_then(Value::as_str),
+        Some("Bob")
+    );
+}
+
+#[tokio::test]
+async fn human_own_shorter_timeout_semantics_unchanged() {
+    // human 自身 timeout_ms(80ms) < 全局步级超时(10s)：语义不变 —— 动作自己
+    // 的超时先分辨并回落 `default`，绝不等到步级上限。
+    let t0 = std::time::Instant::now();
+    let vm = FlowVm::new(human_reg(), None)
+        .with_step_timeout(Duration::from_secs(10))
+        .with_human_prompter(Some(Arc::new(NeverPrompter)));
+    let flow = human_flow(r#"{ message: "name?", timeout_ms: 80, default: "fallback" }"#);
+    let report = vm
+        .run(&flow, RunOptions::default())
+        .await
+        .expect("the action's own timeout must fall back to `default`");
+    assert!(report.success);
+    assert_eq!(
+        report
+            .outputs
+            .expect("outputs")
+            .pointer("/ask/result/value")
+            .and_then(Value::as_str),
+        Some("fallback")
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "must resolve via the 80ms human timeout, not any step ceiling; took {:?}",
+        t0.elapsed()
+    );
 }

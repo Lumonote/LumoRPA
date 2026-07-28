@@ -294,7 +294,12 @@ impl ResourceFactory for HttpFactory {
         HTTP_KIND
     }
 
-    async fn open(&self, _decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+    async fn open(
+        &self,
+        _decl: &ResourceDecl,
+        _run_id: &str,
+        _name: &str,
+    ) -> Result<(), StepError> {
         // No-op: the gated client is built lazily by the first bound step (its
         // redirect policy must bake in the run's network grants, which aren't in
         // the decl). Registered so the kind is discoverable for a future VM driver.
@@ -330,6 +335,27 @@ fn headers_to_json(headers: &reqwest::header::HeaderMap) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// 把 reqwest 传输错误映射成**带类型**的 `StepError`(P0:typed 错误分类):
+/// * 动作内超时(客户端 `timeout_ms` 到期)→ `Timeout` —— `retry.on: [timeout]`
+///   才抓得到动作内超时,不再一律落 `other`;
+/// * 被 SSRF 门禁挡下的重定向 → 保持原有显式文案(`msg`,不可重试);
+/// * 其余传输/协议错误(连接拒绝、DNS、TLS、body 截断…)→ `Network`。
+///
+/// 错误串一律经 `without_url()` 剥离 URL:reqwest 的 Display 会带完整 URL,
+/// query/userinfo 可能含凭据,绝不落 step 快照/日志。`stage` 标注出错阶段
+/// (send / body / stream),`op` 是动作 id 前缀。
+fn transport_error(op: &str, stage: &str, e: reqwest::Error, timeout_ms: u64) -> StepError {
+    if e.is_redirect() {
+        StepError::msg(format!(
+            "{op}: blocked redirect to ungranted host (network capability)"
+        ))
+    } else if e.is_timeout() {
+        StepError::Timeout { ms: timeout_ms }
+    } else {
+        StepError::network(format!("{op} {stage}: {}", e.without_url()))
+    }
 }
 
 pub struct RequestAction;
@@ -453,17 +479,10 @@ impl Action for RequestAction {
             };
         }
 
-        let resp = req.send().await.map_err(|e| {
-            if e.is_redirect() {
-                StepError::msg(
-                    "http.request: blocked redirect to ungranted host (network capability)",
-                )
-            } else {
-                // reqwest 的 Error::Display 会带上完整 URL(query 可能含凭据,如
-                // ?api_key=...);without_url() 剥掉 URL,防凭据落 step 快照/日志。
-                StepError::msg(format!("http send: {}", e.without_url()))
-            }
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| transport_error("http.request", "send", e, timeout_ms))?;
         let status = resp.status().as_u16();
         let resp_headers = headers_to_json(resp.headers());
         // 响应大小上限(F-11):Content-Length 预检挡掉声明超限的响应;读后再按
@@ -478,7 +497,7 @@ impl Action for RequestAction {
         let text = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("http body: {}", e.without_url())))?;
+            .map_err(|e| transport_error("http.request", "body", e, timeout_ms))?;
         if text.len() as u64 > max_bytes {
             return Err(StepError::msg(format!(
                 "http.request: response body {} bytes exceeds max_bytes {max_bytes}",
@@ -551,15 +570,10 @@ impl Action for DownloadAction {
         for (k, v) in &headers {
             req = req.header(k, v);
         }
-        let resp = req.send().await.map_err(|e| {
-            if e.is_redirect() {
-                StepError::msg(
-                    "http.download: blocked redirect to ungranted host (network capability)",
-                )
-            } else {
-                StepError::msg(format!("http.download send: {}", e.without_url()))
-            }
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| transport_error("http.download", "send", e, timeout_ms))?;
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()
@@ -589,9 +603,8 @@ impl Action for DownloadAction {
         let mut downloaded: u64 = 0;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| {
-                StepError::msg(format!("http.download stream: {}", e.without_url()))
-            })?;
+            let chunk =
+                chunk.map_err(|e| transport_error("http.download", "stream", e, timeout_ms))?;
             downloaded += chunk.len() as u64;
             // Streaming guard: also catches chunked / unknown-length responses
             // that the Content-Length pre-check can't see — delete the partial.
@@ -731,15 +744,9 @@ impl Action for UploadAction {
                 for (k, v) in &headers {
                     req = req.header(k, v);
                 }
-                req.send().await.map_err(|e| {
-                    if e.is_redirect() {
-                        StepError::msg(
-                            "http.upload: blocked redirect to ungranted host (network capability)",
-                        )
-                    } else {
-                        StepError::msg(format!("http.upload send: {}", e.without_url()))
-                    }
-                })?
+                req.send()
+                    .await
+                    .map_err(|e| transport_error("http.upload", "send", e, timeout_ms))?
             }
             UploadMode::Body => {
                 let m = method.unwrap_or_else(|| "PUT".into());
@@ -753,15 +760,9 @@ impl Action for UploadAction {
                 for (k, v) in &headers {
                     req = req.header(k, v);
                 }
-                req.send().await.map_err(|e| {
-                    if e.is_redirect() {
-                        StepError::msg(
-                            "http.upload: blocked redirect to ungranted host (network capability)",
-                        )
-                    } else {
-                        StepError::msg(format!("http.upload send: {}", e.without_url()))
-                    }
-                })?
+                req.send()
+                    .await
+                    .map_err(|e| transport_error("http.upload", "send", e, timeout_ms))?
             }
         };
 
@@ -770,7 +771,7 @@ impl Action for UploadAction {
         let text = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("http.upload body: {}", e.without_url())))?;
+            .map_err(|e| transport_error("http.upload", "body", e, timeout_ms))?;
         let body_json: Option<Value> = serde_json::from_str(&text).ok();
 
         Ok(ActionResult::from(serde_json::json!({
@@ -883,15 +884,10 @@ impl Action for OAuth2TokenAction {
         // `.form(..)` sets `Content-Type: application/x-www-form-urlencoded`.
         let req = req.form(&form);
 
-        let resp = req.send().await.map_err(|e| {
-            if e.is_redirect() {
-                StepError::msg(
-                    "http.oauth2_token: blocked redirect to ungranted host (network capability)",
-                )
-            } else {
-                StepError::msg(format!("http.oauth2_token send: {}", e.without_url()))
-            }
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| transport_error("http.oauth2_token", "send", e, timeout_ms))?;
         let status = resp.status();
         if let Some(len) = resp.content_length() {
             if len > max_bytes {
@@ -903,7 +899,7 @@ impl Action for OAuth2TokenAction {
         let text = resp
             .text()
             .await
-            .map_err(|e| StepError::msg(format!("http.oauth2_token body: {}", e.without_url())))?;
+            .map_err(|e| transport_error("http.oauth2_token", "body", e, timeout_ms))?;
         if text.len() as u64 > max_bytes {
             return Err(StepError::msg(format!(
                 "http.oauth2_token: response body {} bytes exceeds max_bytes {max_bytes}",
@@ -918,7 +914,9 @@ impl Action for OAuth2TokenAction {
             )));
         }
         let raw: Value = serde_json::from_str(&text).map_err(|e| {
-            StepError::msg(format!("http.oauth2_token: token response is not JSON: {e}"))
+            StepError::msg(format!(
+                "http.oauth2_token: token response is not JSON: {e}"
+            ))
         })?;
         let access_token = raw.get("access_token").and_then(|v| v.as_str());
         let access_token = access_token.ok_or_else(|| {
@@ -1070,7 +1068,9 @@ fn link_header_next(link: &str) -> Option<String> {
         if is_next {
             return Some(url.to_string());
         }
-        rest = tail[seg_end..].strip_prefix(',').unwrap_or(&tail[seg_end..]);
+        rest = tail[seg_end..]
+            .strip_prefix(',')
+            .unwrap_or(&tail[seg_end..]);
     }
     None
 }
@@ -1165,15 +1165,10 @@ impl Action for PaginateAction {
                 req = req.header(k, v);
             }
 
-            let resp = req.send().await.map_err(|e| {
-                if e.is_redirect() {
-                    StepError::msg(
-                        "http.paginate: blocked redirect to ungranted host (network capability)",
-                    )
-                } else {
-                    StepError::msg(format!("http.paginate send: {}", e.without_url()))
-                }
-            })?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| transport_error("http.paginate", "send", e, timeout_ms))?;
 
             // 非 2xx 即失败:错误页(429/5xx)的 body 取不出 items 会被误判成
             // 「分页自然结束」,静默返回部分数据 —— 必须显式报错。
@@ -1202,7 +1197,7 @@ impl Action for PaginateAction {
             let text = resp
                 .text()
                 .await
-                .map_err(|e| StepError::msg(format!("http.paginate body: {}", e.without_url())))?;
+                .map_err(|e| transport_error("http.paginate", "body", e, timeout_ms))?;
             if text.len() as u64 > max_bytes {
                 return Err(StepError::msg(format!(
                     "http.paginate: page body {} bytes exceeds max_bytes {max_bytes}",
@@ -1377,7 +1372,10 @@ mod tests {
         let c1 = ensure_client(run, "api", &[], 1_000, None).await.unwrap();
         // A second open of the same slot reuses the first client (later args ignored).
         let c2 = ensure_client(run, "api", &[], 9_999, None).await.unwrap();
-        assert!(Arc::ptr_eq(&c1, &c2), "second ensure reuses the cached client");
+        assert!(
+            Arc::ptr_eq(&c1, &c2),
+            "second ensure reuses the cached client"
+        );
         assert!(http_client_open(run));
         // Teardown drops it; idempotent.
         close_run_clients(run);
@@ -1402,5 +1400,50 @@ mod tests {
             let err = build_gated_client_with(&[], 1_000, Some(bad), None).unwrap_err();
             assert!(err.to_string().contains("proxy"), "got: {err}");
         }
+    }
+
+    // ─── typed 错误分类(P0):动作内超时 → Timeout,传输失败 → Network ────────
+
+    #[tokio::test]
+    async fn transport_error_classifies_timeout_as_timeout_kind() {
+        use lumo_core::error::ErrorKind;
+        // 服务端 accept 后既不回包也不关连接 ⇒ 客户端 100ms 超时。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = tokio::spawn(async move {
+            let _conn = listener.accept().await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+        let client = build_gated_client(&[], 100).unwrap();
+        let e = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("hung server must time the request out");
+        let err = transport_error("http.request", "send", e, 100);
+        assert!(
+            matches!(err, StepError::Timeout { ms: 100 }),
+            "got: {err:?}"
+        );
+        assert_eq!(err.kind(), ErrorKind::Timeout);
+        hold.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_error_classifies_refused_connect_as_network_kind() {
+        use lumo_core::error::ErrorKind;
+        // 先 bind 拿一个必然空闲的端口再放掉 ⇒ 连接被拒。
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+        let client = build_gated_client(&[], 1_000).unwrap();
+        let e = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("nothing listens on the freed port");
+        let err = transport_error("http.request", "send", e, 1_000);
+        assert_eq!(err.kind(), ErrorKind::Network, "got: {err:?}");
+        assert!(err.to_string().contains("http.request send:"), "got: {err}");
     }
 }

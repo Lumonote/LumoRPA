@@ -10,6 +10,12 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
+/// P1-4：`human.*` 动作未显式配 `timeout_ms` 时的默认等待上限（1 小时）。
+/// 动作层的 serde 默认值（`lumo-actions/src/human.rs`）与 VM 的步级超时抬升
+/// （human 步取 max(全局步级超时, 自身等待上限)，见 `vm.rs`）共用此常量，
+/// 防止两处各写一份 3_600_000 后悄悄漂移。
+pub const DEFAULT_HUMAN_TIMEOUT_MS: u64 = 3_600_000;
+
 /// 提示种类，对应三个 `human.*` 动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

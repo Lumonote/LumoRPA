@@ -114,20 +114,29 @@ impl Action for FlowCallAction {
         // sandbox so it can never do what the calling flow could not.
         let clamped = lumo_core::clamp_capabilities(&flow.spec.capabilities, ctx.capabilities());
 
-        // Reuse the caller's action registry (so built-in / ai / skill / flow
-        // actions stay available recursively), with depth bumped + caps clamped.
-        let vm = FlowVm::new(ctx.registry.clone(), None)
-            .with_skill_depth(depth + 1)
-            .with_capability_override(clamped);
-        let report = vm
-            .run(
+        // 架构 P0-1:子 VM 经 child_of 继承父运行的执行环境(同一 cancel 令牌、
+        // step_timeout、artifacts、human prompter、repo、vault、AI provider,
+        // depth 内建 +1),不再裸 new 丢环境;能力仍按声明 clamp 后只收不放。
+        // 复用同一 action registry,built-in / ai / skill / flow 动作递归可用。
+        let vm = FlowVm::child_of(ctx).with_capability_override(clamped);
+        // 子运行放进独立 task:父级取消是 select! 后 drop 本步 future,若直接
+        // await,子 VM 在 await 点被丢弃就走不到自己的 teardown(vm.rs 按
+        // run_id 收资源),子流程的浏览器/DB 连接会泄漏。spawn 后父 drop 只丢
+        // JoinHandle,子任务继续被轮询,经共享 cancel 令牌判死并完成收尾。
+        let trigger_kind = format!("flow.call:{path}");
+        let handle = tokio::spawn(async move {
+            vm.run(
                 &flow,
                 RunOptions {
                     inputs,
-                    trigger_kind: format!("flow.call:{path}"),
+                    trigger_kind,
                 },
             )
             .await
+        });
+        let report = handle
+            .await
+            .map_err(|e| StepError::msg(format!("flow `{path}` task: {e}")))?
             .map_err(|e| StepError::msg(format!("flow `{path}`: {e}")))?;
 
         Ok(ActionResult::from(serde_json::json!({

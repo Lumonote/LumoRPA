@@ -3,8 +3,26 @@
 //! `excel.read_rows`; both honor the fs sandbox.
 
 mod common;
-use common::{fs_caps, ok_with, run};
+use common::{fs_caps, ok_with, run, run_bound};
 use serde_json::json;
+
+#[test]
+fn every_excel_action_exposes_timeout_ms() {
+    let mut registry = lumo_core::ActionRegistry::new();
+    lumo_actions::register_all(&mut registry);
+    let excel_ids: Vec<_> = registry
+        .iter_ids()
+        .filter(|id| id.starts_with("excel."))
+        .collect();
+    assert!(!excel_ids.is_empty());
+    for id in excel_ids {
+        let schema = registry.get(&id).unwrap().schema().clone();
+        assert!(
+            schema["properties"].get("timeout_ms").is_some(),
+            "{id} must expose timeout_ms"
+        );
+    }
+}
 
 #[tokio::test]
 async fn write_then_read_round_trips_a_row() {
@@ -27,9 +45,67 @@ async fn write_then_read_round_trips_a_row() {
     )
     .await;
     assert_eq!(
-        rows,
+        rows["rows"],
         json!([{"first": "alice", "last": "bob", "_index": 0}])
     );
+    assert_eq!(rows["truncated"], json!(false));
+}
+
+#[tokio::test]
+async fn bound_xlsx_resource_supplies_file_for_repeated_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bound.xlsx");
+    let caps = fs_caps(dir.path());
+    let resource = format!("kind: xlsx\npath: {}\n", file.display());
+    let resources = [("book", resource.as_str())];
+
+    run_bound(
+        "run-xlsx-resource",
+        &resources,
+        Some("book"),
+        "excel.write_cell",
+        json!({"sheet": "Data", "cell": "A1", "value": "shared"}),
+        caps.clone(),
+    )
+    .await
+    .expect("bound write should use the resource path");
+
+    let value = run_bound(
+        "run-xlsx-resource",
+        &resources,
+        Some("book"),
+        "excel.read_cell",
+        json!({"sheet": "Data", "cell": "A1"}),
+        caps,
+    )
+    .await
+    .expect("bound read should reuse the resource path");
+    assert_eq!(value, json!("shared"));
+}
+
+#[tokio::test]
+async fn read_rows_limit_returns_metadata_and_truncates() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bounded.xlsx");
+    let caps = fs_caps(dir.path());
+    for value in ["a", "b", "c"] {
+        ok_with(
+            "excel.write_row",
+            json!({"file": file, "row": [value], "headers": ["value"]}),
+            caps.clone(),
+        )
+        .await;
+    }
+
+    let out = ok_with(
+        "excel.read_rows",
+        json!({"file": file, "header": true, "limit": 2}),
+        caps,
+    )
+    .await;
+    assert_eq!(out["count"], json!(2));
+    assert_eq!(out["truncated"], json!(true));
+    assert_eq!(out["rows"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -63,7 +139,7 @@ async fn write_row_appends_to_an_existing_sheet() {
     )
     .await;
     assert_eq!(
-        rows,
+        rows["rows"],
         json!([
             {"first": "alice", "last": "bob", "_index": 0},
             {"first": "carol", "last": "dave", "_index": 1}
@@ -175,6 +251,84 @@ async fn set_formula_writes_a_formula_cell() {
 }
 
 #[tokio::test]
+async fn worksheet_and_axis_structure_actions_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("structure.xlsx");
+    let caps = fs_caps(dir.path());
+    ok_with(
+        "excel.write_range",
+        json!({"file": file, "sheet": "S", "cell": "A1", "values": [["a", "b"], ["c", "d"]]}),
+        caps.clone(),
+    )
+    .await;
+
+    ok_with(
+        "excel.add_sheet",
+        json!({"file": file, "name": "Extra"}),
+        caps.clone(),
+    )
+    .await;
+    ok_with(
+        "excel.rename_sheet",
+        json!({"file": file, "sheet": "Extra", "new_name": "Renamed"}),
+        caps.clone(),
+    )
+    .await;
+
+    ok_with(
+        "excel.insert_rows",
+        json!({"file": file, "sheet": "S", "row": 1, "count": 1}),
+        caps.clone(),
+    )
+    .await;
+    assert_eq!(
+        ok_with(
+            "excel.read_cell",
+            json!({"file": file, "sheet": "S", "cell": "A2"}),
+            caps.clone()
+        )
+        .await,
+        json!("a")
+    );
+    ok_with(
+        "excel.delete_rows",
+        json!({"file": file, "sheet": "S", "row": 1, "count": 1}),
+        caps.clone(),
+    )
+    .await;
+    ok_with(
+        "excel.insert_columns",
+        json!({"file": file, "sheet": "S", "column": "A", "count": 1}),
+        caps.clone(),
+    )
+    .await;
+    assert_eq!(
+        ok_with(
+            "excel.read_cell",
+            json!({"file": file, "sheet": "S", "cell": "B1"}),
+            caps.clone()
+        )
+        .await,
+        json!("a")
+    );
+    ok_with(
+        "excel.delete_columns",
+        json!({"file": file, "sheet": "S", "column": "A", "count": 1}),
+        caps.clone(),
+    )
+    .await;
+    ok_with(
+        "excel.delete_sheet",
+        json!({"file": file, "sheet": "Renamed"}),
+        caps.clone(),
+    )
+    .await;
+
+    let names = ok_with("excel.sheet_names", json!({"file": file}), caps).await;
+    assert_eq!(names, json!({"sheets": ["S"]}));
+}
+
+#[tokio::test]
 async fn read_range_denied_without_fs_grant() {
     let err = run(
         "excel.read_range",
@@ -183,4 +337,49 @@ async fn read_range_denied_without_fs_grant() {
     .await
     .unwrap_err();
     assert!(err.contains("capability denied"), "got: {err}");
+}
+
+// ─── typed error classification (retry.on contract) ─────────────────────────
+
+#[tokio::test]
+async fn read_rows_missing_file_classifies_as_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let kind = common::err_kind_with(
+        "excel.read_rows",
+        json!({"file": dir.path().join("absent.xlsx")}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Io);
+}
+
+#[tokio::test]
+async fn read_cell_missing_file_classifies_as_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let kind = common::err_kind_with(
+        "excel.read_cell",
+        json!({"file": dir.path().join("absent.xlsx"), "cell": "A1"}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Io);
+}
+
+#[tokio::test]
+async fn bad_cell_ref_stays_kind_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("wb.xlsx");
+    ok_with(
+        "excel.write_row",
+        json!({"file": file, "row": ["a"]}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    let kind = common::err_kind_with(
+        "excel.read_cell",
+        json!({"file": file, "cell": "not-a-cell"}),
+        fs_caps(dir.path()),
+    )
+    .await;
+    assert_eq!(kind, lumo_core::error::ErrorKind::Other);
 }

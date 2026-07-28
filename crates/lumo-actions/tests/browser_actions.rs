@@ -167,6 +167,55 @@ async fn extract_frame_requires_url_or_name() {
     assert!(err.contains("frame"), "got: {err}");
 }
 
+// ─── 指令集 P1: click/type 进 iframe ────────────────────────────────────────────
+
+#[tokio::test]
+async fn click_frame_requires_an_address() {
+    // `frame: {}`(url_includes/name/index 全缺)→ 在会话查找之前拒绝。
+    let err = run("browser.click", json!({ "selector": "#go", "frame": {} }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("frame"), "got: {err}");
+    assert!(
+        !err.contains("not launched"),
+        "the frame check must run before the session lookup, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn type_frame_requires_an_address() {
+    let err = run(
+        "browser.type",
+        json!({ "selector": "#user", "text": "hi", "frame": {} }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("frame"), "got: {err}");
+    assert!(
+        !err.contains("not launched"),
+        "the frame check must run before the session lookup, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn click_and_type_with_frame_without_session_are_clean_errors() {
+    // 合法 frame 地址但没有浏览器会话 → 干净的 "not launched"(与主帧路径一致)。
+    let err = run(
+        "browser.click",
+        json!({ "selector": "#go", "frame": { "url_includes": "/child" } }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("not launched"), "got: {err}");
+    let err = run(
+        "browser.type",
+        json!({ "selector": "#user", "text": "hi", "frame": { "name": "child" } }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("not launched"), "got: {err}");
+}
+
 #[tokio::test]
 #[ignore = "launches a real headless Chrome; run with --ignored"]
 async fn eval_and_cookies_roundtrip() {
@@ -245,23 +294,17 @@ async fn frame_requires_an_address() {
 
 #[tokio::test]
 async fn frame_eval_requires_expr() {
-    let err = run(
-        "browser.frame",
-        json!({ "op": "eval", "index": 0 }),
-    )
-    .await
-    .unwrap_err();
+    let err = run("browser.frame", json!({ "op": "eval", "index": 0 }))
+        .await
+        .unwrap_err();
     assert!(err.contains("requires `expr`"), "got: {err}");
 }
 
 #[tokio::test]
 async fn frame_extract_requires_selector() {
-    let err = run(
-        "browser.frame",
-        json!({ "op": "extract", "name": "child" }),
-    )
-    .await
-    .unwrap_err();
+    let err = run("browser.frame", json!({ "op": "extract", "name": "child" }))
+        .await
+        .unwrap_err();
     assert!(err.contains("requires `selector`"), "got: {err}");
 }
 
@@ -285,17 +328,35 @@ async fn extract_table_without_session_is_a_clean_error() {
     assert!(err.contains("not launched"), "got: {err}");
 }
 
+#[tokio::test]
+async fn navigation_actions_are_registered_and_require_a_session() {
+    for id in ["browser.back", "browser.forward", "browser.reload"] {
+        let err = run(id, json!({})).await.unwrap_err();
+        assert!(err.contains("not launched"), "{id}: {err}");
+    }
+}
+
+#[test]
+fn extract_table_schema_exposes_a_positive_limit() {
+    let mut registry = lumo_core::ActionRegistry::new();
+    lumo_actions::register_all(&mut registry);
+    let action = registry.get("browser.extract_table").unwrap();
+    let properties = action.schema()["properties"].as_object().unwrap();
+    assert!(
+        properties.contains_key("limit"),
+        "schema: {}",
+        action.schema()
+    );
+}
+
 // ─── 指令集 P1: drag_and_drop / print_pdf / wait_response ────────────────────────
 
 #[tokio::test]
 async fn drag_and_drop_requires_a_from_selector() {
     // 没有 from/from_selectors → 在会话查找之前拒绝(CI 可测,不拉 Chrome)。
-    let err = run(
-        "browser.drag_and_drop",
-        json!({ "to": "#dest" }),
-    )
-    .await
-    .unwrap_err();
+    let err = run("browser.drag_and_drop", json!({ "to": "#dest" }))
+        .await
+        .unwrap_err();
     assert!(err.contains("requires `from`"), "got: {err}");
     assert!(
         !err.contains("not launched"),
@@ -311,12 +372,9 @@ async fn drag_and_drop_requires_exactly_one_target_form() {
         .unwrap_err();
     assert!(err.contains("requires a target"), "got: {err}");
     // 坐标只给了一半 → 同样报缺 target(x/y 必须成对)。
-    let err = run(
-        "browser.drag_and_drop",
-        json!({ "from": "#src", "x": 100 }),
-    )
-    .await
-    .unwrap_err();
+    let err = run("browser.drag_and_drop", json!({ "from": "#src", "x": 100 }))
+        .await
+        .unwrap_err();
     assert!(err.contains("requires a target"), "got: {err}");
     // 选择器与坐标同时给 → 拒绝二义性输入。
     let err = run(
@@ -467,7 +525,10 @@ spec:
     assert!(report.success, "flow should succeed");
 
     let steps = repo.list_steps(&report.run_id).expect("list steps");
-    let read = steps.iter().find(|s| s.step_id == "read").expect("read row");
+    let read = steps
+        .iter()
+        .find(|s| s.step_id == "read")
+        .expect("read row");
     let out = read.output_json.as_ref().expect("eval output");
     assert_eq!(
         out,
@@ -490,10 +551,10 @@ async fn print_pdf_writes_a_pdf_and_attaches_an_artifact() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/p"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            "<html><body><h1>print me</h1></body></html>",
-            "text/html",
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw("<html><body><h1>print me</h1></body></html>", "text/html"),
+        )
         .mount(&server)
         .await;
 
@@ -533,7 +594,10 @@ spec:
     assert!(bytes.starts_with(b"%PDF-"), "output is a real PDF");
 
     let rows = repo.list_artifacts(&report.run_id).expect("list artifacts");
-    let pdf_row = rows.iter().find(|r| r.kind == "pdf").expect("pdf artifact row");
+    let pdf_row = rows
+        .iter()
+        .find(|r| r.kind == "pdf")
+        .expect("pdf artifact row");
     assert_eq!(pdf_row.mime, "application/pdf");
     assert_eq!(pdf_row.step_id.as_deref(), Some("pdf"));
 }
@@ -560,9 +624,7 @@ async fn wait_response_catches_a_clicked_fetch() {
         .await;
     Mock::given(method("GET"))
         .and(path("/api/data"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(r#"{"ok":true}"#, "application/json"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"ok":true}"#, "application/json"))
         .mount(&server)
         .await;
 
@@ -595,6 +657,105 @@ spec:
 
     let report = vm.run(&flow, RunOptions::default()).await.expect("run ok");
     assert!(report.success, "flow should succeed: {:?}", report);
+}
+
+#[tokio::test]
+#[ignore = "launches a real headless Chrome; run with --ignored"]
+async fn click_and_type_inside_iframe_dispatch_trusted_input() {
+    // 真实浏览器路径(指令集 P1):父页嵌 <iframe>(带边框+外边距,验证偏移
+    // 换算),子页按钮记录 click 次数与 isTrusted,输入框带预置值。
+    // browser.click / browser.type 带 frame: 后 —— 按钮恰好被点一次且
+    // isTrusted=true(顶层真实输入,非帧内合成事件),clear+type 覆盖预置值。
+    use lumo_core::{ActionRegistry, FlowVm, RunOptions};
+    use lumo_storage::Repo;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/parent"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<html><body style="margin:0">
+<div style="height:120px">spacer</div>
+<iframe name="child" src="/child" style="margin-left:60px;border:4px solid black;width:400px;height:300px"></iframe>
+</body></html>"#,
+            "text/html",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/child"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"<html><body>
+<button id="btn">go</button>
+<input id="inp" value="seed">
+<script>
+  window.__clicks = 0; window.__trusted = null;
+  document.getElementById('btn').addEventListener('click', (e) => {
+    window.__clicks++; window.__trusted = e.isTrusted;
+  });
+</script>
+</body></html>"#,
+            "text/html",
+        ))
+        .mount(&server)
+        .await;
+
+    let repo = Repo::open_in_memory().unwrap();
+    let mut reg = ActionRegistry::new();
+    lumo_actions::register_all(&mut reg);
+    let vm = FlowVm::new(reg, Some(repo.clone()));
+
+    let flow = lumo_dsl::parse_str(&format!(
+        // YAML 里 `"#btn"` 含 `"#`,须用双井号原始串。
+        r##"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: frame-input-e2e }}
+spec:
+  capabilities:
+    network: ["*"]
+  steps:
+    - {{ id: launch, action: browser.launch, with: {{ headless: true }} }}
+    - {{ id: open, action: browser.open, with: {{ url: "{url}/parent" }} }}
+    - {{ id: click, action: browser.click, with: {{ selector: "#btn", frame: {{ url_includes: "/child" }} }} }}
+    - {{ id: fill, action: browser.type, with: {{ selector: "#inp", text: "hello", clear: true, frame: {{ name: "child" }} }} }}
+    - id: read
+      action: browser.frame
+      with:
+        op: eval
+        name: child
+        expr: "[window.__clicks, window.__trusted, document.getElementById('inp').value]"
+"##,
+        url = server.uri(),
+    ))
+    .expect("parse flow");
+
+    let report = vm.run(&flow, RunOptions::default()).await.expect("run ok");
+    assert!(report.success, "flow should succeed");
+
+    let steps = repo.list_steps(&report.run_id).expect("list steps");
+    let read = steps
+        .iter()
+        .find(|s| s.step_id == "read")
+        .expect("read row");
+    let out = read.output_json.as_ref().expect("eval output");
+    assert_eq!(
+        out,
+        &serde_json::json!([1, true, "hello"]),
+        "one in-frame click with isTrusted=true, and clear+type replaced the seed value"
+    );
+    // click 步骤输出回报帧路径与命中策略。
+    let click = steps
+        .iter()
+        .find(|s| s.step_id == "click")
+        .expect("click row");
+    let click_out = click.output_json.as_ref().expect("click output");
+    assert_eq!(click_out.get("frame"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        click_out.get("resolved_by"),
+        Some(&serde_json::json!("css"))
+    );
 }
 
 #[tokio::test]
@@ -705,16 +866,18 @@ spec:
 
     let png = std::fs::read(&shot_row.blob_path).expect("png blob readable");
     assert!(png.starts_with(b"\x89PNG"), "screenshot blob is a real PNG");
-    let table: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&tbl_row.blob_path).expect("table blob readable"),
-    )
-    .expect("table blob is valid JSON");
-    assert_eq!(table[0]["name"], "widget");
-    assert_eq!(table[0]["qty"], "3");
+    let table: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&tbl_row.blob_path).expect("table blob readable"))
+            .expect("table blob is valid JSON");
+    assert_eq!(table["rows"][0]["name"], "widget");
+    assert_eq!(table["rows"][0]["qty"], "3");
 
     // screenshot 步骤输出回报的 artifact_id 与 artifacts 表行一致。
     let steps = repo.list_steps(&report.run_id).expect("list steps");
-    let shot_step = steps.iter().find(|s| s.step_id == "shot").expect("shot row");
+    let shot_step = steps
+        .iter()
+        .find(|s| s.step_id == "shot")
+        .expect("shot row");
     assert_eq!(
         shot_step
             .output_json

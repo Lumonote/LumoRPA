@@ -3,6 +3,7 @@
 //! See docs/02-Architecture-Design.md §4 for the formal spec.
 
 pub mod ast;
+pub mod caps;
 pub mod expr;
 pub mod lint;
 pub mod parse;

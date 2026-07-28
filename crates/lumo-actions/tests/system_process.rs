@@ -74,7 +74,11 @@ async fn process_actions_gate_and_behavior() {
         .await
         .expect("force kill own child");
     assert_eq!(out["pid"], json!(pid));
-    assert_eq!(out["signal"], json!("kill"), "force ⇒ SIGKILL/TerminateProcess");
+    assert_eq!(
+        out["signal"],
+        json!("kill"),
+        "force ⇒ SIGKILL/TerminateProcess"
+    );
     let status = child.wait().expect("reap killed child");
     assert!(!status.success(), "SIGKILL 终止的子进程不应正常退出");
 
@@ -88,7 +92,25 @@ async fn process_actions_gate_and_behavior() {
     assert_eq!(out["signal"], json!(expect_signal));
     child.wait().expect("reap term-killed child");
 
-    // ── 6. app_start:输入校验 + 启动成功返回 pid(detached,不等退出)─────
+    // ── 6. dry_run:返回预览但不终止进程 ────────────────────────────────
+    let mut child = long_sleep_cmd().spawn().expect("spawn dry-run child");
+    let pid = child.id();
+    let out = run(
+        "system.process_kill",
+        json!({"pid": pid, "force": true, "dry_run": true}),
+    )
+    .await
+    .expect("preview process kill");
+    assert_eq!(out["dry_run"], json!(true));
+    assert_eq!(out["would_kill"], json!(true));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "dry_run must leave child alive"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    // ── 7. app_start:输入校验 + 启动成功返回 pid(detached,不等退出)─────
     let err = run("system.app_start", json!({"program": "  "}))
         .await
         .unwrap_err();
@@ -106,9 +128,12 @@ async fn process_actions_gate_and_behavior() {
     } else {
         ("sleep", vec!["30"])
     };
-    let out = run("system.app_start", json!({"program": program, "args": args}))
-        .await
-        .expect("app_start a long-running child");
+    let out = run(
+        "system.app_start",
+        json!({"program": program, "args": args}),
+    )
+    .await
+    .expect("app_start a long-running child");
     let started_pid = out["pid"].as_u64().expect("pid in output") as u32;
     assert!(started_pid > 0, "got: {out}");
     assert_eq!(out["launcher"], json!("direct"));

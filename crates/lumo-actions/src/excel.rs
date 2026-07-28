@@ -14,7 +14,8 @@
 use async_trait::async_trait;
 use calamine::{open_workbook_auto, Data, Reader};
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, ResourceFactory, StepCtx};
+use lumo_dsl::ResourceDecl;
 use once_cell::sync::Lazy;
 use rust_xlsxwriter::Workbook;
 use schemars::JsonSchema;
@@ -22,41 +23,172 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+pub(crate) const XLSX_KIND: &str = "xlsx";
+
+struct TimedExcelAction<A> {
+    inner: A,
+    schema: &'static Value,
+}
+
+impl<A: Action> TimedExcelAction<A> {
+    fn new(inner: A) -> Self {
+        let mut schema = inner.schema().clone();
+        schema
+            .as_object_mut()
+            .and_then(|root| root.get_mut("properties"))
+            .and_then(Value::as_object_mut)
+            .expect("Excel action schema must have object properties")
+            .insert(
+                "timeout_ms".into(),
+                serde_json::json!({
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 1,
+                    "default": crate::contracts::DEFAULT_ACTION_TIMEOUT_MS,
+                }),
+            );
+        Self {
+            inner,
+            schema: Box::leak(Box::new(schema)),
+        }
+    }
+}
+
+#[async_trait]
+impl<A: Action> Action for TimedExcelAction<A> {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    fn summary(&self) -> &'static str {
+        self.inner.summary()
+    }
+
+    fn schema(&self) -> &'static Value {
+        self.schema
+    }
+
+    async fn execute(
+        &self,
+        ctx: &mut StepCtx,
+        mut input: Value,
+    ) -> Result<ActionResult, StepError> {
+        let timeout_ms = input
+            .as_object_mut()
+            .and_then(|object| object.remove("timeout_ms"))
+            .map(|value| {
+                value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                    StepError::msg(format!("{}: `timeout_ms` must be >= 1", self.id()))
+                })
+            })
+            .transpose()?
+            .unwrap_or(crate::contracts::DEFAULT_ACTION_TIMEOUT_MS);
+        let interrupt = ctx.step_interrupt();
+        crate::contracts::with_interruptible_timeout(
+            timeout_ms,
+            interrupt,
+            self.inner.execute(ctx, input),
+        )
+        .await
+    }
+}
+
+fn register_excel(r: &mut ActionRegistry, action: impl Action) {
+    r.register(TimedExcelAction::new(action));
+}
 
 pub fn register(r: &mut ActionRegistry) {
-    r.register(ReadRowsAction);
-    r.register(WriteRowAction);
-    r.register(SheetNamesAction);
-    r.register(ReadCellAction);
-    r.register(WriteCellAction);
-    r.register(ReadRangeAction);
-    r.register(WriteRangeAction);
-    r.register(FindReplaceAction);
-    r.register(SetFormulaAction);
-    r.register(SetStyleAction);
-    r.register(MergeCellsAction);
-    r.register(SetColumnWidthAction);
-    r.register(SetRowHeightAction);
-    r.register(FreezePanesAction);
-    r.register(AddChartAction);
-    r.register(SetConditionalFormatAction);
-    r.register(AutofitColumnsAction);
-    r.register(SetCommentAction);
-    r.register(SetDataValidationAction);
-    r.register(LookupAction);
+    register_excel(r, ReadRowsAction);
+    register_excel(r, WriteRowAction);
+    register_excel(r, SheetNamesAction);
+    register_excel(r, ReadCellAction);
+    register_excel(r, WriteCellAction);
+    register_excel(r, ReadRangeAction);
+    register_excel(r, WriteRangeAction);
+    register_excel(r, FindReplaceAction);
+    register_excel(r, SetFormulaAction);
+    register_excel(r, SetStyleAction);
+    register_excel(r, MergeCellsAction);
+    register_excel(r, SetColumnWidthAction);
+    register_excel(r, SetRowHeightAction);
+    register_excel(r, FreezePanesAction);
+    register_excel(r, AddChartAction);
+    register_excel(r, SetConditionalFormatAction);
+    register_excel(r, AutofitColumnsAction);
+    register_excel(r, SetCommentAction);
+    register_excel(r, SetDataValidationAction);
+    register_excel(r, LookupAction);
+    register_excel(r, AddSheetAction);
+    register_excel(r, DeleteSheetAction);
+    register_excel(r, RenameSheetAction);
+    register_excel(r, InsertRowsAction);
+    register_excel(r, DeleteRowsAction);
+    register_excel(r, InsertColumnsAction);
+    register_excel(r, DeleteColumnsAction);
+    r.register_resource_factory(Arc::new(XlsxFactory));
+}
+
+struct XlsxFactory;
+
+fn input_with_xlsx_resource(ctx: &StepCtx, mut input: Value) -> Result<Value, StepError> {
+    let Some(resource_name) = ctx.current_resource() else {
+        return Ok(input);
+    };
+    let decl = ctx.resource_decl(&resource_name)?;
+    if decl.kind != XLSX_KIND {
+        return Err(StepError::msg(format!(
+            "excel action requires an `{XLSX_KIND}` resource, but `{resource_name}` has kind `{}`",
+            decl.kind
+        )));
+    }
+    let path = decl
+        .config
+        .get("path")
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| StepError::msg("xlsx resource requires a non-empty `path`"))?;
+    let object = input
+        .as_object_mut()
+        .ok_or_else(|| StepError::msg("excel action input must be an object"))?;
+    object
+        .entry("file".to_string())
+        .or_insert_with(|| Value::String(path.to_string()));
+    Ok(input)
+}
+
+#[async_trait]
+impl ResourceFactory for XlsxFactory {
+    fn kind(&self) -> &str {
+        XLSX_KIND
+    }
+
+    async fn open(&self, decl: &ResourceDecl, _run_id: &str, _name: &str) -> Result<(), StepError> {
+        let path = decl
+            .config
+            .get("path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| StepError::msg("xlsx resource requires a `path`"))?;
+        if path.trim().is_empty() {
+            return Err(StepError::msg("xlsx resource `path` must not be empty"));
+        }
+        Ok(())
+    }
 }
 
 pub struct ReadRowsAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
     #[serde(default = "default_true")]
     header: bool,
-    #[serde(default)]
-    limit: Option<usize>,
+    #[serde(default = "crate::contracts::default_collection_limit")]
+    limit: usize,
 }
 fn default_true() -> bool {
     true
@@ -80,8 +212,9 @@ impl Action for ReadRowsAction {
             sheet,
             header,
             limit,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.read_rows input invalid: {e}")))?;
+        let limit = crate::contracts::checked_limit("excel.read_rows", limit)?;
         ctx.ensure_fs_read(&file)?;
         let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
             let mut wb = open_workbook_auto(&file).map_err(|e| e.to_string())?;
@@ -112,18 +245,23 @@ impl Action for ReadRowsAction {
                 }
                 obj.insert("_index".into(), Value::from(idx as i64));
                 out.push(Value::Object(obj));
-                if let Some(n) = limit {
-                    if out.len() >= n {
-                        break;
-                    }
+                if out.len() > limit {
+                    break;
                 }
             }
             Ok(out)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
-        Ok(ActionResult::from(Value::Array(rows)))
+        .map_err(|e| StepError::io(format!("excel.read_rows join: {e}")))?
+        .map_err(|e| StepError::io(format!("excel.read_rows: {e}")))?;
+        let mut rows = rows;
+        let truncated = crate::contracts::truncate_with_flag(&mut rows, limit);
+        Ok(ActionResult::from(serde_json::json!({
+            "rows": rows,
+            "count": rows.len(),
+            "limit": limit,
+            "truncated": truncated,
+        })))
     }
 }
 
@@ -157,6 +295,7 @@ pub struct WriteRowAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WriteRowIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -186,7 +325,7 @@ impl Action for WriteRowAction {
             row,
             headers,
             replace_sheet,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.write_row input invalid: {e}")))?;
         ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
@@ -264,8 +403,8 @@ impl Action for WriteRowAction {
             Ok(existing_rows.len())
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)
         .map(|n| ActionResult::from(serde_json::json!({ "rows": n })))
     }
 }
@@ -275,6 +414,7 @@ pub struct SheetNamesAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SheetNamesIn {
+    #[serde(default)]
     file: PathBuf,
 }
 
@@ -291,16 +431,17 @@ impl Action for SheetNamesAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let SheetNamesIn { file } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("excel.sheet_names input invalid: {e}")))?;
+        let SheetNamesIn { file } =
+            serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                .map_err(|e| StepError::msg(format!("excel.sheet_names input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         let names = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
             let wb = open_workbook_auto(&file).map_err(|e| e.to_string())?;
             Ok(wb.sheet_names().to_vec())
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
         Ok(ActionResult::from(serde_json::json!({
             "sheets": names,
         })))
@@ -312,6 +453,7 @@ pub struct ReadCellAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadCellIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -331,8 +473,10 @@ impl Action for ReadCellAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ReadCellIn { file, sheet, cell } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("excel.read_cell input invalid: {e}")))?;
+        let input = input_with_xlsx_resource(ctx, input)?;
+        let ReadCellIn { file, sheet, cell } =
+            serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                .map_err(|e| StepError::msg(format!("excel.read_cell input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         let (row, col) = parse_a1(&cell).map_err(StepError::msg)?;
         let out = tokio::task::spawn_blocking(move || -> Result<Value, String> {
@@ -352,8 +496,8 @@ impl Action for ReadCellAction {
                 .unwrap_or(Value::Null))
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
         Ok(ActionResult::from(out))
     }
 }
@@ -363,6 +507,7 @@ pub struct WriteCellAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WriteCellIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -388,7 +533,7 @@ impl Action for WriteCellAction {
             sheet,
             cell,
             value,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.write_cell input invalid: {e}")))?;
         ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
@@ -413,8 +558,8 @@ impl Action for WriteCellAction {
             save_sheets(&file_for_task, &sheets, &interrupt)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -429,6 +574,7 @@ pub struct ReadRangeAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadRangeIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -448,8 +594,9 @@ impl Action for ReadRangeAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        let ReadRangeIn { file, sheet, range } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("excel.read_range input invalid: {e}")))?;
+        let ReadRangeIn { file, sheet, range } =
+            serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                .map_err(|e| StepError::msg(format!("excel.read_range input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         let ((r0, c0), (r1, c1)) = parse_range(&range).map_err(StepError::msg)?;
         let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
@@ -478,8 +625,8 @@ impl Action for ReadRangeAction {
             Ok(out)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
         Ok(ActionResult::from(Value::Array(rows)))
     }
 }
@@ -489,6 +636,7 @@ pub struct WriteRangeAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WriteRangeIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -516,7 +664,7 @@ impl Action for WriteRangeAction {
             sheet,
             cell,
             values,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.write_range input invalid: {e}")))?;
         ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
@@ -527,7 +675,9 @@ impl Action for WriteRangeAction {
         };
         let max_cols = values.iter().map(Vec::len).max().unwrap_or(0);
         if col0 + max_cols > u16::MAX as usize + 1 {
-            return Err(StepError::msg("excel.write_range column exceeds XLSX limit"));
+            return Err(StepError::msg(
+                "excel.write_range column exceeds XLSX limit",
+            ));
         }
 
         let file_for_task = file.clone();
@@ -555,8 +705,8 @@ impl Action for WriteRangeAction {
             Ok(cells)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -571,6 +721,7 @@ pub struct FindReplaceAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct FindReplaceIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -601,12 +752,14 @@ impl Action for FindReplaceAction {
             find,
             replace,
             whole_cell,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.find_replace input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
         if find.is_empty() {
-            return Err(StepError::msg("excel.find_replace `find` must not be empty"));
+            return Err(StepError::msg(
+                "excel.find_replace `find` must not be empty",
+            ));
         }
 
         let file_for_task = file.clone();
@@ -642,8 +795,8 @@ impl Action for FindReplaceAction {
             Ok(count)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -657,6 +810,7 @@ pub struct SetFormulaAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetFormulaIn {
+    #[serde(default)]
     file: PathBuf,
     #[serde(default)]
     sheet: Option<String>,
@@ -671,7 +825,7 @@ impl Action for SetFormulaAction {
         "excel.set_formula"
     }
     fn summary(&self) -> &'static str {
-        "Write a formula to a cell by A1 reference (create workbook if missing)"
+        "Write a formula to a cell by A1 reference (create workbook if missing); the formula is stored, NOT evaluated — reading the cell back yields the formula text/empty value, not a computed result (Excel/WPS computes it on open)"
     }
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<SetFormulaIn>);
@@ -683,14 +837,16 @@ impl Action for SetFormulaAction {
             sheet,
             cell,
             formula,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_formula input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
         let sheet = sheet.unwrap_or_else(|| "Sheet1".into());
         let (row, col) = parse_a1(&cell).map_err(StepError::msg)?;
         if col > u16::MAX as usize {
-            return Err(StepError::msg("excel.set_formula column exceeds XLSX limit"));
+            return Err(StepError::msg(
+                "excel.set_formula column exceeds XLSX limit",
+            ));
         }
 
         // Sentinel-wrap the formula so it survives the BTreeMap<…, Value> sheet
@@ -712,8 +868,8 @@ impl Action for SetFormulaAction {
             save_sheets(&file_for_task, &sheets, &interrupt)
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -760,6 +916,279 @@ where
         .map_err(|e| format!("excel umya write `{}`: {e:?}", file.display()))?;
     Ok(())
 }
+
+async fn umya_mutate_book<R, F>(ctx: &StepCtx, file: PathBuf, mutate: F) -> Result<R, StepError>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut umya_spreadsheet::Spreadsheet) -> Result<R, String> + Send + 'static,
+{
+    ctx.ensure_fs_read(&file)?;
+    ctx.ensure_fs_write(&file)?;
+    let interrupt = ctx.step_interrupt();
+    tokio::task::spawn_blocking(move || {
+        let mut book = umya_spreadsheet::reader::xlsx::read(&file)
+            .map_err(|e| format!("excel umya read `{}`: {e:?}", file.display()))?;
+        let result = mutate(&mut book)?;
+        if interrupt.is_interrupted() {
+            return Err(String::from(
+                "excel write-back interrupted (file untouched)",
+            ));
+        }
+        umya_spreadsheet::writer::xlsx::write(&book, &file)
+            .map_err(|e| format!("excel umya write `{}`: {e:?}", file.display()))?;
+        Ok(result)
+    })
+    .await
+    .map_err(|e| StepError::io(format!("excel structure task: {e}")))?
+    .map_err(StepError::io)
+}
+
+fn checked_structure_count(action: &str, count: u32) -> Result<u32, StepError> {
+    if count == 0 {
+        Err(StepError::msg(format!("{action}: `count` must be >= 1")))
+    } else {
+        Ok(count)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Workbook structure actions (sheets / rows / columns)
+// ─────────────────────────────────────────────────────────────────────────
+
+pub struct AddSheetAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddSheetIn {
+    #[serde(default)]
+    file: PathBuf,
+    name: String,
+}
+
+#[async_trait]
+impl Action for AddSheetAction {
+    fn id(&self) -> &'static str {
+        "excel.add_sheet"
+    }
+    fn summary(&self) -> &'static str {
+        "Add a worksheet to an existing workbook"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AddSheetIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let AddSheetIn { file, name } =
+            serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                .map_err(|e| StepError::msg(format!("excel.add_sheet input invalid: {e}")))?;
+        let out_name = name.clone();
+        umya_mutate_book(ctx, file.clone(), move |book| {
+            book.new_sheet(name).map_err(str::to_string)?;
+            Ok(())
+        })
+        .await?;
+        Ok(ActionResult::from(
+            serde_json::json!({"file": file, "sheet": out_name}),
+        ))
+    }
+}
+
+pub struct DeleteSheetAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeleteSheetIn {
+    #[serde(default)]
+    file: PathBuf,
+    sheet: String,
+}
+
+#[async_trait]
+impl Action for DeleteSheetAction {
+    fn id(&self) -> &'static str {
+        "excel.delete_sheet"
+    }
+    fn summary(&self) -> &'static str {
+        "Delete a worksheet from a workbook"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DeleteSheetIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DeleteSheetIn { file, sheet } =
+            serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                .map_err(|e| StepError::msg(format!("excel.delete_sheet input invalid: {e}")))?;
+        let target = sheet.clone();
+        umya_mutate_book(ctx, file.clone(), move |book| {
+            if book.get_sheet_count() <= 1 {
+                return Err("excel.delete_sheet: cannot remove the workbook's last sheet".into());
+            }
+            book.remove_sheet_by_name(&sheet).map_err(str::to_string)
+        })
+        .await?;
+        Ok(ActionResult::from(
+            serde_json::json!({"file": file, "sheet": target, "deleted": true}),
+        ))
+    }
+}
+
+pub struct RenameSheetAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RenameSheetIn {
+    #[serde(default)]
+    file: PathBuf,
+    sheet: String,
+    new_name: String,
+}
+
+#[async_trait]
+impl Action for RenameSheetAction {
+    fn id(&self) -> &'static str {
+        "excel.rename_sheet"
+    }
+    fn summary(&self) -> &'static str {
+        "Rename a worksheet"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RenameSheetIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let RenameSheetIn {
+            file,
+            sheet,
+            new_name,
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+            .map_err(|e| StepError::msg(format!("excel.rename_sheet input invalid: {e}")))?;
+        let old_name = sheet.clone();
+        let result_name = new_name.clone();
+        umya_mutate_book(ctx, file.clone(), move |book| {
+            let index = book
+                .get_sheet_collection_no_check()
+                .iter()
+                .position(|ws| ws.get_name() == sheet)
+                .ok_or_else(|| format!("sheet `{sheet}` not found"))?;
+            book.set_sheet_name(index, new_name).map_err(str::to_string)
+        })
+        .await?;
+        Ok(ActionResult::from(serde_json::json!({
+            "file": file,
+            "from": old_name,
+            "to": result_name,
+        })))
+    }
+}
+
+macro_rules! row_structure_action {
+    ($action:ident, $input:ident, $id:literal, $summary:literal, $method:ident) => {
+        pub struct $action;
+        #[derive(Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        struct $input {
+            #[serde(default)]
+    file: PathBuf,
+            sheet: String,
+            row: u32,
+            #[serde(default = "default_structure_count")]
+            count: u32,
+        }
+        #[async_trait]
+        impl Action for $action {
+            fn id(&self) -> &'static str { $id }
+            fn summary(&self) -> &'static str { $summary }
+            fn schema(&self) -> &'static Value {
+                static S: Lazy<Value> = Lazy::new(crate::schema::derive::<$input>);
+                &S
+            }
+            async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+                let $input { file, sheet, row, count } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                    .map_err(|e| StepError::msg(format!("{} input invalid: {e}", self.id())))?;
+                if row == 0 { return Err(StepError::msg(format!("{}: `row` must be >= 1", self.id()))); }
+                let count = checked_structure_count(self.id(), count)?;
+                let target_sheet = sheet.clone();
+                umya_mutate_book(ctx, file.clone(), move |book| {
+                    if book.get_sheet_by_name(&sheet).is_none() { return Err(format!("sheet `{sheet}` not found")); }
+                    book.$method(&sheet, &row, &count);
+                    Ok(())
+                }).await?;
+                Ok(ActionResult::from(serde_json::json!({"file": file, "sheet": target_sheet, "row": row, "count": count})))
+            }
+        }
+    };
+}
+
+macro_rules! column_structure_action {
+    ($action:ident, $input:ident, $id:literal, $summary:literal, $method:ident) => {
+        pub struct $action;
+        #[derive(Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        struct $input {
+            #[serde(default)]
+    file: PathBuf,
+            sheet: String,
+            column: String,
+            #[serde(default = "default_structure_count")]
+            count: u32,
+        }
+        #[async_trait]
+        impl Action for $action {
+            fn id(&self) -> &'static str { $id }
+            fn summary(&self) -> &'static str { $summary }
+            fn schema(&self) -> &'static Value {
+                static S: Lazy<Value> = Lazy::new(crate::schema::derive::<$input>);
+                &S
+            }
+            async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+                let $input { file, sheet, column, count } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
+                    .map_err(|e| StepError::msg(format!("{} input invalid: {e}", self.id())))?;
+                parse_col(&column).map_err(StepError::msg)?;
+                let count = checked_structure_count(self.id(), count)?;
+                let target_sheet = sheet.clone();
+                let target_column = column.to_ascii_uppercase();
+                let column_for_task = target_column.clone();
+                umya_mutate_book(ctx, file.clone(), move |book| {
+                    if book.get_sheet_by_name(&sheet).is_none() { return Err(format!("sheet `{sheet}` not found")); }
+                    book.$method(&sheet, &column_for_task, &count);
+                    Ok(())
+                }).await?;
+                Ok(ActionResult::from(serde_json::json!({"file": file, "sheet": target_sheet, "column": target_column, "count": count})))
+            }
+        }
+    };
+}
+
+const fn default_structure_count() -> u32 {
+    1
+}
+
+row_structure_action!(
+    InsertRowsAction,
+    InsertRowsIn,
+    "excel.insert_rows",
+    "Insert rows before a 1-based row index",
+    insert_new_row
+);
+row_structure_action!(
+    DeleteRowsAction,
+    DeleteRowsIn,
+    "excel.delete_rows",
+    "Delete rows from a 1-based row index",
+    remove_row
+);
+column_structure_action!(
+    InsertColumnsAction,
+    InsertColumnsIn,
+    "excel.insert_columns",
+    "Insert columns before an A1 column",
+    insert_new_column
+);
+column_structure_action!(
+    DeleteColumnsAction,
+    DeleteColumnsIn,
+    "excel.delete_columns",
+    "Delete columns from an A1 column",
+    remove_column
+);
 
 /// Parse a single column letter run (e.g. `A`, `AB`) into a 0-based column index.
 fn parse_col(s: &str) -> Result<usize, String> {
@@ -830,6 +1259,7 @@ pub struct SetStyleAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetStyleIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -881,7 +1311,9 @@ fn normalize_argb(s: &str) -> Result<String, String> {
     match h.len() {
         6 => Ok(format!("FF{}", h.to_ascii_uppercase())),
         8 => Ok(h.to_ascii_uppercase()),
-        _ => Err(format!("color `{s}` must be 6 (RGB) or 8 (ARGB) hex digits")),
+        _ => Err(format!(
+            "color `{s}` must be 6 (RGB) or 8 (ARGB) hex digits"
+        )),
     }
 }
 
@@ -913,7 +1345,7 @@ impl Action for SetStyleAction {
             wrap,
             number_format,
             border,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_style input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -921,28 +1353,46 @@ impl Action for SetStyleAction {
 
         // Pre-validate/normalize colors and enum strings off-thread so a bad
         // input fails fast with a clear message before the blocking work.
-        let font_color = font_color.map(|c| normalize_argb(&c)).transpose().map_err(StepError::msg)?;
-        let bg_color = bg_color.map(|c| normalize_argb(&c)).transpose().map_err(StepError::msg)?;
+        let font_color = font_color
+            .map(|c| normalize_argb(&c))
+            .transpose()
+            .map_err(StepError::msg)?;
+        let bg_color = bg_color
+            .map(|c| normalize_argb(&c))
+            .transpose()
+            .map_err(StepError::msg)?;
         let halign = match align.as_deref() {
             None => None,
             Some("left") => Some(umya_spreadsheet::HorizontalAlignmentValues::Left),
             Some("center") => Some(umya_spreadsheet::HorizontalAlignmentValues::Center),
             Some("right") => Some(umya_spreadsheet::HorizontalAlignmentValues::Right),
-            Some(o) => return Err(StepError::msg(format!("excel.set_style align must be left|center|right, got `{o}`"))),
+            Some(o) => {
+                return Err(StepError::msg(format!(
+                    "excel.set_style align must be left|center|right, got `{o}`"
+                )))
+            }
         };
         let valign_v = match valign.as_deref() {
             None => None,
             Some("top") => Some(umya_spreadsheet::VerticalAlignmentValues::Top),
             Some("middle") => Some(umya_spreadsheet::VerticalAlignmentValues::Center),
             Some("bottom") => Some(umya_spreadsheet::VerticalAlignmentValues::Bottom),
-            Some(o) => return Err(StepError::msg(format!("excel.set_style valign must be top|middle|bottom, got `{o}`"))),
+            Some(o) => {
+                return Err(StepError::msg(format!(
+                    "excel.set_style valign must be top|middle|bottom, got `{o}`"
+                )))
+            }
         };
         let border_style = match border.as_deref() {
             None => None,
             Some("thin") => Some(umya_spreadsheet::Border::BORDER_THIN),
             Some("medium") => Some(umya_spreadsheet::Border::BORDER_MEDIUM),
             Some("thick") => Some(umya_spreadsheet::Border::BORDER_THICK),
-            Some(o) => return Err(StepError::msg(format!("excel.set_style border must be thin|medium|thick, got `{o}`"))),
+            Some(o) => {
+                return Err(StepError::msg(format!(
+                    "excel.set_style border must be thin|medium|thick, got `{o}`"
+                )))
+            }
         };
 
         let file_for_task = file.clone();
@@ -996,8 +1446,8 @@ impl Action for SetStyleAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1011,6 +1461,7 @@ pub struct MergeCellsAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MergeCellsIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1040,7 +1491,7 @@ impl Action for MergeCellsAction {
             sheet,
             range,
             value,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.merge_cells input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1065,8 +1516,8 @@ impl Action for MergeCellsAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1080,6 +1531,7 @@ pub struct SetColumnWidthAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetColumnWidthIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1108,7 +1560,7 @@ impl Action for SetColumnWidthAction {
             sheet,
             columns,
             width,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_column_width input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1126,8 +1578,8 @@ impl Action for SetColumnWidthAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1141,6 +1593,7 @@ pub struct SetRowHeightAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetRowHeightIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1169,7 +1622,7 @@ impl Action for SetRowHeightAction {
             sheet,
             rows,
             height,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_row_height input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1186,8 +1639,8 @@ impl Action for SetRowHeightAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1201,6 +1654,7 @@ pub struct FreezePanesAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct FreezePanesIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1226,7 +1680,7 @@ impl Action for FreezePanesAction {
             file,
             sheet,
             top_left_cell,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.freeze_panes input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1256,8 +1710,8 @@ impl Action for FreezePanesAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1275,6 +1729,7 @@ pub struct AddChartAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddChartIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1336,7 +1791,7 @@ impl Action for AddChartAction {
             from_cell,
             to_cell,
             title,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.add_chart input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1392,8 +1847,8 @@ impl Action for AddChartAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1407,6 +1862,7 @@ pub struct SetConditionalFormatAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetConditionalFormatIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1445,8 +1901,9 @@ impl Action for SetConditionalFormatAction {
             operator,
             formula1,
             bg_color,
-        } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("excel.set_conditional_format input invalid: {e}")))?;
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?).map_err(|e| {
+            StepError::msg(format!("excel.set_conditional_format input invalid: {e}"))
+        })?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
         let op = match operator.as_str() {
@@ -1500,8 +1957,8 @@ impl Action for SetConditionalFormatAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1515,6 +1972,7 @@ pub struct AutofitColumnsAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AutofitColumnsIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1540,7 +1998,7 @@ impl Action for AutofitColumnsAction {
             file,
             sheet,
             columns,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.autofit_columns input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1558,8 +2016,8 @@ impl Action for AutofitColumnsAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1573,6 +2031,7 @@ pub struct SetCommentAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetCommentIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1605,7 +2064,7 @@ impl Action for SetCommentAction {
             cell,
             text,
             author,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_comment input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1628,8 +2087,8 @@ impl Action for SetCommentAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1643,6 +2102,7 @@ pub struct SetDataValidationAction;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetDataValidationIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1688,7 +2148,7 @@ impl Action for SetDataValidationAction {
             operator,
             formula1,
             formula2,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.set_data_validation input invalid: {e}")))?;
         ctx.ensure_fs_read(&file)?;
         ctx.ensure_fs_write(&file)?;
@@ -1715,7 +2175,9 @@ impl Action for SetDataValidationAction {
             }
             "whole" | "decimal" => {
                 let op_str = operator.as_deref().ok_or_else(|| {
-                    StepError::msg("excel.set_data_validation `whole`/`decimal` requires `operator`")
+                    StepError::msg(
+                        "excel.set_data_validation `whole`/`decimal` requires `operator`",
+                    )
                 })?;
                 let op = match op_str {
                     "between" => umya_spreadsheet::DataValidationOperatorValues::Between,
@@ -1727,9 +2189,7 @@ impl Action for SetDataValidationAction {
                     "greater_equal" => {
                         umya_spreadsheet::DataValidationOperatorValues::GreaterThanOrEqual
                     }
-                    "less_equal" => {
-                        umya_spreadsheet::DataValidationOperatorValues::LessThanOrEqual
-                    }
+                    "less_equal" => umya_spreadsheet::DataValidationOperatorValues::LessThanOrEqual,
                     o => {
                         return Err(StepError::msg(format!(
                             "excel.set_data_validation operator invalid: `{o}`"
@@ -1737,7 +2197,9 @@ impl Action for SetDataValidationAction {
                     }
                 };
                 let f1 = formula1.ok_or_else(|| {
-                    StepError::msg("excel.set_data_validation `whole`/`decimal` requires `formula1`")
+                    StepError::msg(
+                        "excel.set_data_validation `whole`/`decimal` requires `formula1`",
+                    )
                 })?;
                 let needs_two = matches!(op_str, "between" | "not_between");
                 if needs_two && formula2.is_none() {
@@ -1788,8 +2250,8 @@ impl Action for SetDataValidationAction {
             })
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
 
         Ok(ActionResult::from(serde_json::json!({
             "file": file,
@@ -1816,6 +2278,7 @@ enum ColumnRef {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct LookupIn {
+    #[serde(default)]
     file: PathBuf,
     /// 工作表名;留空取第一个工作表。
     #[serde(default)]
@@ -1927,7 +2390,7 @@ impl Action for LookupAction {
             header_row,
             all_matches,
             default,
-        } = serde_json::from_value(input)
+        } = serde_json::from_value(input_with_xlsx_resource(ctx, input)?)
             .map_err(|e| StepError::msg(format!("excel.lookup input invalid: {e}")))?;
         // 只读不写,仅需 fs.read(与 read_rows/read_range 一致,走 calamine)。
         ctx.ensure_fs_read(&file)?;
@@ -2014,8 +2477,8 @@ impl Action for LookupAction {
             }
         })
         .await
-        .map_err(|e| StepError::msg(format!("excel join: {e}")))?
-        .map_err(StepError::msg)?;
+        .map_err(|e| StepError::io(format!("excel join: {e}")))?
+        .map_err(StepError::io)?;
         Ok(ActionResult::from(out))
     }
 }

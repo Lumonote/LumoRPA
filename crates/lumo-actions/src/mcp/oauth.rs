@@ -55,26 +55,50 @@ pub enum OAuthError {
 
 #[async_trait]
 pub trait OAuthTransport: Send + Sync {
-    async fn exchange_code(&self, code: &str, verifier: &str) -> Result<OAuthTokenResponse, OAuthError>;
+    async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<OAuthTokenResponse, OAuthError>;
     async fn refresh(&self, refresh_token: &str) -> Result<OAuthTokenResponse, OAuthError>;
 }
 
-pub fn begin_pkce(metadata: OAuthClientMetadata, state: String, verifier: String) -> Result<OAuthPkceSession, OAuthError> {
+pub fn begin_pkce(
+    metadata: OAuthClientMetadata,
+    state: String,
+    verifier: String,
+) -> Result<OAuthPkceSession, OAuthError> {
     if state.len() < 7 || verifier.len() < 16 {
-        return Err(OAuthError::InvalidConfiguration("state or PKCE verifier is too short".into()));
+        return Err(OAuthError::InvalidConfiguration(
+            "state or PKCE verifier is too short".into(),
+        ));
     }
     let mut url = reqwest::Url::parse(&metadata.authorization_endpoint)
         .map_err(|error| OAuthError::InvalidConfiguration(error.to_string()))?;
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", &metadata.client_id)
         .append_pair("redirect_uri", &metadata.redirect_uri)
-        .append_pair("scope", &metadata.scopes.iter().cloned().collect::<Vec<_>>().join(" "))
+        .append_pair(
+            "scope",
+            &metadata
+                .scopes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
-    Ok(OAuthPkceSession { metadata, state, verifier, authorization_url: url.to_string() })
+    Ok(OAuthPkceSession {
+        metadata,
+        state,
+        verifier,
+        authorization_url: url.to_string(),
+    })
 }
 
 pub async fn complete_authorization(
@@ -94,12 +118,22 @@ pub async fn refresh_if_needed(
     token: OAuthTokenResponse,
     expired: bool,
 ) -> Result<OAuthTokenResponse, OAuthError> {
-    if !expired { return Ok(token); }
-    let refresh = token.refresh_token.as_deref().ok_or(OAuthError::RefreshTokenMissing)?;
+    if !expired {
+        return Ok(token);
+    }
+    let refresh = token
+        .refresh_token
+        .as_deref()
+        .ok_or(OAuthError::RefreshTokenMissing)?;
     transport.refresh(refresh).await
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() { return false; }
-    left.iter().zip(right).fold(0_u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
 }

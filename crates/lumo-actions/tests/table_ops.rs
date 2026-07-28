@@ -695,11 +695,8 @@ async fn sort_multi_is_numeric_not_lexical() {
 
 #[tokio::test]
 async fn sort_multi_requires_a_key() {
-    let err = run(
-        "data.sort_multi",
-        json!({"items": [{"n": 1}], "keys": []}),
-    )
-    .await
-    .unwrap_err();
+    let err = run("data.sort_multi", json!({"items": [{"n": 1}], "keys": []}))
+        .await
+        .unwrap_err();
     assert!(err.contains("at least one key"), "got: {err}");
 }

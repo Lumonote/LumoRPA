@@ -1,4 +1,4 @@
-import { readyTopology } from "./agent-events.js";
+import { applyAgentEvent, createRunProjection, readyTopology } from "./agent-events.js";
 import { renderConfirmation, renderRunControls, runAgentControl } from "./agent-confirmation.js";
 import { renderAgentLog } from "./agent-feedback.js";
 
@@ -55,8 +55,26 @@ export function renderRunMetrics(projection) {
   return `<span>${escapeHtml(String(projection.status || "idle").toUpperCase())}</span><strong>${completed}/${values.length}</strong><span>${failed} failed · seq ${projection.seq || 0}</span>`;
 }
 
+export function renderRunHistoryOptions(runs = [], selected = "") {
+  return runs.map((run) => `<option value="${escapeHtml(run.id)}"${run.id === selected ? " selected" : ""}>${escapeHtml((run.utterance || run.id).slice(0, 48))} · ${escapeHtml(run.state || "unknown")}</option>`).join("");
+}
+
+export function renderVoiceHistory(entries = []) {
+  if (!entries.length) return '<div class="mc-empty">还没有语音指令记录，说一句「打开任务中心」试试。</div>';
+  return `<ul class="mc-voice-list">${entries.slice(0, 20).map((entry) => `<li class="${entry.ok === false ? "is-bad" : "is-ok"}"><time>${escapeHtml(new Date(Number(entry.atMs) || 0).toLocaleTimeString())}</time><strong>${escapeHtml(entry.utterance || "")}</strong><span>${escapeHtml(entry.intent || "")}</span><em>${escapeHtml(entry.message || "")}</em></li>`).join("")}</ul>`;
+}
+
+export async function refreshVoiceHistory(scope, call) {
+  const box = (scope || document).querySelector?.("[data-mc-voice-history]");
+  if (!box) return;
+  try {
+    box.innerHTML = renderVoiceHistory(await call("voice_command_history"));
+  } catch { /* 保留旧内容 */ }
+}
+
 export function updateMissionControl(root, projection) {
   if (!root) return;
+  if (root.dataset.selectedRun && root.dataset.selectedRun !== projection.runId) return;
   const rawTopology = readyTopology(projection);
   const topology = virtualizeTopology(rawTopology, { startLane: Number(root.dataset.startLane || 0), laneCount: Number(root.dataset.laneCount || 12) });
   root.querySelector("[data-mc-topology]").innerHTML = renderTopology(topology);
@@ -70,6 +88,21 @@ export function updateMissionControl(root, projection) {
 
 export function mountMissionControl(root, projection, call = async () => {}) {
   if (!root) return;
+  let currentProjection = projection;
+  const selector = document.createElement("select");
+  selector.dataset.mcRunSelect = "";
+  selector.setAttribute("aria-label", "选择 Agent 运行历史");
+  root.querySelector(".mc-head")?.append(selector);
+  call("agent_run_list", { limit: 50 }).then((runs) => {
+    selector.innerHTML = renderRunHistoryOptions(runs, projection.runId);
+  }).catch(() => {});
+  selector.addEventListener("change", async () => {
+    root.dataset.selectedRun = selector.value;
+    const events = await call("agent_events", { runId: selector.value, afterSeq: 0 });
+    currentProjection = createRunProjection(selector.value);
+    for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
+    updateMissionControl(root, currentProjection);
+  });
   root.addEventListener("click", (event) => {
     const zoom = event.target.closest("[data-mc-zoom]");
     if (zoom) {
@@ -92,7 +125,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     const node = event.target.closest("[data-node-id]");
     if (!node) return;
     root.dataset.selectedNode = node.dataset.nodeId;
-    updateMissionControl(root, projection);
+    updateMissionControl(root, currentProjection);
   });
   root.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
@@ -102,5 +135,6 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     event.preventDefault();
     nodes[Math.min(nodes.length - 1, Math.max(0, index + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1)))]?.focus();
   });
-  updateMissionControl(root, projection);
+  refreshVoiceHistory(root, call);
+  updateMissionControl(root, currentProjection);
 }

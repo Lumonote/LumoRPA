@@ -80,7 +80,10 @@ async fn request_applies_bearer_auth_header() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/secure"))
-        .and(wiremock::matchers::header("authorization", "Bearer tok-123"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer tok-123",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
         .mount(&server)
         .await;
@@ -599,7 +602,10 @@ async fn request_mtls_errors_on_missing_cert_file() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("mtls") && err.contains("read cert"), "got: {err}");
+    assert!(
+        err.contains("mtls") && err.contains("read cert"),
+        "got: {err}"
+    );
 }
 
 #[tokio::test]

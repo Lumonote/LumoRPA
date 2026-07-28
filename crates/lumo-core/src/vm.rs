@@ -13,7 +13,7 @@
 use crate::{
     action::{ActionRef, ActionResult},
     ai_hook::{AiCallUsage, AiHookProvider},
-    ctx::{CancelToken, StepCtx},
+    ctx::{CancelToken, StepCtx, StepEvent, StepObserver},
     error::{ErrorKind, ExecError, StepError},
     registry::ActionRegistry,
 };
@@ -103,6 +103,10 @@ pub struct FlowVm {
     /// P1（人机交互）：宿主注入的 human prompt 通道，播种进每个 run 的
     /// `StepCtx`。`None`（默认）⇒ `human.*` 动作报"宿主不支持人机交互"。
     human_prompter: Option<Arc<dyn crate::human::HumanPrompter>>,
+    /// P2-7（进度事件，引擎侧 API）：宿主注册的可选 on_step 观察者，收
+    /// step 开始/结束与 `ctx.log` 行（见 [`StepEvent`]）。`None`（默认）⇒
+    /// 不发事件、零开销，行为与旧版一致。
+    on_step: Option<StepObserver>,
 }
 
 impl FlowVm {
@@ -122,7 +126,43 @@ impl FlowVm {
             run_id_override: None,
             artifacts_dir: None,
             human_prompter: None,
+            on_step: None,
         }
+    }
+
+    /// 架构 P0-1:从父运行的 [`StepCtx`] 派生子流程 VM —— `flow.call` /
+    /// `skill.invoke` 的唯一构造入口,一处继承父运行的执行环境:
+    ///   * cancel:克隆**同一**令牌(Arc 同源),父取消 → 子流程 `select!`
+    ///     判死,其 `StepInterrupt` 一并翻转,子流程 `spawn_blocking` 的副作用
+    ///     不再落地;
+    ///   * step_timeout / artifacts_dir / human prompter / vault 身份 / AI
+    ///     provider:子流程与父运行同规——`human.*` 不再必炸、vault 不断链;
+    ///   * repo:子 run 以自己的 run_id 独立落库(trigger_kind 由调用方标注);
+    ///   * skill_depth:+1 内建在此(防漏加导致递归失控),调用方仍先做上限检查。
+    ///
+    /// 能力钳制这里看不到子流程的声明,由调用方 clamp 后经
+    /// [`Self::with_capability_override`] 补上(只收不放)。
+    pub fn child_of(ctx: &StepCtx) -> Self {
+        let mut vm = Self::new(ctx.registry.clone(), ctx.repo().cloned());
+        vm.skill_depth = ctx.skill_depth() + 1;
+        vm.cancel = ctx.cancel_token();
+        vm.step_timeout = ctx.step_timeout();
+        vm.vault_identity = ctx.vault_identity();
+        vm.artifacts_dir = ctx.artifacts_dir().cloned();
+        vm.human_prompter = ctx.human_prompter();
+        vm.ai_provider = ctx.ai_provider().cloned();
+        // P2-7:进度观察者一并继承 —— 子流程步骤事件汇入同一通道,事件自带
+        // 各自的 run_id,宿主可按 run 分流。
+        vm.on_step = ctx.on_step();
+        vm
+    }
+
+    /// P2-7:注册可选 on_step 进度观察者(step 开始/结束/日志行,见
+    /// [`StepEvent`])。事件在引擎执行线程同步发出,观察者必须快速返回。
+    /// `None`(默认)保持原行为、零开销。
+    pub fn with_on_step(mut self, obs: Option<StepObserver>) -> Self {
+        self.on_step = obs;
+        self
     }
 
     /// P1（人机交互）：注入宿主的 [`crate::human::HumanPrompter`]，`human.*`
@@ -325,6 +365,7 @@ impl FlowVm {
         .with_resume_memo(self.load_resume_memo())
         .with_debug(self.build_debug_controller())
         .with_human_prompter(self.human_prompter.clone())
+        .with_on_step(self.on_step.clone())
         .with_resources(flow.spec.resources.clone());
         // X-07：仅在宿主显式开启时给 ctx 接上 artifacts 目录——StepCtx 的
         // builder 收 PathBuf 而非 Option，这里用 if-let 保持未开启路径零开销。
@@ -444,6 +485,33 @@ async fn wait_timeout(limit: Option<Duration>) {
     }
 }
 
+/// P1-4：human 步骤的步级超时余量。有效上限抬到 max(全局步级超时, 自身等待
+/// 上限 + 本余量)：动作内部的超时 sleep 与 VM 的 `wait_timeout` 几乎同刻起跑，
+/// 二者等长时 `select!(biased)` 会先分辨 VM 超时臂，把"回落 default"的软超时
+/// 打成硬步级超时 —— 余量保证动作自身的超时语义（input/confirm 回落 default、
+/// approve 报 Timeout）总是先分辨。
+const HUMAN_STEP_TIMEOUT_GRACE_MS: u64 = 1_000;
+
+/// P1-4：计算一步的有效步级超时。`human.*` 的等待上限（自身 `timeout_ms`，
+/// 默认 1 小时）通常远大于宿主全局步级超时（桌面端默认 10 分钟），不抬升的话
+/// 长审批必被步级超时截杀，而 `human.approve` 的超时语义是"拒绝"——一次静默
+/// 误拒。对 "human." 前缀的步骤取 max(全局步级超时, 自身等待上限 + 小幅余量)；
+/// 非 human 步骤原样返回，human 步也仍有硬上限（不做完全豁免）。
+/// `input` 是渲染 + vault 解析后的动作输入，`timeout_ms` 非法/缺失时回落
+/// [`crate::human::DEFAULT_HUMAN_TIMEOUT_MS`]（与动作层 serde 默认值同源）。
+fn human_aware_step_limit(base: Option<Duration>, action: &str, input: &Value) -> Option<Duration> {
+    let base = base?;
+    if !action.starts_with("human.") {
+        return Some(base);
+    }
+    let wait_ms = input
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::human::DEFAULT_HUMAN_TIMEOUT_MS);
+    let human_limit = Duration::from_millis(wait_ms.saturating_add(HUMAN_STEP_TIMEOUT_GRACE_MS));
+    Some(base.max(human_limit))
+}
+
 async fn execute_step(
     ctx: &mut StepCtx,
     step: &Step,
@@ -486,6 +554,15 @@ async fn execute_step(
     if ctx.is_debug_paused() {
         return Err(ExecError::Paused);
     }
+
+    // P2-7:进度事件 —— 步骤已通过取消/断点闸门,即将进入 `when` 求值与执行。
+    // 控制流容器与叶子动作都会发;未注册观察者时零分配。
+    ctx.emit_event(|| StepEvent::StepStarted {
+        run_id: ctx.run_id().to_string(),
+        path: path.clone(),
+        step_id: step.id.clone(),
+        action: step.action.clone(),
+    });
 
     if let Some(cond) = &step.when {
         // B1 (F-14): evaluate `when` as a boolean expression (operators +
@@ -696,7 +773,9 @@ async fn execute_step(
         // and carry only an owned outcome out — freeing `ctx` for the persist
         // calls below. `biased` makes cancel/timeout win deterministically.
         let cancel = ctx.cancel_token();
-        let limit = ctx.step_timeout();
+        // P1-4：human.* 步骤把步级超时抬到 max(全局步级超时, 自身等待上限)，
+        // 其余步骤维持全局步级超时不变 —— 见 `human_aware_step_limit`。
+        let limit = human_aware_step_limit(ctx.step_timeout(), &step.action, &action_input);
         // P0-2:为本 attempt 装填步级中断位。`select!` 超时/取消只能 drop 动作
         // future,动作里 `spawn_blocking` 的阻塞任务不会随之停止;判死后对该位
         // 置 true,阻塞闭包在循环/写回(commit)边界检查它提前退出,副作用不落地。
@@ -1172,6 +1251,19 @@ async fn run_for_each(
         .and_then(Value::as_str)
         .unwrap_or("item")
         .to_string();
+    let parallel = rendered
+        .get("parallel")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_concurrency = rendered
+        .get("max_concurrency")
+        .and_then(Value::as_u64)
+        .unwrap_or(8) as usize;
+    if max_concurrency == 0 {
+        return Err(ExecError::Other(anyhow::anyhow!(
+            "control.for_each `max_concurrency` must be >= 1"
+        )));
+    }
 
     let body = step.do_.as_ref().ok_or_else(|| {
         ExecError::Other(anyhow::anyhow!("control.for_each requires `do:` block"))
@@ -1190,32 +1282,82 @@ async fn run_for_each(
 
     let mut iters = 0u64;
     let mut result = Ok(());
-    for (idx, item) in arr.iter().enumerate() {
-        ctx.push_binding(&bind, item.clone());
-        // Also expose as `row` so flow authors can use the more readable
-        // `{{ row.field }}` even when the binding name is `item`.
-        ctx.push_binding("row", item.clone());
-        ctx.push_binding("index", Value::from(idx as i64));
-        result = run_block_boxed(ctx, body, Some(format!("{path}[{idx}]")), depth + 1).await;
-        ctx.clear_binding(&bind);
-        ctx.clear_binding("row");
-        ctx.clear_binding("index");
-        // 指令集 P1:break / continue 信号在最近的循环容器处消化(语义同
-        // run_for)——break 终止迭代,continue 进入下一个元素。
-        match &result {
-            Err(ExecError::Break { .. }) => {
-                result = Ok(());
+    if !parallel {
+        for (idx, item) in arr.iter().enumerate() {
+            ctx.push_binding(&bind, item.clone());
+            // Also expose as `row` so flow authors can use the more readable
+            // `{{ row.field }}` even when the binding name is `item`.
+            ctx.push_binding("row", item.clone());
+            ctx.push_binding("index", Value::from(idx as i64));
+            result = run_block_boxed(ctx, body, Some(format!("{path}[{idx}]")), depth + 1).await;
+            ctx.clear_binding(&bind);
+            ctx.clear_binding("row");
+            ctx.clear_binding("index");
+            match &result {
+                Err(ExecError::Break { .. }) => {
+                    result = Ok(());
+                    break;
+                }
+                Err(ExecError::Continue { .. }) => {
+                    result = Ok(());
+                    iters += 1;
+                    continue;
+                }
+                Err(_) => break,
+                Ok(()) => {}
+            }
+            iters += 1;
+        }
+    } else {
+        let mut offset = 0usize;
+        while offset < arr.len() {
+            let end = (offset + max_concurrency).min(arr.len());
+            let mut iteration_state: Vec<(StepCtx, usize)> = arr[offset..end]
+                .iter()
+                .enumerate()
+                .map(|(local, item)| {
+                    let index = offset + local;
+                    let child = ctx.fork();
+                    child.push_binding(&bind, item.clone());
+                    child.push_binding("row", item.clone());
+                    child.push_binding("index", Value::from(index as i64));
+                    (child, index)
+                })
+                .collect();
+            let futures: Vec<_> = iteration_state
+                .iter_mut()
+                .map(|(child, index)| {
+                    run_block_boxed(child, body, Some(format!("{path}[{index}]")), depth + 1)
+                })
+                .collect();
+            let chunk_results = futures::future::join_all(futures).await;
+            for (child, _) in &mut iteration_state {
+                child.clear_binding(&bind);
+                child.clear_binding("row");
+                child.clear_binding("index");
+                ctx.merge_branch(child);
+            }
+
+            let mut stop = false;
+            for iteration_result in chunk_results {
+                match iteration_result {
+                    Ok(()) | Err(ExecError::Continue { .. }) => iters += 1,
+                    Err(ExecError::Break { .. }) => {
+                        stop = true;
+                        break;
+                    }
+                    Err(error) => {
+                        result = Err(error);
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            if stop {
                 break;
             }
-            Err(ExecError::Continue { .. }) => {
-                result = Ok(());
-                iters += 1;
-                continue;
-            }
-            Err(_) => break,
-            Ok(()) => {}
+            offset = end;
         }
-        iters += 1;
     }
     // P1-1 / F-20: a hard interrupt (cancel / timeout / breakpoint pause) inside
     // the loop body unwinds the run — rethrow without recording the loop as a
@@ -1483,6 +1625,15 @@ async fn run_parallel(
     let started_at = Utc::now();
     let rendered = render_value_inline(ctx, &step.with)?;
     let input_hash = Sha256::digest(rendered.to_string().as_bytes()).to_vec();
+    let max_concurrency = rendered
+        .get("max_concurrency")
+        .and_then(Value::as_u64)
+        .unwrap_or(8) as usize;
+    if max_concurrency == 0 {
+        return Err(ExecError::Other(anyhow::anyhow!(
+            "control.parallel `max_concurrency` must be >= 1"
+        )));
+    }
 
     // Branches come from either `branches: [[...], [...]]` or — for back-compat
     // and one-step branches — from `do: [...]` where each entry is its own
@@ -1523,14 +1674,16 @@ async fn run_parallel(
         .map(|(i, body)| (ctx.fork(), body, format!("{path}/branch[{i}]")))
         .collect();
 
-    let futs: Vec<_> = branch_state
-        .iter_mut()
-        .map(|(c, body, branch_path)| {
-            run_block_boxed(c, body.as_slice(), Some(branch_path.clone()), depth + 1)
-        })
-        .collect();
-
-    let results = futures::future::join_all(futs).await;
+    let mut results = Vec::with_capacity(branch_state.len());
+    for chunk in branch_state.chunks_mut(max_concurrency) {
+        let futs: Vec<_> = chunk
+            .iter_mut()
+            .map(|(c, body, branch_path)| {
+                run_block_boxed(c, body.as_slice(), Some(branch_path.clone()), depth + 1)
+            })
+            .collect();
+        results.extend(futures::future::join_all(futs).await);
+    }
 
     // P0-4: fold each branch's isolated state back into the parent, in branch
     // order for deterministic last-writer-wins on any colliding keys.
@@ -1670,6 +1823,16 @@ async fn persist_control_result(
 
 async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
     ctx.mark_step_state(row.state);
+    // P2-7:进度事件在持久化点发出(state 与 step_runs 行一致)。放在 repo
+    // 判空之前 —— 无 repo 的运行(`lumo run --no-store`)进度事件照发。
+    ctx.emit_event(|| StepEvent::StepFinished {
+        run_id: ctx.run_id().to_string(),
+        path: row.path.to_string(),
+        step_id: row.step_id.to_string(),
+        state: row.state.to_string(),
+        attempt: row.attempt,
+        error: row.error.clone(),
+    });
     // A1: clone the (Arc-backed) repo handle out so the blocking SQLite write
     // can move onto tokio's blocking pool. `seq` is assigned and the owned row
     // built *here*, synchronously, before the hand-off — so rows keep their
@@ -1679,9 +1842,16 @@ async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
         return;
     };
     let step_id = row.step_id.to_string();
-    let stored = StepRunRow {
+    // P1-3(vars_json 治理):seq 分配与 vars 去重判定在同一临界区完成。
+    // `Some(vars)` 是锁内的 O(1) Arc 克隆;深拷贝/超限截断/序列化全部移到
+    // 下方阻塞线程,既不持 ctx 锁(不再阻塞 parallel 分支)也不占异步线程。
+    // `None` ⇒ vars 与上一条 seq 行相同,落 NULL(`Repo::list_steps` 读取侧
+    // 向前回溯补齐)。注:某行 INSERT 失败(仅 warn)后,后续 NULL 行的回溯
+    // 会跳过缺失行 —— 与该失败路径既有的"整行丢失"损失同级,可接受。
+    let (seq, vars) = ctx.next_seq_with_vars();
+    let mut stored = StepRunRow {
         flow_run_id: ctx.run_id().to_string(),
-        seq: ctx.next_step_seq(),
+        seq,
         path: row.path.to_string(),
         parent_path: row.parent_path.map(ToString::to_string),
         depth: row.depth,
@@ -1695,15 +1865,41 @@ async fn persist_step(ctx: &StepCtx, row: StepPersist<'_>) {
         started_at: Some(row.started_at),
         finished_at: Some(row.finished_at),
         span_id: None,
-        vars_json: Some(ctx.vars_snapshot()),
+        vars_json: None, // 阻塞线程上按 vars 填充(见上)
     };
     // The parking_lot Mutex<Connection> + SQLite write (which can block up to
     // `busy_timeout` under contention) runs on a blocking thread; the async
     // worker stays free to drive other steps / parallel branches meanwhile.
-    match tokio::task::spawn_blocking(move || repo.insert_step(&stored)).await {
+    match tokio::task::spawn_blocking(move || {
+        stored.vars_json = vars.as_deref().map(vars_json_for_store);
+        repo.insert_step(&stored)
+    })
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!("persist_step `{step_id}`: {e}"),
         Err(e) => tracing::warn!("persist_step `{step_id}` join: {e}"),
+    }
+}
+
+/// P1-3:每步落库的 vars_json 快照序列化字节上限。超过则不存全量,改存截断
+/// 标记 `{"__truncated__": true, "bytes": N}`(N 为原快照的序列化字节数),
+/// 回放 UI 据 `__truncated__` 键识别。取舍:整体替换而非逐字段裁剪 —— 实现
+/// 与识别都最简单,且超限快照(单值即可 >256KB)本身已失去逐步 diff 的意义;
+/// 需要完整值时看对应步骤的 output_json / 产物。
+pub const VARS_JSON_MAX_BYTES: usize = 256 * 1024;
+
+/// P1-3:构造要落库的 vars_json。只在阻塞线程上调用(锁外),深拷贝与序列化
+/// 不再持 ctx 锁。序列化失败(实际不可达:`Map<String, Value>` 总可序列化)
+/// 按超限处理,保证 INSERT 不会因 vars 而失败。
+fn vars_json_for_store(vars: &serde_json::Map<String, Value>) -> Value {
+    let bytes = serde_json::to_string(vars)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX);
+    if bytes > VARS_JSON_MAX_BYTES {
+        serde_json::json!({ "__truncated__": true, "bytes": bytes })
+    } else {
+        Value::Object(vars.clone())
     }
 }
 
@@ -2134,6 +2330,33 @@ mod tests {
         assert!(retry_matches(&on, ErrorKind::Other));
     }
 
+    /// P1-3:vars_json 截断 —— 超过 [`VARS_JSON_MAX_BYTES`] 存标记而非全量,
+    /// 标记形状固定为 `{"__truncated__": true, "bytes": N}` 供回放 UI 识别。
+    #[test]
+    fn vars_json_for_store_truncates_oversized_snapshots() {
+        let mut small = serde_json::Map::new();
+        small.insert("a".into(), Value::from(1));
+        assert_eq!(
+            vars_json_for_store(&small),
+            serde_json::json!({ "a": 1 }),
+            "under the cap the full snapshot is stored"
+        );
+
+        let mut big = serde_json::Map::new();
+        big.insert(
+            "blob".into(),
+            Value::String("x".repeat(VARS_JSON_MAX_BYTES + 1)),
+        );
+        let stored = vars_json_for_store(&big);
+        assert_eq!(stored["__truncated__"], Value::Bool(true));
+        let bytes = stored["bytes"].as_u64().expect("bytes recorded") as usize;
+        assert!(
+            bytes > VARS_JSON_MAX_BYTES,
+            "recorded size {bytes} reflects the oversized serialized snapshot"
+        );
+        assert!(stored.get("blob").is_none(), "oversized payload is dropped");
+    }
+
     /// P1-6:lumo-dsl 的 `RETRY_BACKOFF_KINDS` 白名单必须覆盖且仅覆盖
     /// `compute_backoff` 实际区分的策略(精确匹配 "exponential",其余按 fixed)。
     /// 漂移时在这里炸,而不是 validate 拒绝运行期支持的值(或放过会静默降级的值)。
@@ -2146,5 +2369,50 @@ mod tests {
         // exponential:initial_ms * 2^(attempt-1)。
         assert_eq!(compute_backoff("exponential", 100, 1), 100);
         assert_eq!(compute_backoff("exponential", 100, 3), 400);
+    }
+
+    struct NoopPrompter;
+    #[async_trait::async_trait]
+    impl crate::human::HumanPrompter for NoopPrompter {
+        async fn prompt(
+            &self,
+            _req: crate::human::HumanPromptRequest,
+        ) -> Result<crate::human::HumanResponse, crate::error::StepError> {
+            Err(crate::error::StepError::msg("noop"))
+        }
+    }
+
+    /// 架构 P0-1:child_of 必须逐项继承父运行的执行环境,且取消是**同一**令牌。
+    #[test]
+    fn child_of_inherits_parent_run_environment() {
+        let cancel = CancelToken::new();
+        let repo = Repo::open_in_memory().expect("repo");
+        let ctx = StepCtx::new(
+            "run".into(),
+            "flow".into(),
+            ActionRegistry::new(),
+            Some(repo),
+            Value::Null,
+            Capabilities::default(),
+            Vec::new(),
+        )
+        .with_skill_depth(2)
+        .with_cancel(Some(cancel.clone()))
+        .with_step_timeout(Some(Duration::from_millis(1234)))
+        .with_human_prompter(Some(Arc::new(NoopPrompter)))
+        .with_artifacts_dir(std::path::PathBuf::from("/artifacts-root"));
+
+        let vm = FlowVm::child_of(&ctx);
+        assert_eq!(vm.skill_depth, 3, "sub-flow depth bumps by exactly one");
+        assert_eq!(vm.step_timeout, Some(Duration::from_millis(1234)));
+        assert!(vm.repo.is_some(), "repo inherited so the sub run persists");
+        assert!(vm.human_prompter.is_some(), "human prompter inherited");
+        assert_eq!(
+            vm.artifacts_dir.as_deref(),
+            Some(std::path::Path::new("/artifacts-root"))
+        );
+        // 同一取消令牌(Arc 同源):父取消 → 子 VM 立即可见。
+        cancel.cancel();
+        assert!(vm.cancel.as_ref().is_some_and(CancelToken::is_cancelled));
     }
 }

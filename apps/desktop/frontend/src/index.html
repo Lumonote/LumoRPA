@@ -112,6 +112,7 @@
             <button class="primary" id="runBtn">▶ 运行</button>
             <button id="runStepBtn" title="运行当前选中节点">▷ 单步</button>
             <button id="debugBtn" title="断点调试：在设了断点的节点执行前暂停，可单步 / 继续 / 停止 (F-20)">🐞 调试</button>
+            <button id="cancelRunBtn" hidden title="取消进行中的运行 (P0-1)：中断当前步并按 cancelled 收场">⏹ 取消运行</button>
             <span class="spacer"></span>
             <button id="saveFlowBtn">💾 保存</button>
             <button class="ghost" id="resetInputBtn">重置输入</button>
@@ -128,6 +129,11 @@
             <!-- Graph view -->
             <div class="view" id="view-graph">
               <div class="graph-wrap">
+                <div class="graph-controls" aria-label="Graph zoom controls">
+                  <button class="icon ghost" id="graphZoomOut" title="缩小">−</button>
+                  <button class="ghost" id="graphZoomReset" title="重置视图">1:1</button>
+                  <button class="icon ghost" id="graphZoomIn" title="放大">＋</button>
+                </div>
                 <svg class="graph-svg" id="graphSvg">
                   <defs>
                     <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="strokeWidth" markerWidth="7" markerHeight="7" orient="auto">
@@ -412,13 +418,17 @@
                 <div class="panel-head"><h2>桌面语音与隐私</h2></div>
                 <div class="panel-body" id="voiceSettingsBox"></div>
               </section>
+              <section class="panel" style="grid-column:1/-1">
+                <div class="panel-head"><h2>安全更新中心</h2></div>
+                <div class="panel-body" id="updateCenterBox"></div>
+              </section>
             </div>
           </div>
         </section>
         <section id="capabilityHubView" class="capability-hub" style="grid-column: 1 / -1; display: none" aria-label="Capability Hub">
           <header class="hub-hero"><div><span class="hub-kicker">LUMO CONTROL PLANE / 01</span><h1>Capability Hub</h1><p>Discover, govern, and compose the intelligence available to every local agent.</p></div><div class="hub-status"><span class="hub-pulse"></span><span data-hub-errors>Checking capability services…</span></div></header>
           <nav class="hub-nav" aria-label="Capability Hub sections">
-            <button class="is-active" data-hub-section="overview">Overview</button><button data-hub-section="skills">Skills</button><button data-hub-section="servers">MCP Servers</button><button data-hub-section="catalog">Capability Catalog</button><button data-hub-section="profiles">Agent Profiles</button><button data-hub-section="permissions">Permissions</button><button data-hub-section="audit">Audit</button><button data-hub-section="proposals">Improvement Proposals</button>
+            <button class="is-active" data-hub-section="overview">Overview</button><button data-hub-section="skills">Skills</button><button data-hub-section="servers">MCP Servers</button><button data-hub-section="catalog">Capability Catalog</button><button data-hub-section="profiles">Agent Profiles</button><button data-hub-section="jobs">Jobs</button><button data-hub-section="permissions">Permissions</button><button data-hub-section="audit">Audit</button><button data-hub-section="proposals">Improvement Proposals</button>
           </nav>
           <div data-hub-content aria-live="polite"></div>
           <section class="hub-card hub-import" data-import-wizard><header><div><span class="hub-eyebrow">Secure ingestion</span><h3>Import MCP configuration</h3><p>支持 JSON / JSONC / YAML / TOML；密钥仅写入 Vault，原值不会进入配置库。</p></div></header><div class="hub-import-modes"><button data-import-mode="auto-discover">Auto-discover</button><button data-import-mode="file">File</button><button data-import-mode="paste">Paste</button><button data-import-mode="manual">Manual</button></div><div class="hub-import-editor"><input data-mcp-source-name value="mcp.json" aria-label="配置文件名"><textarea data-mcp-import-content placeholder="粘贴 Claude Desktop、Cursor、VS Code 或通用 MCP 配置"></textarea><button data-preview-mcp-import>安全预览</button></div><div class="hub-import-stage"><div><span>Preview</span><strong data-import-state>Choose an import source</strong></div><div><span>Conflicts</span><strong>No scan yet</strong></div><div><span>Connection test</span><strong>Waiting</strong></div></div><div data-mcp-import-preview></div></section>
@@ -426,6 +436,7 @@
         <section id="missionControlView" class="mission-control" style="display:none" aria-label="Mission Control">
           <header class="mc-head"><div><span class="mc-kicker">LUMO MISSION CONTROL / LIVE DAG</span><h1>Agent Execution</h1></div><div class="mc-metrics" data-mc-metrics></div></header>
           <div class="mc-grid"><div class="mc-stage" data-mc-topology></div><aside class="mc-detail" data-mc-detail></aside><div class="mc-log" data-mc-log></div></div>
+          <section class="mc-voice-history"><header><span>VOICE COMMANDS</span><h2>最近语音指令</h2></header><div data-mc-voice-history></div></section>
         </section>
       </main>
 
@@ -441,6 +452,8 @@
     <div class="toast-stack" id="toastStack"></div>
     <div class="ai-drawer-overlay" id="aiDrawerOverlay" hidden></div>
     <div class="ai-drawer-overlay" id="magicPromptOverlay" hidden></div>
+    <!-- P1（人机交互）：human.* 的全局提示模态，human-prompt 事件驱动 -->
+    <div class="ai-drawer-overlay" id="humanPromptOverlay" hidden></div>
 
     <script type="module" src="./js/main.js"></script>
   </body>

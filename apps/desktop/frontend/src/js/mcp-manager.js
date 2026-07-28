@@ -10,6 +10,30 @@ export function buildMcpApplyRequest({ token, serverInputs, secretInputs }) {
   return { token, selectedIds: serverInputs.filter((input) => input.checked).map((input) => input.id), secretOverrides: secretInputs.map((input) => ({ serverId: input.serverId, fieldPath: input.fieldPath, vaultKey: input.vaultKey, value: input.value || null })) };
 }
 
+export function renderMcpToolCall(serverId, tool = {}) {
+  const schema = tool.inputSchema || tool.input_schema || {};
+  const required = new Set(schema.required || []);
+  const fields = Object.entries(schema.properties || {}).map(([name, property]) => {
+    const type = property.type || "string";
+    const inputType = property.format === "password" ? "password" : ["integer", "number"].includes(type) ? "number" : type === "boolean" ? "checkbox" : "text";
+    const control = ["object", "array"].includes(type)
+      ? `<textarea data-mcp-argument="${escapeHtml(name)}" data-schema-type="${escapeHtml(type)}"${required.has(name) ? " required" : ""}></textarea>`
+      : `<input type="${inputType}" data-mcp-argument="${escapeHtml(name)}" data-schema-type="${escapeHtml(type)}"${required.has(name) ? " required" : ""}>`;
+    return `<label><span>${escapeHtml(name)}${required.has(name) ? " *" : ""}</span>${control}<small>${escapeHtml(property.description || type)}</small></label>`;
+  }).join("");
+  return `<form class="mcp-tool-call" data-mcp-call-server="${escapeHtml(serverId)}" data-mcp-call-tool="${escapeHtml(tool.name)}"><header><strong>${escapeHtml(tool.name || "MCP tool")}</strong><span>${escapeHtml(tool.description || "Schema-driven invocation")}</span></header>${fields || '<div class="hub-empty">此工具不需要参数</div>'}<button type="submit">调用工具</button><pre data-mcp-call-result></pre></form>`;
+}
+
+export function collectMcpToolArguments(fields = []) {
+  return Object.fromEntries([...fields].map((field) => {
+    const type = field.dataset.schemaType || "string";
+    let value = type === "boolean" ? Boolean(field.checked) : field.value;
+    if (["integer", "number"].includes(type) && value !== "") value = Number(value);
+    if (["object", "array"].includes(type) && value !== "") value = JSON.parse(value);
+    return [field.dataset.mcpArgument, value];
+  }).filter(([, value]) => value !== ""));
+}
+
 export function renderMcpGovernance(server = {}) {
   const oauth = server.oauth || { state: "not configured", scopes: [] };
   const supervisor = server.supervisor || { state: "closed", failures: 0 };

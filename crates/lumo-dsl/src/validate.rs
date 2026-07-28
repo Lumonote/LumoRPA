@@ -21,7 +21,9 @@ pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
     "mysql",
     "http",
     "smtp",
+    "imap",
     "ftp",
+    "xlsx",
 ];
 
 /// P1-6:`retry.on` 的合法错误 kind 名(snake_case)。
@@ -37,6 +39,8 @@ pub const RETRY_ON_KINDS: &[&str] = &[
     "cond_error",
     "capability_denied",
     "budget_exceeded",
+    "io",
+    "network",
     "timeout",
     "other",
 ];
@@ -83,9 +87,7 @@ pub enum ValidationError {
         resource: String,
     },
 
-    #[error(
-        "flow `{flow}` resource `{name}` has unknown kind `{kind}` (known kinds: {known})"
-    )]
+    #[error("flow `{flow}` resource `{name}` has unknown kind `{kind}` (known kinds: {known})")]
     UnknownResourceKind {
         flow: String,
         name: String,
@@ -103,9 +105,7 @@ pub enum ValidationError {
         known: String,
     },
 
-    #[error(
-        "flow `{flow}` step `{id}` retry.backoff `{value}` is invalid (allowed: {known})"
-    )]
+    #[error("flow `{flow}` step `{id}` retry.backoff `{value}` is invalid (allowed: {known})")]
     UnknownRetryBackoff {
         flow: String,
         id: String,
@@ -336,7 +336,15 @@ fn walk(
         }
         if let Some(bs) = &s.branches {
             for b in bs {
-                walk(flow, b, seen, flow_ai_enabled, has_llm_cap, resources, false)?;
+                walk(
+                    flow,
+                    b,
+                    seen,
+                    flow_ai_enabled,
+                    has_llm_cap,
+                    resources,
+                    false,
+                )?;
             }
         }
     }
@@ -473,6 +481,29 @@ spec:
     }
 
     #[test]
+    fn imap_and_xlsx_resource_kinds_are_accepted() {
+        for kind in ["imap", "xlsx"] {
+            let y = format!(
+                r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: t, version: 0.1.0 }}
+spec:
+  resources:
+    r:
+      kind: {kind}
+  steps:
+    - id: a
+      action: control.log
+      with: {{ message: x }}
+"#
+            );
+            let flow = parse_str(&y).unwrap();
+            validate(&flow).unwrap_or_else(|e| panic!("resource kind `{kind}`: {e}"));
+        }
+    }
+
+    #[test]
     fn misspelled_retry_on_kind_is_rejected_with_known_list() {
         // P1-6:`selector_notfound`(拼错)以前能过 validate,运行期静默不重试。
         let y = r#"
@@ -521,6 +552,27 @@ spec:
 "#;
         let flow = parse_str(y).expect("parses");
         validate(&flow).expect("`on: [timeout]` must validate (P0-2 retryable timeouts)");
+    }
+
+    #[test]
+    fn retry_on_io_and_network_are_accepted() {
+        for kind in ["io", "network"] {
+            let y = format!(
+                r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: {{ id: t, version: 0.1.0 }}
+spec:
+  steps:
+    - id: a
+      action: control.log
+      with: {{ message: x }}
+      retry: {{ times: 2, on: [{kind}] }}
+"#
+            );
+            let flow = parse_str(&y).expect("parses");
+            validate(&flow).unwrap_or_else(|e| panic!("`on: [{kind}]` must validate, got: {e}"));
+        }
     }
 
     #[test]

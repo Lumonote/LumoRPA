@@ -42,7 +42,7 @@ hmac = "0.12"
 regex = "1"
 md-5 = "0.10"
 sha1 = "0.10"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }
 # string.encode_convert:UTF-8 ⇄ GBK/GB18030/Big5 等中文编码互转。encoding_rs 为
 # 纯 Rust(Mozilla,MPL-2.0/Apache-2.0),无 C 依赖,信创/aarch64/loongarch 交叉友好。
 encoding_rs = "0.8"

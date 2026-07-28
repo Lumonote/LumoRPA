@@ -596,7 +596,10 @@ impl Action for DedupAction {
                 }
             }
         }
-        let out: Vec<Value> = order.into_iter().map(|k| seen.remove(&k).unwrap()).collect();
+        let out: Vec<Value> = order
+            .into_iter()
+            .map(|k| seen.remove(&k).unwrap())
+            .collect();
         Ok(ActionResult::from(Value::Array(out)))
     }
 }

@@ -7,7 +7,10 @@
 use crate::{
     error::StorageError,
     schema,
-    types::{AiCallInsert, AiCallRow, ArtifactRow, FlowRunRow, StepRunRow, VaultRow},
+    types::{
+        AiCallInsert, AiCallRow, ArtifactRow, FlowRunRow, PrunePolicy, PruneReport, StepRunRow,
+        VaultRow,
+    },
 };
 use chrono::{DateTime, TimeZone, Utc};
 use parking_lot::Mutex;
@@ -182,6 +185,12 @@ impl Repo {
         Ok(())
     }
 
+    /// List a run's step rows, `ORDER BY seq ASC`.
+    ///
+    /// P1-3(vars_json 去重):写入侧对 vars 未变的行存 NULL(语义 = 与前一
+    /// 条 seq 行相同)。本方法返回前按 seq 向前回溯补齐,调用方(`runs show`、
+    /// 桌面回放、MCP)看到的每行 `vars_json` 与逐行全量时代一致。真正从未写
+    /// 过快照的老 run(v3 之前,整跑全 NULL)没有可回溯的全量,保持 `None`。
     pub fn list_steps(&self, run_id: &str) -> Result<Vec<StepRunRow>, StorageError> {
         let c = self.inner.lock();
         let mut stmt = c.prepare(
@@ -193,7 +202,49 @@ impl Repo {
         for r in rows {
             out.push(r?);
         }
+        let mut last_vars: Option<serde_json::Value> = None;
+        for row in &mut out {
+            match &row.vars_json {
+                Some(v) => last_vars = Some(v.clone()),
+                None => row.vars_json = last_vars.clone(),
+            }
+        }
         Ok(out)
+    }
+
+    // ─── runs retention (架构 P2) ───────────────────────────────────────────
+
+    /// 按保留策略删除历史 run:flow_runs 行与级联的 step_runs / artifacts /
+    /// ai_calls 行(`ON DELETE CASCADE`,连接级 `foreign_keys=ON`)在**同一
+    /// 事务**内删除。running / queued / paused 的 run 永不删除(还在写行 /
+    /// 可续跑);`started_at` 为 NULL 的 run 在 KeepDays 下也保留(无法判龄)。
+    /// blob 文件路径经 [`PruneReport::blob_paths`] 返回,调用方提交后自行清理。
+    pub fn prune_runs(&self, policy: PrunePolicy) -> Result<PruneReport, StorageError> {
+        let mut c = self.inner.lock();
+        let tx = c.transaction()?;
+        let report = match policy {
+            PrunePolicy::KeepDays(days) => {
+                let cutoff = Utc::now().timestamp_millis() - i64::from(days) * 86_400_000;
+                prune_runs_where(
+                    &tx,
+                    &format!(
+                        "state NOT IN {PRUNE_PROTECTED_STATES} \
+                         AND started_at IS NOT NULL AND started_at < ?1"
+                    ),
+                    cutoff,
+                )?
+            }
+            PrunePolicy::KeepCount(n) => prune_runs_where(
+                &tx,
+                &format!(
+                    "state NOT IN {PRUNE_PROTECTED_STATES} AND id NOT IN \
+                     (SELECT id FROM flow_runs ORDER BY started_at DESC NULLS LAST LIMIT ?1)"
+                ),
+                i64::from(n),
+            )?,
+        };
+        tx.commit()?;
+        Ok(report)
     }
 
     // ─── artifacts (X-06 / X-07: screenshots, DOM, HAR) ────────────────────
@@ -372,6 +423,56 @@ impl Repo {
         )?;
         Ok((tokens, cost))
     }
+}
+
+/// 架构 P2:prune 永不触碰的 run 状态(SQL `IN` 列表字面量)。running /
+/// queued 还在(或将要)写行,paused 是可续跑的断点现场。
+const PRUNE_PROTECTED_STATES: &str = "('running','queued','paused')";
+
+/// 架构 P2:在事务内对满足 `pred`(单个 `?1` 绑定参数)的 flow_runs 做
+/// "先统计、后删除":级联行数与 blob 路径必须在 DELETE 前收集(级联后就
+/// 查不到了)。同一连接互斥锁 + 事务保证统计与删除之间无并发写。
+fn prune_runs_where(
+    tx: &rusqlite::Transaction<'_>,
+    pred: &str,
+    param: i64,
+) -> Result<PruneReport, StorageError> {
+    let count = |sql: String| -> Result<usize, StorageError> {
+        Ok(tx.query_row(&sql, [param], |r| r.get::<_, i64>(0))? as usize)
+    };
+    let runs = count(format!("SELECT COUNT(*) FROM flow_runs WHERE {pred}"))?;
+    if runs == 0 {
+        return Ok(PruneReport::default());
+    }
+    let steps = count(format!(
+        "SELECT COUNT(*) FROM step_runs WHERE flow_run_id IN (SELECT id FROM flow_runs WHERE {pred})"
+    ))?;
+    let ai_calls = count(format!(
+        "SELECT COUNT(*) FROM ai_calls WHERE flow_run_id IN (SELECT id FROM flow_runs WHERE {pred})"
+    ))?;
+    let mut blob_paths = Vec::new();
+    {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT blob_path FROM artifacts WHERE flow_run_id IN (SELECT id FROM flow_runs WHERE {pred})"
+        ))?;
+        let rows = stmt.query_map([param], |r| r.get::<_, String>(0))?;
+        for p in rows {
+            blob_paths.push(p?);
+        }
+    }
+    let artifacts = blob_paths.len();
+    let deleted = tx.execute(&format!("DELETE FROM flow_runs WHERE {pred}"), [param])?;
+    debug_assert_eq!(
+        deleted, runs,
+        "count/delete ran under one tx + connection lock"
+    );
+    Ok(PruneReport {
+        runs,
+        steps,
+        artifacts,
+        ai_calls,
+        blob_paths,
+    })
 }
 
 fn row_to_ai_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiCallRow> {
