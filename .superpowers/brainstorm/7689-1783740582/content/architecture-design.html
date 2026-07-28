@@ -1,0 +1,72 @@
+<style>
+  .arch { background:radial-gradient(circle at 50% -20%,#262d52,#101522 48%,#090c13);border:1px solid #31395c;border-radius:18px;padding:20px;color:#e7ebff; }
+  .arch-layer { border:1px solid #303a59;background:rgba(20,26,42,.86);border-radius:13px;padding:12px;margin:9px 0;position:relative;overflow:hidden; }
+  .arch-title { color:#9e97ff;font-size:11px;letter-spacing:.12em;margin-bottom:9px;text-transform:uppercase; }
+  .arch-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:8px; }
+  .arch-box { border:1px solid #354161;background:linear-gradient(145deg,#1c2335,#121725);border-radius:9px;padding:10px;font-size:10px;min-height:42px; }
+  .arch-box strong { display:block;color:#f0f2ff;margin-bottom:4px;font-size:11px; }
+  .arch-box span { color:#8792b1;line-height:1.4; }
+  .accent { border-color:#7469e8;box-shadow:0 0 22px rgba(105,92,255,.14); }
+  .safe { border-color:#297866; }
+  .arrow { text-align:center;color:#7167e8;font-size:17px;height:18px;line-height:18px; }
+</style>
+
+<h2>总体架构：统一调用运行时 + Agent Intelligence Layer</h2>
+<p class="subtitle">语音是入口，Harness 是容器，Loop 是决策引擎，Self 是受监督改进闭环。所有能力最终经过同一权限与执行事件协议。</p>
+
+<div class="arch">
+  <div class="arch-layer">
+    <div class="arch-title">01 · Voice Edge / 桌面入口</div>
+    <div class="arch-grid">
+      <div class="arch-box"><strong>Wake Word</strong><span>本地常驻检测<br>可替换 Provider</span></div>
+      <div class="arch-box"><strong>Global Hotkey</strong><span>按住说话 / 点击唤醒<br>macOS 优先</span></div>
+      <div class="arch-box"><strong>STT Router</strong><span>本地模型 / 云服务<br>流式转写</span></div>
+      <div class="arch-box"><strong>TTS & Capsule</strong><span>自适应播报<br>悬浮胶囊状态</span></div>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="arch-layer accent">
+    <div class="arch-title">02 · Agent Harness / 智能体运行容器</div>
+    <div class="arch-grid">
+      <div class="arch-box"><strong>Session Context</strong><span>对话、桌面上下文<br>当前 Flow 与选择</span></div>
+      <div class="arch-box"><strong>Capability Catalog</strong><span>Flow / Skill / MCP<br>统一能力描述</span></div>
+      <div class="arch-box"><strong>Policy & Budget</strong><span>风险等级、权限<br>Token / 时间 / 步数</span></div>
+      <div class="arch-box"><strong>Memory & Trace</strong><span>短期记忆、执行轨迹<br>脱敏摘要</span></div>
+    </div>
+  </div>
+  <div class="arrow">↓ PLAN → ACT → OBSERVE → VALIDATE → REFLECT ↺</div>
+  <div class="arch-layer accent">
+    <div class="arch-title">03 · Agent Loop / 可控循环</div>
+    <div class="arch-grid">
+      <div class="arch-box"><strong>Planner</strong><span>拆解目标<br>生成串并行 DAG</span></div>
+      <div class="arch-box safe"><strong>Risk Gate</strong><span>调用前风险判定<br>高风险人工确认</span></div>
+      <div class="arch-box"><strong>Executor</strong><span>调度工具<br>并发、超时、取消</span></div>
+      <div class="arch-box"><strong>Validator</strong><span>结果校验<br>反思、恢复或结束</span></div>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="arch-layer">
+    <div class="arch-title">04 · Unified Invocation Runtime / 统一执行层</div>
+    <div class="arch-grid">
+      <div class="arch-box"><strong>Flow Adapter</strong><span>复用 Flow VM<br>步骤与进度事件</span></div>
+      <div class="arch-box"><strong>Skill Adapter</strong><span>加载、版本、启停<br>编译为可调用计划</span></div>
+      <div class="arch-box"><strong>MCP Adapter</strong><span>连接管理、工具发现<br>参数校验与调用</span></div>
+      <div class="arch-box"><strong>Event Stream</strong><span>DAG / 节点 / Token<br>日志、结果、错误</span></div>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="arch-layer safe">
+    <div class="arch-title">05 · Supervised Self-Improvement / 受监督自我进化</div>
+    <div class="arch-grid">
+      <div class="arch-box"><strong>Trace Miner</strong><span>分析成功率、耗时<br>失败和人工纠正</span></div>
+      <div class="arch-box"><strong>Proposal Builder</strong><span>生成路由、Prompt<br>Flow / Skill 改进草案</span></div>
+      <div class="arch-box"><strong>Evaluation Sandbox</strong><span>回放测试、权限检查<br>成本和回归评分</span></div>
+      <div class="arch-box safe"><strong>Human Approval</strong><span>差异审阅后启用<br>版本化与一键回滚</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:22px;">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)"><div class="letter">✓</div><div class="content"><h3>架构方向正确</h3><p>继续设计用户交互与执行状态流。</p></div></div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)"><div class="letter">↺</div><div class="content"><h3>需要调整</h3><p>回到对话说明希望修改的层或边界。</p></div></div>
+</div>

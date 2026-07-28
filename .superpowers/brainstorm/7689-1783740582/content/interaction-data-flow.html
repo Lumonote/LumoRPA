@@ -1,0 +1,55 @@
+<style>
+  .flow-shell { background:radial-gradient(circle at 45% -20%,#29315b,#111624 50%,#090c13);color:#e9ecff;border:1px solid #313a5c;border-radius:18px;padding:18px; }
+  .state-row { display:grid;grid-template-columns:repeat(7,1fr);gap:6px;align-items:stretch; }
+  .state { background:linear-gradient(145deg,#1c2335,#121725);border:1px solid #35415f;border-radius:10px;padding:10px 7px;text-align:center;min-height:76px;font-size:9px;color:#8f99b7;position:relative; }
+  .state strong { display:block;color:#eff1ff;font-size:10px;margin:5px 0; }
+  .state.active { border-color:#776bea;box-shadow:0 0 24px rgba(105,92,255,.19); }
+  .state.safe { border-color:#2b806d; }
+  .state:after { content:'›';position:absolute;right:-8px;top:31px;color:#7167e8;font-size:17px;z-index:2; }
+  .state:last-child:after { display:none; }
+  .branch { border:1px solid #303a59;background:rgba(19,25,41,.88);border-radius:12px;padding:12px;margin-top:12px; }
+  .branch-grid { display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px; }
+  .mini { border-left:2px solid #756ae8;background:#151b2a;border-radius:7px;padding:9px;font-size:9px;color:#8994b3;line-height:1.55; }
+  .mini strong { display:block;color:#e9ecff;font-size:10px;margin-bottom:3px; }
+</style>
+
+<h2>交互与执行状态流</h2>
+<p class="subtitle">默认保持轻量；只有计划复杂、需要授权或用户主动展开时，才进入完整 Mission Control。</p>
+
+<div class="flow-shell">
+  <div class="state-row">
+    <div class="state"><span>◉</span><strong>待机</strong>本地唤醒词<br>快捷键监听</div>
+    <div class="state active"><span>●</span><strong>聆听</strong>胶囊呼吸光<br>实时音量波形</div>
+    <div class="state"><span>≋</span><strong>转写</strong>流式显示文本<br>支持即时纠正</div>
+    <div class="state"><span>⌘</span><strong>路由</strong>别名优先<br>AI 补充理解</div>
+    <div class="state safe"><span>◇</span><strong>计划/确认</strong>生成执行 DAG<br>风险分级</div>
+    <div class="state active"><span>↯</span><strong>执行</strong>串并行拓扑<br>实时节点详情</div>
+    <div class="state"><span>✓</span><strong>结果</strong>简短播报<br>详细结果留屏</div>
+  </div>
+
+  <div class="branch">
+    <div style="color:#9d96ff;font-size:10px;letter-spacing:.1em;margin-bottom:9px;">关键交互规则</div>
+    <div class="branch-grid">
+      <div class="mini"><strong>低风险快速路径</strong>查询、只读工具和明确别名直接执行；胶囊显示“调用来源 + 目标”。</div>
+      <div class="mini"><strong>高风险确认路径</strong>写文件、发消息、桌面控制等展开确认卡；显示影响范围和关键参数。</div>
+      <div class="mini"><strong>不确定性处理</strong>候选能力置信度接近时只追问一个问题，不让 Agent 猜测执行。</div>
+      <div class="mini"><strong>语音打断</strong>“暂停 / 继续 / 取消 / 跳过这步 / 展开详情”在执行期间始终可用。</div>
+      <div class="mini"><strong>失败恢复</strong>节点变红并展示错误；Loop 可重试、换工具或重规划，高风险替代仍需确认。</div>
+      <div class="mini"><strong>改进闭环</strong>结束后可生成优化建议；只有用户审阅差异并批准，才写入版本化配置。</div>
+    </div>
+  </div>
+
+  <div class="branch">
+    <div style="color:#9d96ff;font-size:10px;letter-spacing:.1em;margin-bottom:9px;">统一事件流驱动 UI</div>
+    <div style="font-family:ui-monospace,monospace;font-size:9px;color:#8893b0;line-height:1.8;">
+      session.started → transcript.delta → route.selected → plan.created → permission.requested<br>
+      → node.started → node.progress → tool.called → tool.result → node.completed / node.failed<br>
+      → plan.revised → run.completed → improvement.proposed → improvement.approved
+    </div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:22px;">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)"><div class="letter">✓</div><div class="content"><h3>交互与数据流正确</h3><p>继续设计 Skill/MCP 管理中心与 Agent 控制面。</p></div></div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)"><div class="letter">↺</div><div class="content"><h3>需要调整</h3><p>回到对话说明希望改变的状态或交互规则。</p></div></div>
+</div>

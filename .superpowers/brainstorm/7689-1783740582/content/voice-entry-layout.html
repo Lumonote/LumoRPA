@@ -1,0 +1,41 @@
+<h2>桌面语音入口采用哪种形态？</h2>
+<p class="subtitle">重点比较：唤醒速度、打扰程度、执行前确认，以及后续扩展 Skill / MCP 工具调用的空间。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:#eef1f6;min-height:230px;position:relative;">
+      <div style="height:24px;background:#dfe4ec;border-radius:7px;margin-bottom:42px;display:flex;justify-content:flex-end;align-items:center;padding:0 10px;color:#667085;font-size:11px;">◉ Lumo</div>
+      <div style="position:absolute;right:18px;top:55px;width:230px;background:white;border:1px solid #d0d5dd;border-radius:14px;padding:14px;box-shadow:0 12px 34px rgba(16,24,40,.16);">
+        <div style="display:flex;gap:10px;align-items:center;"><span style="width:32px;height:32px;border-radius:50%;background:#6c63ff;color:white;display:grid;place-items:center;">●</span><strong>正在聆听…</strong></div>
+        <div style="font-size:12px;color:#667085;margin-top:10px;">“运行订单导出流程”</div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 菜单栏弹出</h3><p>最克制，适合工具型应用；但确认步骤和长结果展示空间有限。</p></div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:#e9edf3;min-height:230px;display:grid;place-items:center;">
+      <div style="width:82%;background:#151821;color:white;border-radius:18px;padding:18px;box-shadow:0 22px 50px rgba(0,0,0,.28);">
+        <div style="display:flex;gap:12px;align-items:center;"><span style="font-size:22px;color:#9b8cff;">●</span><strong>告诉 Lumo 你要做什么</strong></div>
+        <div style="height:34px;border-radius:9px;background:#242936;margin-top:14px;padding:8px 12px;color:#aeb6c5;font-size:12px;">正在转写语音…</div>
+        <div style="display:flex;gap:8px;margin-top:12px;"><span style="background:#303746;border-radius:8px;padding:6px 9px;font-size:10px;">Flow</span><span style="background:#303746;border-radius:8px;padding:6px 9px;font-size:10px;">Skill</span><span style="background:#303746;border-radius:8px;padding:6px 9px;font-size:10px;">MCP</span></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · 居中命令面板</h3><p>信息完整、类似 Spotlight；每次都会覆盖当前工作，视觉打扰更强。</p></div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:24px;background:#eef1f6;min-height:230px;position:relative;">
+      <div style="height:24px;background:#dfe4ec;border-radius:7px;margin-bottom:84px;"></div>
+      <div style="margin:auto;width:64%;height:38px;background:#171a22;color:white;border-radius:20px;display:flex;align-items:center;gap:10px;padding:0 14px;box-shadow:0 14px 32px rgba(16,24,40,.22);"><span style="color:#9b8cff;">●</span><span style="font-size:12px;flex:1;">正在聆听…</span><span style="font-size:10px;color:#98a2b3;">⌥ Space</span></div>
+      <div style="margin:8px auto 0;width:70%;background:white;border:1px solid #d0d5dd;border-radius:14px;padding:12px;box-shadow:0 12px 30px rgba(16,24,40,.12);font-size:11px;">
+        <strong>准备调用：订单助手 / export_orders</strong>
+        <div style="color:#667085;margin-top:6px;">将读取订单并写入桌面文件</div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;"><span style="padding:5px 9px;border-radius:7px;background:#f2f4f7;">取消</span><span style="padding:5px 9px;border-radius:7px;background:#6c63ff;color:white;">确认执行</span></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · 悬浮胶囊 + 按需展开（推荐）</h3><p>唤醒时轻量显示；需要确认、选工具或查看结果时展开，不打断当前工作。</p></div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:24px;">点击一个方案进行选择，然后回到对话告诉我你的感受。</p>

@@ -1,0 +1,34 @@
+<h2>Capability Hub 修订：通用 MCP 导入器</h2>
+<p class="subtitle">管理中心其余设计保持不变；新增统一导入向导，将外部配置标准化为 LumoRPA 的 MCP Server Profile。</p>
+
+<div class="mockup">
+  <div class="mockup-header">添加 MCP Server · 选择导入方式</div>
+  <div class="mockup-body">
+    <div class="cards">
+      <div class="card"><div class="card-body"><h3>自动发现</h3><p>扫描用户已安装客户端的常见配置位置，识别 Claude Desktop、Cursor、Codex 等 `mcpServers` 配置。</p></div></div>
+      <div class="card"><div class="card-body"><h3>配置文件</h3><p>导入 JSON、JSONC、YAML 或 TOML；支持单个 Server 和完整 `mcpServers` 集合。</p></div></div>
+      <div class="card"><div class="card-body"><h3>粘贴配置</h3><p>直接粘贴通用 MCP JSON、启动命令、环境变量片段或远程服务 URL。</p></div></div>
+      <div class="card"><div class="card-body"><h3>手动添加</h3><p>通过 stdio、Streamable HTTP 或兼容旧服务的 SSE 参数表单逐项配置。</p></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>统一导入流水线</h3>
+  <div class="options">
+    <div class="option"><div class="letter">1</div><div class="content"><h3>解析与识别</h3><p>自动识别字段命名、传输协议、command/args/env、headers、URL 和多个 Server 条目。</p></div></div>
+    <div class="option"><div class="letter">2</div><div class="content"><h3>预览与去重</h3><p>展示即将新增、覆盖或跳过的服务；同名和同端点冲突由用户选择处理方式。</p></div></div>
+    <div class="option"><div class="letter">3</div><div class="content"><h3>Secret 安全迁移</h3><p>API Key、Token、密码和敏感 Header 不直接落盘，转换为 Vault 引用并允许重新输入。</p></div></div>
+    <div class="option"><div class="letter">4</div><div class="content"><h3>连接与工具校验</h3><p>导入后逐个测试连接、拉取工具 Schema、标注风险等级；失败项保留为未启用草稿。</p></div></div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros"><h4>兼容性原则</h4><ul><li>内部使用稳定、版本化的 MCP Profile Schema</li><li>外部格式通过 Import Adapter 转换，不污染执行层</li><li>未知字段保留在扩展区，避免往返导入时丢失</li><li>生成脱敏导入报告，便于排查失败条目</li></ul></div>
+  <div class="pros"><h4>首版支持</h4><ul><li>通用 `mcpServers` JSON/JSONC</li><li>stdio、Streamable HTTP、兼容 SSE</li><li>文件、粘贴、客户端自动发现、手动表单</li><li>批量导入、批量测试、按条目启用</li></ul></div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)"><div class="letter">✓</div><div class="content"><h3>修订正确</h3><p>继续安全、错误恢复与存储设计。</p></div></div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)"><div class="letter">↺</div><div class="content"><h3>继续调整</h3><p>回到对话说明还需兼容的具体来源或格式。</p></div></div>
+</div>

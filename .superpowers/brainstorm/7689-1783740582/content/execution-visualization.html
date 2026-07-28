@@ -1,0 +1,78 @@
+<style>
+  @keyframes pulseGlow { 0%,100% { box-shadow:0 0 0 0 rgba(99,102,241,.2),0 0 18px rgba(99,102,241,.28) } 50% { box-shadow:0 0 0 7px rgba(99,102,241,0),0 0 34px rgba(99,102,241,.6) } }
+  @keyframes flowLine { from { background-position:0 0 } to { background-position:32px 0 } }
+  @keyframes scan { 0% { transform:translateX(-110%) } 100% { transform:translateX(310%) } }
+  .tech-shell { background:radial-gradient(circle at 50% 0,#222847 0,#111522 45%,#090c14 100%);color:#e8ecff;border-radius:18px;border:1px solid #30395d;overflow:hidden;min-height:285px;box-shadow:inset 0 0 55px rgba(79,70,229,.10); }
+  .tech-top { display:flex;justify-content:space-between;padding:11px 14px;border-bottom:1px solid #29304b;color:#8994b8;font-size:10px;letter-spacing:.08em; }
+  .node { border:1px solid #35405f;background:linear-gradient(145deg,#1b2131,#121725);border-radius:10px;padding:9px 10px;font-size:10px;position:relative; }
+  .node.active { border-color:#8175ff;animation:pulseGlow 1.7s infinite;color:white; }
+  .node.done { border-color:#287d6c;color:#74e3ca; }
+  .node.wait { color:#77819f; }
+  .wire { height:2px;background:repeating-linear-gradient(90deg,#6d63e8 0 8px,transparent 8px 14px);animation:flowLine .8s linear infinite;opacity:.8; }
+  .scanbar { position:absolute;top:0;bottom:0;width:35%;background:linear-gradient(90deg,transparent,rgba(130,117,255,.09),transparent);animation:scan 2.7s linear infinite;pointer-events:none; }
+</style>
+
+<h2>执行过程采用哪种“任务控制台”结构？</h2>
+<p class="subtitle">三种方案都支持科技感动效；请选择最适合观察 Skill、Flow、MCP 串并行执行的主视图。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image tech-shell">
+      <div class="tech-top"><span>VOICE RUN / 04:32</span><span>● RUNNING</span></div>
+      <div style="padding:17px;display:grid;grid-template-columns:74px 1fr;gap:14px;position:relative;">
+        <div style="color:#697493;font-size:9px;line-height:41px;">00:00<br>00:08<br>00:19<br>00:31<br>NOW</div>
+        <div style="display:grid;gap:7px;">
+          <div class="node done">✓ 识别意图 · 订单日报</div>
+          <div class="node done">✓ Skill · load_orders <span style="float:right">8.2s</span></div>
+          <div class="node done">✓ MCP · query_database <span style="float:right">11.1s</span></div>
+          <div class="node active">● AI · 生成摘要 <span style="float:right">72%</span></div>
+          <div class="node wait">○ Flow · 发送邮件</div>
+        </div>
+        <div class="scanbar"></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 垂直时间线</h3><p>最容易阅读执行历史；并行分支只能缩进显示，复杂任务的整体关系不够直观。</p></div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image tech-shell">
+      <div class="tech-top"><span>EXECUTION GRAPH</span><span>6 NODES / 2 PARALLEL</span></div>
+      <div style="padding:24px 15px;display:grid;grid-template-columns:82px 25px 1fr 25px 76px;align-items:center;position:relative;">
+        <div class="node done">✓ Intent</div><div class="wire"></div>
+        <div style="display:grid;gap:20px;">
+          <div class="node active">● Skill · 分析订单</div>
+          <div class="node active">● MCP · 查询库存</div>
+          <div class="node wait">○ Flow · 读取邮件</div>
+        </div>
+        <div class="wire"></div><div class="node wait">○ 汇总</div>
+        <div class="scanbar"></div>
+      </div>
+      <div style="margin:8px 14px 14px;padding:9px;border:1px solid #29304b;border-radius:9px;color:#7f8bad;font-size:9px;">实时数据流沿连线运动 · 当前节点呼吸发光 · 失败分支红色回溯</div>
+    </div>
+    <div class="card-body"><h3>B · 动态执行拓扑图</h3><p>串并行关系最直观、科技感最强；详细输入输出需要点击节点查看。</p></div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image tech-shell">
+      <div class="tech-top"><span>LUMO MISSION CONTROL</span><span>VOICE → SKILL → MCP</span></div>
+      <div style="display:grid;grid-template-columns:2fr 1fr;min-height:238px;">
+        <div style="padding:16px;border-right:1px solid #29304b;position:relative;">
+          <div style="display:grid;grid-template-columns:68px 20px 1fr;align-items:center;gap:5px;margin-bottom:16px;"><div class="node done">✓ 意图</div><div class="wire"></div><div class="node active">● Skill · 订单助手</div></div>
+          <div style="margin-left:93px;display:grid;grid-template-columns:1fr 12px 1fr;gap:5px;align-items:center;"><div class="node active">● MCP<br><span style="color:#8994b8">query_orders</span></div><div class="wire"></div><div class="node active">● AI<br><span style="color:#8994b8">总结异常</span></div></div>
+          <div style="margin:19px 0 0 93px;" class="node wait">○ Flow · 导出并通知</div>
+          <div class="scanbar"></div>
+        </div>
+        <div style="padding:14px;font-size:9px;">
+          <div style="color:#7f8bad;margin-bottom:8px;">CURRENT STEP</div>
+          <strong style="color:#c9c5ff;font-size:11px;">query_orders</strong>
+          <div style="margin-top:10px;color:#8791ad;line-height:1.65;">来源：ERP MCP<br>输入：今日 / 华东区<br>权限：只读<br>耗时：3.8s</div>
+          <div style="margin-top:12px;height:5px;background:#20263a;border-radius:4px;overflow:hidden;"><div style="width:66%;height:100%;background:linear-gradient(90deg,#635bff,#36d1c4);"></div></div>
+          <div style="margin-top:14px;color:#76dcca;">42 条记录已返回</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · 拓扑图 + 实时详情（推荐）</h3><p>左侧看串并行全局，右侧看当前节点内容、权限、耗时和结果；可切换到底部完整日志。</p></div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:24px;">点击选择一个主视图。动效将遵循“信息优先”：运动只表达数据流、运行状态和回退路径。</p>

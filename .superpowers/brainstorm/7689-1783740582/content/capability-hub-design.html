@@ -1,0 +1,72 @@
+<style>
+  .hub { background:linear-gradient(150deg,#151b2b,#0b0f18);border:1px solid #303a58;border-radius:18px;overflow:hidden;color:#e9ecff; }
+  .hub-top { display:flex;align-items:center;gap:14px;padding:12px 15px;border-bottom:1px solid #29324d;font-size:9px;color:#7f8aa8; }
+  .hub-top strong { color:#f2f3ff;font-size:11px;margin-right:auto; }
+  .hub-body { display:grid;grid-template-columns:116px 1fr 190px;min-height:330px; }
+  .hub-nav { padding:12px 8px;border-right:1px solid #29324d; }
+  .navitem { padding:8px;border-radius:7px;font-size:9px;color:#7f8aa8;margin-bottom:3px; }
+  .navitem.active { background:#252b43;color:#c8c4ff;border-left:2px solid #786de9; }
+  .hub-main { padding:14px; }
+  .stats { display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:12px; }
+  .stat { border:1px solid #313b58;background:#141a28;border-radius:8px;padding:8px;font-size:8px;color:#7d88a6; }
+  .stat strong { display:block;color:#e9ecff;font-size:14px;margin-top:3px; }
+  .caprow { display:grid;grid-template-columns:26px 1fr 58px 54px;gap:7px;align-items:center;border:1px solid #303a57;background:#141a28;border-radius:9px;padding:8px;margin-bottom:7px;font-size:8px;color:#8390ad; }
+  .caprow b { color:#edf0ff;font-size:9px;display:block; }
+  .tag { border-radius:10px;padding:3px 6px;text-align:center;background:#242b41;color:#a9b1ca; }
+  .tag.ok { background:#16352f;color:#6bd5bc; }
+  .tag.warn { background:#3b311b;color:#e1c171; }
+  .detail { padding:14px;border-left:1px solid #29324d;background:rgba(12,16,25,.7);font-size:8px;color:#8590ad;line-height:1.65; }
+  .detail h4 { color:#f0f2ff;font-size:11px;margin:0 0 9px; }
+  .detailbox { border:1px solid #303a57;border-radius:8px;padding:8px;margin:8px 0;background:#141a28; }
+</style>
+
+<h2>Capability Hub：Skill / MCP / Agent 统一管理中心</h2>
+<p class="subtitle">用户管理的是“能力”，底层来源可以是 Flow、Skill 或 MCP Tool；语音路由和 Agent Loop 使用同一份目录。</p>
+
+<div class="hub">
+  <div class="hub-top"><strong>LUMO CAPABILITY HUB</strong><span>＋ 导入 Skill</span><span>＋ 添加 MCP</span><span>⟳ 刷新能力</span></div>
+  <div class="hub-body">
+    <div class="hub-nav">
+      <div class="navitem">总览</div>
+      <div class="navitem">Skills</div>
+      <div class="navitem active">MCP Servers</div>
+      <div class="navitem">能力目录</div>
+      <div class="navitem">Agent Profiles</div>
+      <div class="navitem">权限策略</div>
+      <div class="navitem">执行与审计</div>
+      <div class="navitem">改进提案</div>
+    </div>
+    <div class="hub-main">
+      <div class="stats">
+        <div class="stat">Skills<strong>12</strong></div><div class="stat">MCP Servers<strong>4</strong></div><div class="stat">Tools<strong>37</strong></div><div class="stat">健康率<strong style="color:#6bd5bc">96%</strong></div>
+      </div>
+      <div style="display:flex;gap:7px;margin-bottom:10px;"><div style="flex:1;border:1px solid #303a57;border-radius:8px;padding:7px;color:#65718f;font-size:8px;">搜索服务、工具或语音别名…</div><div class="tag">全部传输</div></div>
+      <div class="caprow"><span style="color:#786de9">◆</span><div><b>ERP Production</b>Streamable HTTP · 14 tools</div><span class="tag ok">健康</span><span class="tag">已启用</span></div>
+      <div class="caprow"><span style="color:#58c9b0">◆</span><div><b>Filesystem Safe</b>stdio · 8 tools</div><span class="tag ok">健康</span><span class="tag">已启用</span></div>
+      <div class="caprow"><span style="color:#d9b85e">◆</span><div><b>Mail Gateway</b>Streamable HTTP · 6 tools</div><span class="tag warn">需授权</span><span class="tag">已启用</span></div>
+      <div class="caprow"><span style="color:#67718b">◆</span><div><b>Legacy Browser</b>stdio · 9 tools</div><span class="tag">离线</span><span class="tag">已停用</span></div>
+    </div>
+    <div class="detail">
+      <h4>ERP Production</h4>
+      <div>连接测试通过 · 18ms<br>最后发现工具：2 分钟前</div>
+      <div class="detailbox"><b style="color:#c9c5ff">连接与凭据</b><br>URL / 启动命令 / 环境变量<br>Secret 仅引用 Vault key</div>
+      <div class="detailbox"><b style="color:#c9c5ff">默认权限</b><br>只读：自动允许<br>写入：每次确认<br>桌面控制：禁止</div>
+      <div class="detailbox"><b style="color:#c9c5ff">工具与语音</b><br>浏览 Schema、试运行<br>配置别名与示例说法</div>
+      <div class="detailbox"><b style="color:#c9c5ff">运行诊断</b><br>延迟、错误率、调用日志<br>复制脱敏诊断包</div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:18px;">
+  <h3>管理规则</h3>
+  <div class="pros-cons">
+    <div class="pros"><h4>Skill</h4><ul><li>本地文件/目录或 Git 地址导入</li><li>解析、校验、版本、启停和依赖检查</li><li>展示编译后的 Flow 与权限需求</li><li>更新前显示差异，失败可回滚</li></ul></div>
+    <div class="pros"><h4>MCP</h4><ul><li>支持 stdio 与 Streamable HTTP</li><li>凭据只存 Vault 引用，不进入配置和日志</li><li>连接测试、工具发现、Schema 浏览和手动调用</li><li>每个 Server/Tool 可单独启停和设置风险等级</li></ul></div>
+    <div class="pros"><h4>Agent</h4><ul><li>配置模型、预算、最大循环次数和并发数</li><li>限定可见能力与默认权限策略</li><li>查看 Memory、Trace 和评估结果</li><li>改进提案必须差异审阅、批准、版本化、可回滚</li></ul></div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)"><div class="letter">✓</div><div class="content"><h3>管理中心设计正确</h3><p>继续确认安全、错误恢复和数据存储设计。</p></div></div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)"><div class="letter">↺</div><div class="content"><h3>需要调整</h3><p>回到对话说明希望增加或删减的管理能力。</p></div></div>
+</div>
