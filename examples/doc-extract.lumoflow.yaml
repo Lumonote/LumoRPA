@@ -1,0 +1,52 @@
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata:
+  id: doc-extract
+  version: 0.1.0
+  name: 文档结构化解析示例
+  description: |
+    把 Word/Excel 解析为 DocIR(标题 / 段落 / 表格含合并单元格),再导出 Markdown。
+    全程本地,不触网、不调用 LLM —— 只需 fs.read;写出 Markdown 才需要 fs.write。
+  tags: [example, document, local]
+
+spec:
+  inputs:
+    - { name: file, type: file, required: true }
+    - { name: out, type: file, default: "/tmp/doc-extract.md" }
+
+  capabilities:
+    fs.read: ["**"]
+    fs.write: ["/tmp/**"]
+
+  steps:
+    - id: parse
+      action: doc.parse
+      with:
+        path: "{{ inputs.file }}"
+        limit: 2000
+
+    - id: markdown
+      action: doc.to_markdown
+      with:
+        doc: "{{ steps.parse.result }}"
+
+    - id: save
+      action: file.write
+      with:
+        path: "{{ inputs.out }}"
+        content: "{{ steps.markdown.result.markdown }}"
+
+    - id: report
+      action: control.log
+      with:
+        message: >-
+          解析完成:{{ steps.parse.result.blocks | length }} 个块、
+          {{ steps.parse.result.tables | length }} 张表 → {{ inputs.out }}
+
+    # 解析过程中的告警(修订标记、异常合并、截断)不该被吞掉 —— 显式回报,
+    # 让操作者决定是否需要人工复核。
+    - id: warn
+      action: control.log
+      when: "{{ steps.parse.result.diagnostics.warnings | length > 0 }}"
+      with:
+        message: "解析告警:{{ steps.parse.result.diagnostics.warnings | join('; ') }}"

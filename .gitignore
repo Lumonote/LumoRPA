@@ -20,6 +20,10 @@
 /examples/out/
 *.log
 
+# Agent / tool runtime state (per-checkout, never shared)
+.omc/
+.workbuddy/
+
 # other
 /.codegraph/
 /.cursor/

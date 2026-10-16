@@ -41,9 +41,60 @@ Each step supports:
 | `bind` | Optional variable name that receives this step's output. |
 | `when` | Optional predicate. Falsy values skip the step. |
 | `retry` | Optional retry policy: `times`, `backoff` (`fixed` \| `exponential`), `initial_ms`, `on` (error kinds: `selector_not_found`, `extract_failed`, `cond_error`, `capability_denied`, `budget_exceeded`, `timeout`, `other`). 注意:步级超时**仅当 `on` 显式列出 `timeout`** 时才会重试——空 `on` 的"任意错误都重试"不含超时,此时超时仍是硬中断(整个运行立即终止);重试预算耗尽后,最后一次超时仍按 `timeout` 状态落库并终止运行。 |
+| `on_error` | 可选的**失败终局处置**:`mode`(`interrupt` \| `continue` \| `retry`)、`retry_count`、`retry_interval_ms`、`output`(该步骤失败时产出的值)。不写即 `interrupt`(终止运行),该缺省行为与既有版本逐字节一致。 |
 | `ai` | Optional AI hook policy: `mode: off`, `fallback`, or `primary`. |
 | `resource` | Optional name of a declared `spec.resources` entry to bind this step to (see [Resources](#resources)). |
 | `do`, `else`, `catch`, `finally`, `branches` | Nested control blocks for `control.*` actions. |
+
+### 失败终局处置(`on_error`)
+
+`retry` 决定一条步骤**多用力地试**;`on_error` 决定它**试完之后怎么办**。两者是叠加关系:
+`retry` 先跑,预算耗尽后交给 `on_error.mode`。
+
+| 模式 | 行为 |
+| --- | --- |
+| `interrupt`(缺省) | 终止运行。等同于不写 `on_error`。 |
+| `continue` | 记录失败后继续往下执行。 |
+| `retry` | 再试 `retry_count` 次,每次间隔 `retry_interval_ms`。仍然失败则运行失败。 |
+
+```yaml
+steps:
+  # 可选步骤:可选的配置文件缺失不该拖垮整条流程。
+  - id: load_overrides
+    action: file.read
+    with: { path: "{{ inputs.overrides }}" }
+    on_error: { mode: continue, output: {} }
+
+  # 网络抖动:再试一次远比整个流程重跑划算。
+  - id: fetch
+    action: http.request
+    with: { url: "{{ inputs.endpoint }}", method: GET }
+    on_error: { mode: retry, retry_count: 2, retry_interval_ms: 500 }
+```
+
+`output` 是让 `continue` 变安全的关键。没有它,失败的步骤会绑定 `null`,下游每一个
+`{{ steps.x.result.* }}` 都会静静地读到那个 `null` —— 流程一路跑完、产出错误数据,
+而不是在失败处停下。给一个可区分的兜底值,就等于把「降级路径」保持可见:
+
+```yaml
+  - id: fetch
+    action: http.request
+    with: { url: "{{ inputs.endpoint }}" }
+    on_error: { mode: continue, output: { status: "unavailable" } }
+
+  - id: report
+    action: control.log
+    # fetch 失败时同样会执行,而且能分辨出它失败了:
+    with: { message: "upstream: {{ steps.fetch.result.status }}" }
+```
+
+`retry` **不会**降级成 `continue`:预算耗尽即运行失败。若让 `retry_count: 0` 变成静默
+忽略错误,那会以最危险的方向背离作者的意图 —— 写下「重试」的人想要的是「更稳」,
+不是「出错也别管」。
+
+校验期会拒绝未知的 `mode`,也会拒绝 `mode: continue` 搭配 `retry_count`(两者是互斥的
+决策)。linter 会在 `on_error.silent_bind` 上给出告警:`continue` 步骤绑定了输出,却没
+声明 `output` 兜底值 —— 那正是「被吞掉的失败」与「真实结果」变得无法区分的场合。
 
 ## Templates
 
@@ -242,10 +293,15 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | AI | `ai.chat` |
 | Archive | `archive.zip`, `archive.unzip` |
 | Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.back`, `browser.forward`, `browser.reload`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
-| Clipboard | `clipboard.get`, `clipboard.set` |
+| Clipboard | `clipboard.get`, `clipboard.set`, `clipboard.get_text`, `clipboard.set_text`, `clipboard.clear`, `clipboard.set_file` |
 | Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.while`, `control.break`, `control.continue`, `control.try`, `control.parallel`, `control.fail` |
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
 | Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
+| Desktop *(需 `desktop` feature)* | `desktop.click`, `desktop.type`, `desktop.key`, `desktop.move`, `desktop.scroll`, `desktop.drag`, `desktop.screenshot`, `desktop.click_text` |
+| Dialog | `dialog.message`, `dialog.confirm`, `dialog.input`, `dialog.select`, `dialog.select_file`, `dialog.select_dir`, `dialog.form`, `dialog.progress`, `dialog.custom` |
+| Dictionary | `dictionary.create`, `dictionary.get_value`, `dictionary.get_keys`, `dictionary.get_values`, `dictionary.set`, `dictionary.pop` |
+| Directory | `dir.if_exist`, `dir.makedir`, `dir.remove`, `dir.find_files`, `dir.find_subdirs`, `dir.get_special_dir`, `dir.selected_dirs_or_files`, `dir.rename`, `dir.move`, `dir.copy`, `dir.empty`, `dir.open` |
+| Document | `doc.parse`, `doc.to_markdown`, `doc.ocr` |
 | Date | `date.now`, `date.parse`, `date.format`, `date.add`, `date.diff`, `date.weekday`, `date.workday_add` |
 | Database | `db.sqlite_query`, `db.sqlite_exec`, `db.sqlite_batch`, `db.postgres_query`, `db.postgres_exec`, `db.postgres_batch`, `db.mysql_query`, `db.mysql_exec`, `db.mysql_batch` |
 | DOCX | `docx.read_text`, `docx.replace_placeholders` |
@@ -259,7 +315,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Human | `human.input`, `human.confirm`, `human.approve` |
 | Image | `image.locate`, `image.compare`, `image.ocr` |
 | JSON | `json.get`, `json.set`, `json.merge`, `json.keys`, `json.values`, `json.delete` |
-| List | `list.length`, `list.append`, `list.sort`, `list.unique`, `list.range`, `list.contains`, `list.get`, `list.slice`, `list.reverse`, `list.pluck` |
+| List | `list.length`, `list.append`, `list.sort`, `list.unique`, `list.range`, `list.contains`, `list.get`, `list.slice`, `list.reverse`, `list.pluck`, `list.create`, `list.get_elem`, `list.set_elem`, `list.get_len`, `list.get_index`, `list.append_or_insert`, `list.extend`, `list.remove`, `list.remove_list`, `list.clear`, `list.remove_duplicate`, `list.get_duplicate`, `list.shuffle` |
 | Math | `math.round`, `math.random`, `math.min`, `math.max`, `math.sum`, `math.avg`, `math.abs` |
 | MCP | `mcp.call`, `mcp.discover` |
 | Notification | `notify.send`, `notify.dingtalk`, `notify.feishu`, `notify.wecom` |
@@ -268,6 +324,8 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Skill | `skill.invoke` |
 | String | `string.upper`, `string.lower`, `string.trim`, `string.length`, `string.split`, `string.join`, `string.replace`, `string.contains`, `string.starts_with`, `string.ends_with`, `string.substring`, `string.repeat`, `string.pad_left`, `string.pad_right`, `string.format`, `string.encode_convert` |
 | System | `system.shell`, `system.env_get`, `system.sleep`, `system.platform`, `system.process_list`, `system.process_kill`, `system.app_start` |
+| Text | `text.append_text_in_newline`, `text.change_text_case`, `text.extract_content_from_text`, `text.get_text_length`, `text.join_list_to_text`, `text.pad_text`, `text.replace_content_from_text`, `text.split_text_to_list`, `text.sub_text`, `text.trim_text` |
+| Window *(需 `desktop` feature)* | `window.list`, `window.bounds`, `window.activate`, `window.close`, `window.minimize`, `window.maximize` |
 | XML | `xml.parse`, `xml.build`, `xml.xpath` |
 <!-- ACTIONS_END -->
 
@@ -293,6 +351,24 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
   ceiling. `control.parallel.with.max_concurrency` and parallel
   `control.for_each` default to 8 while preserving deterministic result order;
   `control.for_each` remains sequential unless `parallel: true` is set.
+- `control.for_each` additionally accepts `rate_per_sec` (> 0) — the minimum
+  spacing between consecutive iteration starts (between consecutive batch
+  starts in parallel mode) becomes `1/rate` seconds, for polite scraping and
+  API-quota compliance — and `max_failures` (>= 1), which relaxes the default
+  fail-fast semantics: ordinary item errors accumulate instead of aborting,
+  and only when the count reaches the threshold does the loop fail with a
+  circuit-breaker error. Control signals (cancel / timeout / pause /
+  break / continue) are never counted and always unwind immediately. The loop
+  output records both counters as `{ "iterations": N, "failures": M }`.
+- `ai.chat` accepts `untrusted_input` (string or string array): externally
+  collected content (web extractions, file text, emails) is fenced inside
+  `<untrusted_data>` blocks with an instructions-are-data guard added to both
+  the system and user prompt, instead of being concatenated raw. Lint warns
+  (`ai.high_risk`) when an AI step's output is templated straight into a
+  high-risk action (`system.shell`, `file.delete`/`file.write`,
+  `db.*_exec`/`db.*_batch`, `email.send`, `system.process_kill`/`app_start`)
+  without a human gate — pair with `human.approve` / `human.confirm` or
+  `dry_run`.
 
 `data.json_parse` / `data.json_format` are the document-oriented parse/format
 helpers; `json.get` / `json.set` / `json.merge` / `json.keys` / `json.values` /

@@ -13,6 +13,16 @@ The desktop control plane combines four surfaces:
 
 Raw microphone audio is not retained by default. The local pre-roll buffer is bounded and cleared on cancel/mute. Cloud STT is permitted only by the selected profile and receives post-wake audio. L2 external effects require confirmation; L3 operations use strengthened confirmation and cannot be approved by model output.
 
+### Summoning and moving the voice capsule
+
+The capsule is a separate borderless always-on-top window, so it can be summoned three ways and never becomes unreachable after it is dismissed:
+
+- The global shortcut (`CommandOrControl+Shift+Space` by default) toggles it from any application.
+- The `语音` button in the workbench titlebar toggles it and permanently displays the currently bound shortcut.
+- The tray menu entry `唤起 / 收起 Lumo 语音` works even while the main window is closed.
+
+Dragging anywhere on the capsule except its two buttons moves it; the position is remembered in `capsule-window.json` under the app data directory and is restored on the next summon. A remembered position that no longer overlaps any connected display falls back to bottom-center of the active screen. The capsule's `×` stops listening and hides the window — a toast then repeats the shortcut. Bindings are edited in 设置 → 桌面语音与隐私, whose first card lists all three summon paths.
+
 Supervised self-improvement is versioned and approval-gated: redacted completed traces may produce structured proposals, but proposals must pass replay evaluation and explicit human approval before a new version becomes active. Applied versions retain rollback metadata.
 
 ### MCP command surface
@@ -36,11 +46,16 @@ Long-running agent jobs use durable leases and heartbeats. After a crash, idempo
 ## Local Build
 
 ```bash
-cd apps/desktop
-cargo tauri build --bundles app,dmg
+scripts/build-desktop.sh "" app,dmg
 ```
 
-macOS outputs are written under `src-tauri/target/release/bundle/` when built from this directory, or the workspace `target/release/bundle/` when Cargo uses the workspace target directory.
+macOS outputs are written under the workspace `target/release/bundle/`.
+
+Prefer the script over a bare `cargo tauri build`: `createUpdaterArtifacts` is
+enabled but the updater pubkey lives in `LUMO_UPDATER_PUBKEY` rather than
+`tauri.conf.json`, and the script feeds it to the bundler. Export it to produce
+signed `.tar.gz`/`.sig` updater artifacts (alongside
+`TAURI_SIGNING_PRIVATE_KEY`); leave it unset for a plain local installer.
 
 ### Universal (Intel + Apple Silicon)
 

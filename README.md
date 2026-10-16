@@ -64,15 +64,15 @@ targets) containing `bin/lumo`, the bundled `examples/`, `README.md`, and `LICEN
 
 ## Desktop App
 
-Run or package the Tauri desktop workbench:
+Run the Tauri desktop workbench in development:
 
 ```bash
 cd apps/desktop
 cargo tauri dev
-cargo tauri build --bundles app,dmg
 ```
 
-Platform package commands:
+Package it with the build script, which supplies the updater pubkey the bundler
+needs (see below):
 
 ```bash
 # macOS
@@ -90,6 +90,14 @@ scripts/build-desktop.sh aarch64-unknown-linux-gnu deb,rpm,appimage
 # Kylin LoongArch, on a loongarch64 Linux builder
 scripts/build-desktop.sh loongarch64-unknown-linux-gnu deb,rpm
 ```
+
+**Updater artifacts.** `tauri.conf.json` enables `createUpdaterArtifacts` but
+holds no `plugins.updater` block — the pubkey is injected at runtime from
+`LUMO_UPDATER_PUBKEY` (`apps/desktop/src-tauri/src/lib.rs`). The bundler needs
+the same key, so `scripts/build-desktop.sh` passes it through. Export it
+together with `TAURI_SIGNING_PRIVATE_KEY` to get signed `.tar.gz`/`.sig`
+artifacts; leave it unset and the script builds a plain installer without them.
+A bare `cargo tauri build` fails at bundling for this reason.
 
 Desktop details live in `apps/desktop/README.md`.
 

@@ -45,13 +45,26 @@ fi
 
 cd "$DESKTOP"
 
+# tauri.conf.json enables createUpdaterArtifacts but deliberately carries no
+# `plugins.updater` block: the pubkey is injected at runtime from
+# LUMO_UPDATER_PUBKEY (see apps/desktop/src-tauri/src/lib.rs). The bundler still
+# needs a valid key at bundle time, so supply it from the same variable here
+# instead of committing one. Without it, updater artifacts are skipped so a
+# plain local build still produces an installer.
+if [[ -n "${LUMO_UPDATER_PUBKEY:-}" ]]; then
+  UPDATER_CONFIG="{\"plugins\":{\"updater\":{\"pubkey\":\"${LUMO_UPDATER_PUBKEY}\"}}}"
+else
+  UPDATER_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'
+  echo "LUMO_UPDATER_PUBKEY is not set; skipping updater artifacts (.tar.gz/.sig)." >&2
+fi
+
 run_tauri_build() {
   local bundles="$1"
 
   if [[ -n "$TARGET" ]]; then
-    cargo tauri build --target "$TARGET" --bundles "$bundles"
+    cargo tauri build --target "$TARGET" --bundles "$bundles" --config "$UPDATER_CONFIG"
   else
-    cargo tauri build --bundles "$bundles"
+    cargo tauri build --bundles "$bundles" --config "$UPDATER_CONFIG"
   fi
 }
 
@@ -214,11 +227,14 @@ if [[ "$OS_NAME" == "Darwin" ]] && bundle_contains "$BUNDLES" "dmg"; then
     exit 0
   fi
 
-  if run_tauri_build "$BUNDLES"; then
+  # `$?` after an `if` whose branch never ran is the status of the `if` itself
+  # (always 0), so capture the build's real exit code directly.
+  status=0
+  run_tauri_build "$BUNDLES" || status=$?
+  if [[ "$status" -eq 0 ]]; then
     exit 0
   fi
 
-  status=$?
   if [[ "${LUMORPA_DMG_FALLBACK:-1}" == "0" ]]; then
     exit "$status"
   fi
