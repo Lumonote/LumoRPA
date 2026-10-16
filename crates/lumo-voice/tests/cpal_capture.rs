@@ -1,3 +1,11 @@
+//! 麦克风采集集成测试。随 `capture` feature 编译：`cpal_capture` 模块本身在
+//! 该 feature 关闭时不存在（见 crates/lumo-voice/src/lib.rs），默认构建不编译
+//! 这个文件。CI 的 `cargo test -p lumo-voice --features capture` 步骤负责跑到它。
+//!
+//! 注意 `convert_interleaved_f32` 是纯函数（重采样/混音），本可不依赖 cpal；
+//! 但它定义在 `cpal_capture` 模块内，故一并门控。
+#![cfg(feature = "capture")]
+
 use lumo_voice::cpal_capture::{convert_interleaved_f32, CpalAudioCapture};
 use lumo_voice::provider::{AudioCapture, ProviderError};
 use tokio::sync::mpsc;
