@@ -1,0 +1,49 @@
+<!doctype html>
+<!-- i18n 验证页：从真实 index.html 抽出 #capabilityHubView 标记，挂载真实的
+     capability-hub 模块（后端 call 用空数据替身），验证默认中文与切到 en 的
+     表现。?locale=en 渲染英文。 -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../src/styles.css" />
+    <link rel="stylesheet" href="../src/styles/capability-hub.css" />
+    <style>
+      body { margin: 0; padding: 12px; background: #0b1020; }
+      #verdict { font: 12px monospace; padding: 6px; background: #000; color: #0f0; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="verdict">loading…</div>
+    <div id="mount"></div>
+    <script type="module">
+      import { applyStaticTranslations, setLocale, getLocale } from "../src/js/i18n.js";
+      import { mountCapabilityHub } from "../src/js/capability-hub.js";
+
+      const locale = new URLSearchParams(location.search).get("locale") || "zh-CN";
+      setLocale(locale);
+
+      // 用真实 index.html 的标记，避免"验证页和产品页不同步"这种假绿
+      const source = await (await fetch("../src/index.html")).text();
+      const parsed = new DOMParser().parseFromString(source, "text/html");
+      const hub = parsed.querySelector("#capabilityHubView");
+      hub.style.display = "";
+      document.getElementById("mount").append(document.importNode(hub, true));
+
+      const root = document.querySelector("#capabilityHubView");
+      applyStaticTranslations(document);
+      // 后端替身：空数据，聚焦文案而非数据渲染
+      mountCapabilityHub({ root, call: async () => [] });
+
+      await new Promise((r) => setTimeout(r, 300));
+      const text = root.textContent;
+      const leftoverKeys = [...text.matchAll(/\b(?:hub|nav|settings|features|common)\.[a-z_.]+/g)].map((m) => m[0]);
+      const englishMarkers = ["Discover, govern", "No MCP servers configured", "Connect or import", "Choose an import source", "Secure ingestion"];
+      const found = englishMarkers.filter((marker) => text.includes(marker));
+      document.getElementById("verdict").textContent = [
+        `locale=${getLocale()}`,
+        `未翻译的裸键: ${leftoverKeys.length ? leftoverKeys.join(", ") : "无 ✓"}`,
+        `英文原文残留: ${found.length ? found.join(" | ") : "无 ✓"}`,
+      ].join("\n");
+    </script>
+  </body>
+</html>

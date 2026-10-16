@@ -60,3 +60,19 @@ test("capsule motion honors reduced motion", () => {
   assert.match(css, /--cyan:\s*#35f2ff/);
   assert.doesNotMatch(css, /--pink|--coral|--lime/);
 });
+
+test("capsule is draggable and says how to get it back", () => {
+  const html = renderVoiceCapsule({ ...createVoiceProjection(), recallHint: "按 ⌥L 或点击顶栏「语音」重新唤起" });
+  // 无边框窗口只能靠拖拽区移动，按钮不能落在拖拽区里，否则点不动。
+  assert.match(html, /<section class="voice-capsule[^"]*" data-tauri-drag-region/);
+  assert.equal(html.match(/data-tauri-drag-region/g).length, 1);
+  assert.doesNotMatch(html, /<button[^>]*data-tauri-drag-region/);
+  assert.match(html, /按住拖动/);
+  assert.match(html, /title="停止并收起 按 ⌥L 或点击顶栏「语音」重新唤起"/);
+});
+
+test("capsule drag region covers the whole capsule except its buttons", () => {
+  const css = fs.readFileSync(new URL("../src/styles/voice-capsule.css", import.meta.url), "utf8");
+  assert.match(css, /\.voice-capsule > \*:not\(\.vc-actions\)\s*\{\s*pointer-events:\s*none/);
+  assert.match(css, /\.voice-capsule\s*\{\s*cursor:\s*grab/);
+});

@@ -1,138 +1,11 @@
-// "Good-enough" LumoFlow YAML parser + textual mutation helpers. The Code view
-// is the source of truth; this lets the Graph/Tree/Steps views render and the
-// inspector/editor patch steps in place while preserving comments.
+// YAML parser + textual mutation helpers. The Code view remains the source of
+// truth; js-yaml gives the editor the same YAML semantics as the Rust runtime
+// (quoted strings, block scalars, nested branches and flow-style collections).
+import { load as loadYaml } from "./vendor/js-yaml.mjs";
 
 export function parseYaml(text) {
-  const lines = text.split(/\r?\n/);
-  const root = {};
-  const stack = [{ indent: -1, value: root, kind: "map" }];
-  let i = 0;
-
-  function isBlank(line) { return /^\s*(#|$)/.test(line); }
-  function indentOf(line) {
-    const m = line.match(/^( *)/);
-    return m ? m[1].length : 0;
-  }
-  function nextContentLine(start) {
-    for (let j = start; j < lines.length; j++) {
-      if (isBlank(lines[j])) continue;
-      const indent = indentOf(lines[j]);
-      return { indent, line: lines[j].slice(indent) };
-    }
-    return null;
-  }
-
-  while (i < lines.length) {
-    const raw = lines[i];
-    if (isBlank(raw)) { i++; continue; }
-    const ind = indentOf(raw);
-    const line = raw.slice(ind);
-
-    while (stack.length > 1 && ind <= stack[stack.length - 1].indent) {
-      stack.pop();
-    }
-    const top = stack[stack.length - 1];
-
-    if (line.startsWith("- ") || line === "-") {
-      // List entry. Top must be a list.
-      if (top.kind !== "list") {
-        // Promote: parent key should hold a list. The previous map entry that
-        // pointed here was treated as scalar; rewrite to list.
-        // (This happens when key: appears with the list children on next lines.)
-        // We assume top is now expecting a list.
-        top.kind = "list";
-        top.value = [];
-        // Re-attach to parent key
-        const parent = stack[stack.length - 2];
-        if (parent && parent.lastKey) {
-          if (parent.kind === "map") parent.value[parent.lastKey] = top.value;
-        }
-      }
-      const after = line === "-" ? "" : line.slice(2);
-      if (after.startsWith("- ") || after === "-") {
-        const arr = [];
-        top.value.push(arr);
-        stack.push({ indent: ind, value: arr, kind: "list", lastKey: null });
-        lines[i] = " ".repeat(ind + 2) + after;
-        continue;
-      }
-      if (after === "" || /^\s*$/.test(after)) {
-        const next = nextContentLine(i + 1);
-        if (next && next.indent > ind && (next.line.startsWith("- ") || next.line === "-")) {
-          const arr = [];
-          top.value.push(arr);
-          stack.push({ indent: ind, value: arr, kind: "list", lastKey: null });
-          i++;
-          continue;
-        }
-        // Empty item: object whose keys come at deeper indent
-        const obj = {};
-        top.value.push(obj);
-        stack.push({ indent: ind, value: obj, kind: "map", lastKey: null });
-        i++;
-        continue;
-      }
-      if (after.includes(":") && !after.startsWith("{")) {
-        // Inline first key like "- id: foo"
-        const obj = {};
-        top.value.push(obj);
-        const child = { indent: ind, value: obj, kind: "map", lastKey: null };
-        stack.push(child);
-        // Re-process current line as a map entry at +2 indent
-        const fakeLine = " ".repeat(ind + 2) + after;
-        lines[i] = fakeLine;
-        continue;
-      }
-      // Scalar list item
-      top.value.push(parseScalar(after));
-      i++;
-      continue;
-    }
-
-    // map entry
-    const colon = line.indexOf(":");
-    if (colon < 0) { i++; continue; }
-    const key = line.slice(0, colon).trim();
-    const restRaw = line.slice(colon + 1);
-    const rest = restRaw.replace(/\s+#.*$/, "").trim();
-
-    if (top.kind !== "map") {
-      // promote (rare); skip safety.
-      i++; continue;
-    }
-
-    if (rest === "" || rest === "|" || rest === ">") {
-      if (rest === "|" || rest === ">") {
-        // Block scalar — collect until indent <= current.
-        const blockLines = [];
-        i++;
-        const blockIndent = ind + 2;
-        while (i < lines.length) {
-          const bRaw = lines[i];
-          if (bRaw.trim() === "") { blockLines.push(""); i++; continue; }
-          if (indentOf(bRaw) < blockIndent) break;
-          blockLines.push(bRaw.slice(blockIndent));
-          i++;
-        }
-        top.value[key] = rest === "|" ? blockLines.join("\n") : blockLines.join(" ").trim();
-        top.lastKey = key;
-        continue;
-      }
-      // Empty: child container coming.
-      const placeholder = {};
-      top.value[key] = placeholder;
-      top.lastKey = key;
-      stack.push({ indent: ind, value: placeholder, kind: "map", lastKey: null });
-      i++;
-      continue;
-    }
-    // Inline scalar / flow-style
-    top.value[key] = parseScalar(rest);
-    top.lastKey = key;
-    i++;
-  }
-
-  return root;
+  const value = loadYaml(String(text ?? ""));
+  return value && typeof value === "object" ? value : {};
 }
 
 export function parseScalar(s) {
@@ -431,6 +304,20 @@ export function emitStep(step, baseIndent) {
     out += `${cIndent}retry:\n`;
     out += emitYamlMapEntries(step.retry, baseIndent + 4);
   }
+  // Failure handling. Emitted only when it actually differs from the default,
+  // so re-saving an untouched step does not grow the file with a no-op block.
+  // `output` is the reason this has to round-trip at all: drop it and a
+  // downstream `{{ steps.x.result.* }}` silently becomes undefined.
+  const oe = step.on_error;
+  if (oe && Object.keys(oe).length && (oe.mode !== "interrupt" || oe.output !== undefined)) {
+    out += `${cIndent}on_error:\n`;
+    if (oe.mode) out += emitYamlField("mode", oe.mode, baseIndent + 4);
+    if (oe.retry_count) out += emitYamlField("retry_count", oe.retry_count, baseIndent + 4);
+    if (oe.retry_interval_ms) {
+      out += emitYamlField("retry_interval_ms", oe.retry_interval_ms, baseIndent + 4);
+    }
+    if (oe.output !== undefined) out += emitYamlField("output", oe.output, baseIndent + 4);
+  }
   if (step.ai && (step.ai.mode || step.ai.model || step.ai.prompt)) {
     out += `${cIndent}ai:\n`;
     if (step.ai.mode) out += emitYamlField("mode", step.ai.mode, baseIndent + 4);
@@ -532,4 +419,142 @@ export function yamlInline(v) {
   }
   if (typeof v === "boolean" || typeof v === "number") return String(v);
   return JSON.stringify(v);
+}
+
+// ─── Step-block clipboard helpers (copy / duplicate / paste / batch delete) ──
+// All operate on the YAML source text so comments inside untouched regions
+// survive, mirroring the mutation helpers above.
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Every step id in the flow, including nested do/else/catch/finally/branches. */
+export function collectStepIds(source) {
+  const ids = new Set();
+  walkSteps(extractSteps(parseYaml(source)), (step) => {
+    if (step?.id != null && step.id !== "") ids.add(String(step.id));
+  });
+  return ids;
+}
+
+/** The step's full block (children included), dedented to column 0. */
+export function extractStepBlock(source, id) {
+  const lines = source.split(/\r?\n/);
+  const range = findStepRange(lines, id);
+  if (!range) return null;
+  const text = lines
+    .slice(range.startIdx, range.endIdx)
+    .map((l) => (l.trim() === "" ? "" : l.slice(range.baseIndent)))
+    .join("\n")
+    .replace(/\n*$/, "\n");
+  return { text, baseIndent: range.baseIndent };
+}
+
+/**
+ * Rename ids in a dedented block that collide with `existingIds` (nested ids
+ * too), and rewrite `steps.<oldId>` template references inside the block so a
+ * pasted copy keeps referring to its own steps. Returns { text, renames }.
+ */
+export function uniquifyStepIds(blockText, existingIds) {
+  const taken = new Set(existingIds);
+  const renames = new Map();
+  const lines = blockText.split("\n").map((line) => {
+    const m = line.match(/^(\s*-\s+id:\s*)("([^"]*)"|'([^']*)'|[^#]*?)(\s*(?:#.*)?)$/);
+    if (!m) return line;
+    const rawId = (m[3] ?? m[4] ?? m[2]).trim();
+    if (!rawId) return line;
+    if (!taken.has(rawId)) {
+      taken.add(rawId);
+      return line;
+    }
+    const base = rawId.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "step";
+    let n = 1;
+    while (taken.has(`${base}_c${n}`)) n++;
+    const newId = `${base}_c${n}`;
+    taken.add(newId);
+    renames.set(rawId, newId);
+    return `${m[1]}${yamlScalar(newId)}${m[5] || ""}`;
+  });
+  let text = lines.join("\n");
+  for (const [oldId, newId] of renames) {
+    text = text.replace(new RegExp(`\\bsteps\\.${escapeRegExp(oldId)}\\b`, "g"), `steps.${newId}`);
+  }
+  return { text, renames };
+}
+
+/** Insert a dedented block as the sibling right after `targetId`. */
+export function insertStepBlockAfter(source, targetId, blockText) {
+  const lines = source.split(/\r?\n/);
+  const range = findStepRange(lines, targetId);
+  if (!range) return null;
+  const pad = " ".repeat(range.baseIndent);
+  const blockLines = blockText
+    .replace(/\n+$/, "")
+    .split("\n")
+    .map((l) => (l === "" ? "" : pad + l));
+  return lines.slice(0, range.endIdx).concat(blockLines).concat(lines.slice(range.endIdx)).join("\n");
+}
+
+function topStepIdOfBlock(blockText) {
+  const m = blockText.match(/^\s*-\s+id:\s*("([^"]*)"|'([^']*)'|\S+)/);
+  if (!m) return null;
+  return (m[2] ?? m[3] ?? m[1]).trim();
+}
+
+/**
+ * Paste `blocks` (dedented step blocks) in order after `targetId`; a null
+ * target appends after the last top-level step. Colliding ids are renamed
+ * before each insert.
+ */
+export function insertStepBlocks(source, targetId, blocks) {
+  let out = source;
+  let anchor = targetId;
+  if (anchor == null) {
+    const steps = extractSteps(parseYaml(out));
+    anchor = steps.length ? String(steps[steps.length - 1].id) : null;
+  }
+  for (const block of blocks) {
+    const { text } = uniquifyStepIds(block, collectStepIds(out));
+    const topId = topStepIdOfBlock(text);
+    if (!topId) continue;
+    let next = anchor == null ? null : insertStepBlockAfter(out, anchor, text);
+    if (next == null) {
+      const pad = " ".repeat(4);
+      const blockLines = text
+        .replace(/\n+$/, "")
+        .split("\n")
+        .map((l) => (l === "" ? "" : pad + l));
+      next = out.replace(/\n*$/, "\n") + blockLines.join("\n") + "\n";
+    }
+    out = next;
+    anchor = topId;
+  }
+  return out;
+}
+
+/** Delete the blocks of every id in `ids` (top-level or nested). */
+export function removeStepBlocks(source, ids) {
+  let lines = source.split(/\r?\n/);
+  for (const id of ids) {
+    const range = findStepRange(lines, id);
+    if (!range) continue;
+    lines = lines.slice(0, range.startIdx).concat(lines.slice(range.endIdx));
+  }
+  return lines.join("\n");
+}
+
+/** Resolve pathKeys to ids, both returned in document (walk) order. */
+export function orderPathKeysByDocument(source, keys) {
+  const want = new Set(keys);
+  const orderedKeys = [];
+  const orderedIds = [];
+  walkSteps(extractSteps(parseYaml(source)), (step, info) => {
+    const key = pathKey(info.path);
+    if (want.has(key)) {
+      orderedKeys.push(key);
+      orderedIds.push(String(step.id));
+    }
+  });
+  return { orderedIds, orderedKeys };
 }

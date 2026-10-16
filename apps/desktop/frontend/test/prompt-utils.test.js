@@ -24,6 +24,10 @@ test("pickRunningRunIds filters running runs with ids", () => {
     null,
   ];
   assert.deepEqual(pickRunningRunIds(runs), ["a"]);
+  assert.deepEqual(
+    pickRunningRunIds([{ id: "a", state: "running" }, { id: "b", state: "running" }], "b"),
+    ["b"],
+  );
   assert.deepEqual(pickRunningRunIds(undefined), []);
 });
 

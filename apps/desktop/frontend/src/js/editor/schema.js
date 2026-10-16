@@ -47,7 +47,8 @@ export function renderSchemaFields(schema, withValue) {
           .join("");
         control = `<select data-with-key="${html(key)}" data-type="string">${options}</select>`;
       } else if (type === "boolean") {
-        control = `<label class="toggle"><input type="checkbox" data-with-key="${html(key)}" data-type="boolean" ${cur ? "checked" : ""}/> ${cur ? "true" : "false"}</label>`;
+        const boolValue = isSet ? Boolean(cur) : hasDefault ? Boolean(spec.default) : false;
+        control = `<label class="toggle"><input type="checkbox" data-with-key="${html(key)}" data-type="boolean" ${boolValue ? "checked" : ""}/> ${boolValue ? "true" : "false"}</label>`;
       } else if (type === "integer" || type === "number") {
         control = `<input type="number" data-with-key="${html(key)}" data-type="${type}" value="${html(val)}"${ph}/>`;
       } else if (type === "object" || type === "array") {

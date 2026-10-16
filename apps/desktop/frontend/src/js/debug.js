@@ -13,6 +13,7 @@ import { call } from "./api.js";
 import { state } from "./state.js";
 import { applyRunResponse, setRunInFlight } from "./runs.js";
 import { switchRightSection } from "./views.js";
+import { ensureCurrentFlowSaved } from "./flows.js";
 
 export function isBreakpoint(stepId) {
   return !!stepId && state.breakpoints.has(stepId);
@@ -36,8 +37,11 @@ function breakpointList() {
 async function runDebug({ step, resumeFrom }) {
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
   setStatus("调试中…", "warn");
+  state.liveRunProgress = null;
+  $("outputBox").textContent = "准备调试…";
   setRunInFlight(true);
   try {
+    await ensureCurrentFlowSaved();
     const response = await call("debug_flow", {
       path: state.flowPath,
       inputsJson: $("inputsJson").value || "{}",

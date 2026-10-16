@@ -65,6 +65,84 @@ test("walkSteps, findStepByPath, and stepIdChain understand branch paths", () =>
   assert.equal(stepIdChain(steps, [0, "branches", 1, 0]), "parallel/branch[1]/b_wait");
 });
 
+// Failure handling has to survive a canvas round-trip. If the emitter drops
+// `on_error`, editing any other field on the node silently resets the step to
+// fail-fast — and a dropped `output` turns a downstream
+// `{{ steps.x.result.* }}` into an undefined reference.
+
+test("emitStep round-trips a continue fallback with its default output", () => {
+  const source = emitStep(
+    {
+      id: "boom",
+      action: "file.read",
+      on_error: { mode: "continue", output: { status: "degraded" } },
+    },
+    4,
+  );
+  const step = extractSteps(parseYaml(`spec:\n  steps:\n${source}\n`))[0];
+
+  assert.equal(step.on_error.mode, "continue");
+  assert.equal(step.on_error.output.status, "degraded");
+});
+
+test("emitStep round-trips retry mode with its count and interval", () => {
+  const source = emitStep(
+    {
+      id: "flaky",
+      action: "http.request",
+      on_error: { mode: "retry", retry_count: 3, retry_interval_ms: 250 },
+    },
+    4,
+  );
+  const step = extractSteps(parseYaml(`spec:\n  steps:\n${source}\n`))[0];
+
+  assert.equal(step.on_error.mode, "retry");
+  assert.equal(step.on_error.retry_count, 3);
+  assert.equal(step.on_error.retry_interval_ms, 250);
+});
+
+test("emitStep omits an on_error block that changes nothing", () => {
+  // Re-saving an untouched node must not grow the file with a no-op block.
+  const source = emitStep(
+    { id: "plain", action: "file.read", on_error: { mode: "interrupt" } },
+    4,
+  );
+  assert.ok(!source.includes("on_error"), `unexpected block in:\n${source}`);
+});
+
+test("emitStep keeps an explicit default mode when it carries an output", () => {
+  // `mode: interrupt` alone is a no-op, but paired with `output` it is not:
+  // the fallback still has to reach the downstream reference.
+  const source = emitStep(
+    {
+      id: "boom",
+      action: "file.read",
+      on_error: { mode: "interrupt", output: "n/a" },
+    },
+    4,
+  );
+  const step = extractSteps(parseYaml(`spec:\n  steps:\n${source}\n`))[0];
+
+  assert.match(source, /on_error:/);
+  assert.equal(step.on_error.output, "n/a");
+});
+
+test("emitStep keeps both a retry policy and failure handling", () => {
+  const source = emitStep(
+    {
+      id: "both",
+      action: "http.request",
+      retry: { times: 2, backoff: "fixed", initial_ms: 100 },
+      on_error: { mode: "continue" },
+    },
+    4,
+  );
+  const step = extractSteps(parseYaml(`spec:\n  steps:\n${source}\n`))[0];
+
+  assert.equal(step.retry.times, 2);
+  assert.equal(step.on_error.mode, "continue");
+});
+
 test("emitStep writes branches that parse back to the same branch shape", () => {
   const source = emitStep(
     {

@@ -7,8 +7,10 @@ import { state } from "./state.js";
 import { emitStep, extractSteps, findStepRange, parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { refreshFlows, loadFlow } from "./flows.js";
+import { runSelectedFlow } from "./runs.js";
 import { switchTopView } from "./views.js";
 import { refreshElementLibrary } from "./elements.js";
+import { snapshotSource } from "./editor/history.js";
 
 let recorderTick = null;
 let recorderStartedAt = 0;
@@ -193,6 +195,7 @@ function renderRecorderPatch(yaml) {
       <div style="display:flex;gap:6px">
         <button id="recorderPatchCopyBtn" title="复制到剪贴板">📋 复制</button>
         <button id="recorderPatchSaveBtn" title="另存为一个新流程文件，进入「录制产物」">💾 另存为新流程</button>
+        <button id="recorderPatchRunBtn" class="primary" title="合并到当前流程并立即执行">▶ 合并并运行</button>
         <button class="primary" id="recorderPatchInsertBtn" title="追加到当前打开的流程末尾">⤓ 插入到当前流程</button>
       </div>
     </div>
@@ -207,8 +210,44 @@ function renderRecorderPatch(yaml) {
   };
   const insert = $("recorderPatchInsertBtn");
   if (insert) insert.onclick = () => insertRecorderPatchIntoFlow();
+  const run = $("recorderPatchRunBtn");
+  if (run) run.onclick = () => runRecorderPatch();
   const save = $("recorderPatchSaveBtn");
   if (save) save.onclick = () => saveRecorderPatchAsFlow();
+}
+
+async function runRecorderPatch() {
+  if (!pendingRecorderPatch.trim()) {
+    toast("没有可运行内容", "先录制一段操作", "bad");
+    return;
+  }
+  try {
+    if (!state.flowPath) {
+      const proposed = `rec-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}`;
+      const name = prompt("保存为流程名（不带扩展名）：", proposed);
+      if (!name) return;
+      const path = await call("save_recording_as_flow", { name, yamlHint: pendingRecorderPatch });
+      await refreshFlows();
+      await loadFlow(path);
+    } else {
+      const nextSource = mergeRecorderPatchIntoSource(state.source || "", pendingRecorderPatch);
+      if (!nextSource) {
+        toast("没有可运行步骤", "本次录制没有产生可合并的 browser/desktop 动作", "bad");
+        return;
+      }
+      snapshotSource("recorder-merge-run");
+      state.source = nextSource;
+      state.ast = parseYaml(state.source);
+      await call("save_flow_source", { path: state.flowPath, source: state.source });
+      state.savedSource = state.source;
+      renderActiveView();
+    }
+    pendingRecorderPatch = "";
+    switchTopView("design");
+    await runSelectedFlow();
+  } catch (e) {
+    toast("快速运行失败", String(e), "bad");
+  }
 }
 
 async function saveRecorderPatchAsFlow() {
@@ -250,6 +289,7 @@ async function insertRecorderPatchIntoFlow() {
     toast("没有可插入步骤", "本次录制没有产生可合并的 browser/desktop 动作", "bad");
     return;
   }
+  snapshotSource("recorder-merge");
   state.source = nextSource;
   try {
     state.ast = parseYaml(state.source);

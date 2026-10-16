@@ -6,6 +6,7 @@ import { state } from "./state.js";
 import { CAP_KINDS } from "./constants.js";
 import { parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
+import { snapshotSource } from "./editor/history.js";
 
 export async function renderCapabilitiesPanel() {
   const body = $("capabilitiesBody");
@@ -60,6 +61,7 @@ export async function renderCapabilitiesPanel() {
         toast("权限", added ? `已添加 ${kind} → ${grant}` : `${grant} 已存在,无需重复`, added ? "ok" : "warn");
         if (added) {
           // Re-read the YAML so the editor view stays in sync with disk.
+          snapshotSource("capability-sync");
           state.source = await call("read_flow_source", { path: state.flowPath });
           parseYaml(state.source);
           renderActiveView();

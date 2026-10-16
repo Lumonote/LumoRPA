@@ -1,7 +1,7 @@
 // Steps view: YingDao-style linear flowchart with inline expand + drag/drop
 // reorder and drag-to-insert from the action library.
 
-import { $, html, toast } from "../dom.js";
+import { $, html, setStatus, toast } from "../dom.js";
 import { state } from "../state.js";
 import {
   extractSteps, findStepByPath, walkSteps, pathKey, parsePathKey, cssEscape,
@@ -17,6 +17,8 @@ import {
   appendStepToSource, insertStepAfterPath, insertNewStepNear,
   deleteStepByPath, moveStepBefore,
 } from "./mutations.js";
+import { snapshotSource } from "./history.js";
+import { bindOnce } from "../bind-once.js";
 
 export function renderStepList() {
   const root = $("stepList");
@@ -64,22 +66,25 @@ export function renderStepList() {
 
   root.innerHTML = parts.join("");
   bindStepListEvents();
-  bindFlowDropZone(root);
 }
 
 export function bindFlowDropZone(zone) {
   if (!zone) return;
-  zone.addEventListener("dragover", (e) => {
-    if (e.dataTransfer.types.includes("text/x-lumo-action")) {
-      e.preventDefault();
-      zone.classList.add("is-drop-hover");
-    }
-  });
-  zone.addEventListener("dragleave", () => zone.classList.remove("is-drop-hover"));
-  zone.addEventListener("drop", (e) => {
-    zone.classList.remove("is-drop-hover");
-    const actionId = e.dataTransfer.getData("text/x-lumo-action");
-    if (actionId) { e.preventDefault(); appendStepToSource(actionId); }
+  // 空态 dropzone 是重建节点（bindOnce 对新节点总会挂载），而 #stepList 根
+  // 会被复用 —— 没有 bindOnce 时每次渲染都会再挂一份 drop 监听。
+  bindOnce(zone, "flow-dropzone", (el) => {
+    el.addEventListener("dragover", (e) => {
+      if (e.dataTransfer.types.includes("text/x-lumo-action")) {
+        e.preventDefault();
+        el.classList.add("is-drop-hover");
+      }
+    });
+    el.addEventListener("dragleave", () => el.classList.remove("is-drop-hover"));
+    el.addEventListener("drop", (e) => {
+      el.classList.remove("is-drop-hover");
+      const actionId = e.dataTransfer.getData("text/x-lumo-action");
+      if (actionId) { e.preventDefault(); appendStepToSource(actionId); }
+    });
   });
 }
 
@@ -89,11 +94,12 @@ function renderStepRow({ step, depth, path }, idx) {
   const selectedKey = pathKey(state.selectedStepPath || []);
   const myKey = pathKey(path);
   const selected = selectedKey === myKey;
+  const multiSelected = state.selectedStepPaths?.has(myKey) || false;
   const family = (step.action || "misc").split(".")[0];
   const zh = zhAction(step.action);
   const summary = renderWithSummary(step.with);
   const indent = depth * 16 + 4;
-  return `<div class="step-row family-${html(family)} ${selected ? "is-selected" : ""}"
+  return `<div class="step-row family-${html(family)} ${selected ? "is-selected" : ""} ${multiSelected ? "is-multi-selected" : ""}"
               data-step-path="${html(myKey)}" data-step-idx="${idx}"
               draggable="true"
               style="padding-left: ${indent}px">
@@ -151,17 +157,25 @@ function bindStepListEvents() {
     }
     const row = e.target.closest(".step-row");
     if (row && !e.target.closest("[data-expand-body]")) {
-      selectStep(parsePathKey(row.dataset.stepPath));
+      const key = row.dataset.stepPath;
+      if (e.metaKey || e.ctrlKey) { toggleMultiSelect(key); return; }
+      if (e.shiftKey) { rangeMultiSelect(key); return; }
+      if (state.selectedStepPaths?.size) clearMultiSelection();
+      selectStep(parsePathKey(key));
     }
   };
-  // Container drop: action library → append new step at end
-  root.addEventListener("dragover", (e) => {
-    if (e.dataTransfer.types.includes("text/x-lumo-action")) e.preventDefault();
-  });
-  root.addEventListener("drop", (e) => {
-    if (e.target !== root) return; // children handle their own
-    const actionId = e.dataTransfer.getData("text/x-lumo-action");
-    if (actionId) { e.preventDefault(); appendStepToSource(actionId); }
+  // Container drop: action library → append new step at end.
+  // #stepList 是常驻容器，本函数每次 renderStepList 都会重跑：静态监听必须
+  // bindOnce，否则监听器随渲染次数堆积，一次拖放会插入 N 个步骤。
+  bindOnce(root, "steplist-container-drop", (el) => {
+    el.addEventListener("dragover", (e) => {
+      if (e.dataTransfer.types.includes("text/x-lumo-action")) e.preventDefault();
+    });
+    el.addEventListener("drop", (e) => {
+      if (e.target !== el) return; // children handle their own
+      const actionId = e.dataTransfer.getData("text/x-lumo-action");
+      if (actionId) { e.preventDefault(); appendStepToSource(actionId); }
+    });
   });
   // Drop on connector = insert action there
   root.querySelectorAll(".flow-connector[data-insert-after]").forEach((c) => {
@@ -230,6 +244,57 @@ function bindStepListEvents() {
   $("addStepBottomBtn")?.addEventListener("click", () => appendStepToSource("control.log"));
 }
 
+// ─── Multi-select (Ctrl/Cmd+click toggle, Shift+click range) ────────────────
+
+function ensureMultiSet() {
+  if (!(state.selectedStepPaths instanceof Set)) state.selectedStepPaths = new Set();
+  return state.selectedStepPaths;
+}
+
+function documentOrderKeys() {
+  const keys = [];
+  walkSteps(extractSteps(state.ast), (step, info) => keys.push(pathKey(info.path)));
+  return keys;
+}
+
+function toggleMultiSelect(key) {
+  const set = ensureMultiSet();
+  if (!set.size && state.selectedStepPath) set.add(pathKey(state.selectedStepPath));
+  if (set.has(key)) set.delete(key);
+  else set.add(key);
+  refreshMultiSelectClasses();
+}
+
+function rangeMultiSelect(key) {
+  const set = ensureMultiSet();
+  const order = documentOrderKeys();
+  const anchorKey = state.selectedStepPath
+    ? pathKey(state.selectedStepPath)
+    : [...set][set.size - 1] || key;
+  const a = order.indexOf(anchorKey);
+  const b = order.indexOf(key);
+  if (a < 0 || b < 0) return;
+  for (let i = Math.min(a, b); i <= Math.max(a, b); i++) set.add(order[i]);
+  refreshMultiSelectClasses();
+}
+
+export function refreshMultiSelectClasses() {
+  const root = $("stepList");
+  if (!root) return;
+  root.querySelectorAll(".step-row").forEach((r) => {
+    r.classList.toggle("is-multi-selected", state.selectedStepPaths?.has(r.dataset.stepPath) || false);
+  });
+  const n = state.selectedStepPaths?.size || 0;
+  if (n) setStatus(`已多选 ${n} 步 · Delete 批量删除 / Ctrl+C 复制`, "warn");
+}
+
+export function clearMultiSelection() {
+  if (!state.selectedStepPaths?.size) return;
+  state.selectedStepPaths.clear();
+  refreshMultiSelectClasses();
+  setStatus("已取消多选", "ok");
+}
+
 function sameParent(a, b) {
   if (!a || !b || !a.length || !b.length) return true;
   return pathKey(a.slice(0, -1)) === pathKey(b.slice(0, -1));
@@ -262,6 +327,7 @@ async function toggleStepExpand(path) {
         id: step.id, action: step.action, with: newWith, ai: step.ai, retry: step.retry, when: step.when, bind: step.bind,
         do: step.do, else: step.else, catch: step.catch, finally: step.finally, branches: step.branches,
       });
+      snapshotSource("expand-apply");
       state.source = updated;
       state.ast = parseYaml(state.source);
       toast("已应用到 YAML 缓冲区", "记得点 💾 保存", "ok");

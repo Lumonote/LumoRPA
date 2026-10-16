@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- 样式回归验证页：用 features_data.rs 里的真实长串数据渲染能力地图卡片，
+     在固定视口下截图，检查是否溢出容器。?legacy=1 走修复前的旧规则。 -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../src/styles.css" />
+    <style>
+      body { margin: 0; padding: 12px; }
+      #probe { border: 2px solid magenta; }
+      .legacy .feature-section { min-width: auto; }
+      .legacy .feature-item { grid-template-columns: 56px 1fr auto; }
+      .legacy .feature-item > div { min-width: auto; overflow-wrap: normal; word-break: normal; }
+      #verdict { font: 12px monospace; padding: 6px; background: #000; color: #0f0; }
+    </style>
+  </head>
+  <body>
+    <div id="verdict"></div>
+    <div id="probe"><div class="feature-grid" id="featureGrid"></div></div>
+    <script type="module">
+      const DATA = [
+        {
+          title: "MCP 双向 (MCP)",
+          items: [
+            { id: "MCP-01", title: "LumoRPA as MCP Server", stage: "M2", status: "ready",
+              note: "`lumo mcp --flows ./flows` 通过 JSON-RPC 2.0 / stdio 暴露 5 个工具 (list_flows, validate_flow, run_flow, list_runs, get_run) 以及 resources/list + resources/read(把流文件以 `file://` URI 暴露,Claude/Cursor 可直接读取 YAML;路径越界拒绝)." },
+            { id: "MCP-03", title: "Tool Discovery + 审批", stage: "M3", status: "ready",
+              note: "`mcp.discover` action 通过 `tools/list` 返回工具描述符 + `proposed_grant` + `already_allowed`;`capabilities.mcp` 支持 `server`、`server:tool`、`server:tool_*` 三档粒度,`mcp.call` 强制按 `(server,tool)` 对放行." },
+          ],
+        },
+        {
+          title: "安全 / 沙箱 (Se)",
+          items: [
+            { id: "Se-02", title: "默认 deny 网络出站", stage: "M1", status: "ready",
+              note: "ai.chat 需要 LUMO_ALLOW_LLM_NETWORK=1;`add_capability_grant` 把 network/fs.read/fs.write/llm/mcp 五档 grant 写回 YAML,自动去重." },
+            { id: "Se-05", title: "凭据 LLM 不可见", stage: "M3", status: "planned", note: "Vault JIT 注入排期 M3." },
+          ],
+        },
+      ];
+      const html = (s) => String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      document.getElementById("featureGrid").innerHTML = DATA.map((sec) => `<div class="feature-section">
+        <h3>${html(sec.title)}</h3>
+        <div class="feature-list">${sec.items.map((it) => `<div class="feature-item">
+          <span class="fid">${html(it.id)}</span>
+          <div><div class="ftitle">${html(it.title)}</div><span class="fnote">${html(it.note)} · ${html(it.stage)}</span></div>
+          <span class="status-badge ${html(it.status)}">${html(it.status)}</span>
+        </div>`).join("")}</div>
+      </div>`).join("");
+
+      if (new URLSearchParams(location.search).has("legacy")) document.body.classList.add("legacy");
+
+      // 溢出判定：任一卡片的内容宽度超过其自身盒宽，或网格横向溢出探针容器
+      const probe = document.getElementById("probe");
+      const grid = document.getElementById("featureGrid");
+      const offenders = [];
+      for (const el of document.querySelectorAll(".feature-section, .feature-item, .feature-item > div")) {
+        if (el.scrollWidth > el.clientWidth + 1) offenders.push(`${el.className || "div"}: ${el.scrollWidth}>${el.clientWidth}`);
+      }
+      const gridOverflow = grid.scrollWidth > probe.clientWidth + 1;
+      document.getElementById("verdict").textContent =
+        `视口 ${window.innerWidth}px | 网格溢出容器: ${gridOverflow ? "是 ✗" : "否 ✓"} | 溢出元素: ${offenders.length ? offenders.join(" ; ") : "无 ✓"}`;
+    </script>
+  </body>
+</html>

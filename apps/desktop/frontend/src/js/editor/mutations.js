@@ -1,14 +1,27 @@
-// Step source-mutation operations (insert / delete / move / append). All edit
-// `state.source` textually, re-parse the AST, then re-render the active view.
+// Step source-mutation operations (insert / delete / move / append plus
+// duplicate / clipboard / batch delete). All edit `state.source` textually,
+// re-parse the AST, then re-render the active view. Every mutation snapshots
+// the pre-edit source into the undo history first (editor/history.js).
 
 import { toast } from "../dom.js";
 import { state } from "../state.js";
 import {
   parseYaml, extractSteps, findStepByPath, pathKey,
-  findStepRange, emitStep,
+  findStepRange, emitStep, extractStepBlock, insertStepBlocks,
+  removeStepBlocks, orderPathKeysByDocument,
 } from "../yaml.js";
 import { renderActiveView } from "./render.js";
 import { renderInspector } from "./inspector.js";
+import { snapshotSource } from "./history.js";
+
+const EMPTY_FLOW_HEADER = "apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: untitled\n  version: 0.1.0\nspec:\n  steps:\n";
+const STEP_CLIPBOARD_KEY = "lumo.stepClipboard";
+
+function commitSource(nextSource) {
+  state.source = nextSource;
+  state.ast = parseYaml(state.source);
+  state.selectedStepPaths?.clear();
+}
 
 export function insertStepAfterPath(path, actionId) {
   const step = findStepByPath(extractSteps(state.ast), path);
@@ -23,8 +36,8 @@ export function insertStepAfterPath(path, actionId) {
   const body = actionId ? { id, action: useAction, with: {} } : { id, action: useAction, with: { message: "TODO" } };
   const block = emitStep(body, range.baseIndent).split("\n");
   const newLines = lines.slice(0, range.endIdx).concat(block).concat(lines.slice(range.endIdx));
-  state.source = newLines.join("\n");
-  state.ast = parseYaml(state.source);
+  snapshotSource("insert");
+  commitSource(newLines.join("\n"));
   toast("已插入步骤", `${id} (${useAction})`, "ok");
   renderActiveView();
 }
@@ -38,8 +51,8 @@ export function insertNewStepNear(path, actionId) {
   const id = `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 999)}`;
   const block = emitStep({ id, action: actionId, with: {} }, range.baseIndent).split("\n");
   const newLines = lines.slice(0, range.endIdx).concat(block).concat(lines.slice(range.endIdx));
-  state.source = newLines.join("\n");
-  state.ast = parseYaml(state.source);
+  snapshotSource("insert");
+  commitSource(newLines.join("\n"));
   toast("已添加节点", `${id} (${actionId})`, "ok");
   renderActiveView();
 }
@@ -51,8 +64,8 @@ export function deleteStepByPath(path) {
   const range = findStepRange(lines, step.id);
   if (!range) return;
   const newLines = lines.slice(0, range.startIdx).concat(lines.slice(range.endIdx));
-  state.source = newLines.join("\n");
-  state.ast = parseYaml(state.source);
+  snapshotSource("delete");
+  commitSource(newLines.join("\n"));
   if (pathKey(state.selectedStepPath || []) === pathKey(path)) {
     state.selectedStepPath = null;
     state.selectedStepId = null;
@@ -74,34 +87,111 @@ export function moveStepBefore(srcPath, dstPath) {
   const dstR = findStepRange(remaining, dstStep.id);
   if (!dstR) return;
   const final = remaining.slice(0, dstR.startIdx).concat(block).concat(remaining.slice(dstR.startIdx));
-  state.source = final.join("\n");
-  state.ast = parseYaml(state.source);
+  snapshotSource("move");
+  commitSource(final.join("\n"));
   toast("已重排", `${srcStep.id} → before ${dstStep.id}`, "ok");
   renderActiveView();
 }
 
 export function appendStepToSource(actionId) {
+  snapshotSource("append");
   if (!state.source) {
-    state.source = `apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: untitled\n  version: 0.1.0\nspec:\n  steps:\n`;
+    state.source = EMPTY_FLOW_HEADER;
   }
   const id = `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 1000)}`;
   // Append at end of file with 4-space indent (matches typical examples).
-  state.source += `\n    - id: ${id}\n      action: ${actionId}\n      with: {}\n`;
-  state.ast = parseYaml(state.source);
+  commitSource(state.source + `\n    - id: ${id}\n      action: ${actionId}\n      with: {}\n`);
   renderActiveView();
   toast("已添加节点", `${id} (${actionId}) — 切到代码视图后点 💾 保存`, "ok");
 }
 
 export function appendStepWithSelector(actionId, element) {
+  snapshotSource("append");
   if (!state.source) {
-    state.source = `apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: untitled\n  version: 0.1.0\nspec:\n  steps:\n`;
+    state.source = EMPTY_FLOW_HEADER;
   }
   const id = `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 1000)}`;
   const label = element?.label ? `  # ${element.label}` : "";
-  state.source += `\n    - id: ${id}${label}\n      action: ${actionId}\n${withBlockForElement(actionId, element)}`;
-  state.ast = parseYaml(state.source);
+  commitSource(state.source + `\n    - id: ${id}${label}\n      action: ${actionId}\n${withBlockForElement(actionId, element)}`);
   renderActiveView();
   toast("已添加节点", `${id} → ${element?.label || actionId}`, "ok");
+}
+
+// ─── Duplicate / clipboard / batch delete ────────────────────────────────────
+
+export function duplicateStepByPath(path) {
+  const step = findStepByPath(extractSteps(state.ast), path);
+  if (!step) return;
+  const block = extractStepBlock(state.source, step.id);
+  if (!block) return;
+  snapshotSource("duplicate");
+  commitSource(insertStepBlocks(state.source, String(step.id), [block.text]));
+  toast("已创建步骤副本", String(step.id), "ok");
+  renderActiveView();
+}
+
+function selectionPathKeys() {
+  if (state.selectedStepPaths?.size) return [...state.selectedStepPaths];
+  if (state.selectedStepPath) return [pathKey(state.selectedStepPath)];
+  return [];
+}
+
+export function copySelectedSteps() {
+  const keys = selectionPathKeys();
+  if (!keys.length || typeof state.source !== "string") return 0;
+  const { orderedIds } = orderPathKeysByDocument(state.source, keys);
+  const blocks = orderedIds
+    .map((id) => extractStepBlock(state.source, id)?.text)
+    .filter(Boolean);
+  if (!blocks.length) return 0;
+  try {
+    localStorage.setItem(STEP_CLIPBOARD_KEY, JSON.stringify({ blocks }));
+  } catch {
+    toast("复制失败", "本地存储不可用", "bad");
+    return 0;
+  }
+  toast(`已复制 ${blocks.length} 个步骤`, "Ctrl/Cmd+V 粘贴（可跨流程）", "ok");
+  return blocks.length;
+}
+
+export function pasteStepsFromClipboard() {
+  let payload = null;
+  try {
+    payload = JSON.parse(localStorage.getItem(STEP_CLIPBOARD_KEY) || "");
+  } catch {
+    payload = null;
+  }
+  const blocks = Array.isArray(payload?.blocks)
+    ? payload.blocks.filter((b) => typeof b === "string" && b.trim())
+    : [];
+  if (!blocks.length) {
+    toast("剪贴板没有步骤", "先选中步骤按 Ctrl/Cmd+C 复制", "warn");
+    return 0;
+  }
+  const target = state.selectedStepPath
+    ? findStepByPath(extractSteps(state.ast), state.selectedStepPath)
+    : null;
+  snapshotSource("paste");
+  if (!state.source) state.source = EMPTY_FLOW_HEADER;
+  commitSource(insertStepBlocks(state.source, target ? String(target.id) : null, blocks));
+  toast(`已粘贴 ${blocks.length} 个步骤`, target ? `已插入到 ${target.id} 之后` : "已追加到流程末尾", "ok");
+  renderActiveView();
+  return blocks.length;
+}
+
+export function deleteSelectedSteps() {
+  const keys = selectionPathKeys();
+  if (!keys.length || typeof state.source !== "string") return 0;
+  const { orderedIds } = orderPathKeysByDocument(state.source, keys);
+  if (!orderedIds.length) return 0;
+  snapshotSource("batch-delete");
+  commitSource(removeStepBlocks(state.source, orderedIds));
+  state.selectedStepPath = null;
+  state.selectedStepId = null;
+  toast(`已删除 ${orderedIds.length} 个步骤`, orderedIds.join("、").slice(0, 120), "warn");
+  renderActiveView();
+  renderInspector();
+  return orderedIds.length;
 }
 
 function withBlockForElement(actionId, element) {

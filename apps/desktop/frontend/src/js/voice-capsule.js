@@ -1,7 +1,9 @@
+import { recallHint } from "./voice-shortcut.js";
+
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
 export function createVoiceProjection() {
-  return { status: "idle", partial: "", transcript: "", source: "LOCAL", progress: 0, level: 0, message: "随时可以唤醒 Lumo", muted: false };
+  return { status: "idle", partial: "", transcript: "", source: "LOCAL", progress: 0, level: 0, message: "随时可以唤醒 Lumo", muted: false, recallHint: recallHint({}) };
 }
 
 export function applyVoiceEvent(projection, event) {
@@ -22,12 +24,14 @@ const labels = { idle: "READY", listening: "LISTENING", transcribing: "TRANSCRIB
 export function renderVoiceCapsule(projection) {
   const text = projection.partial || projection.transcript || projection.message;
   const level = Math.max(0, Math.min(1, Number(projection.level) || 0));
-  return `<section class="voice-capsule is-${escapeHtml(projection.status)}" aria-live="polite" aria-label="Lumo voice agent ${escapeHtml(projection.status)}"><div class="vc-orb" aria-hidden="true"><div class="vc-aura"></div><div class="vc-spectrum"><i></i><i></i><i></i><i></i></div><div class="vc-core"></div><div class="vc-particles"><i></i><i></i><i></i><i></i><i></i><i></i></div><b class="vc-ring ring-a"></b><b class="vc-ring ring-b"></b></div><div class="vc-copy"><div><span>${escapeHtml(labels[projection.status] || projection.status.toUpperCase())}</span><em>${escapeHtml(projection.source)}</em></div><strong>${escapeHtml(text)}</strong><div class="vc-wave" aria-hidden="true">${Array.from({ length: 12 }, (_, index) => `<i style="--wave:${index};--amplitude:${(level * (3 + (index % 5))).toFixed(2)}px"></i>`).join("")}</div><div class="vc-progress"><i style="width:${Math.max(0, Math.min(1, projection.progress || 0)) * 100}%"></i></div></div><div class="vc-actions"><button data-voice-action="expand" aria-label="展开详情">⌁</button><button data-voice-action="cancel" aria-label="取消语音任务">×</button></div></section>`;
+  return `<section class="voice-capsule is-${escapeHtml(projection.status)}" data-tauri-drag-region title="按住拖动可移到任意位置" aria-live="polite" aria-label="Lumo voice agent ${escapeHtml(projection.status)}"><div class="vc-orb" aria-hidden="true"><div class="vc-aura"></div><div class="vc-spectrum"><i></i><i></i><i></i><i></i></div><div class="vc-core"></div><div class="vc-particles"><i></i><i></i><i></i><i></i><i></i><i></i></div><b class="vc-ring ring-a"></b><b class="vc-ring ring-b"></b></div><div class="vc-copy"><div><span>${escapeHtml(labels[projection.status] || projection.status.toUpperCase())}</span><em>${escapeHtml(projection.source)}</em></div><strong>${escapeHtml(text)}</strong><div class="vc-wave" aria-hidden="true">${Array.from({ length: 12 }, (_, index) => `<i style="--wave:${index};--amplitude:${(level * (3 + (index % 5))).toFixed(2)}px"></i>`).join("")}</div><div class="vc-progress"><i style="width:${Math.max(0, Math.min(1, projection.progress || 0)) * 100}%"></i></div></div><div class="vc-actions"><button data-voice-action="expand" title="展开详情：回到主窗口的 Mission Control" aria-label="展开详情">⌁</button><button data-voice-action="cancel" title="停止并收起 ${escapeHtml(projection.recallHint || "")}" aria-label="停止语音并收起悬浮窗">×</button></div></section>`;
 }
 
 export async function mountVoiceCapsule(root, { listen = globalThis.__TAURI__?.event?.listen, call = globalThis.__TAURI__?.core?.invoke } = {}) {
   let projection = createVoiceProjection();
   const render = () => { root.innerHTML = renderVoiceCapsule(projection); };
+  // 收起按钮的 tooltip 里带上当前快捷键，免得关掉之后不知道怎么叫回来。
+  call?.("voice_status").then((status) => { projection = { ...projection, recallHint: recallHint(status) }; render(); }).catch(() => {});
   root.addEventListener("click", async (event) => {
     const action = event.target.closest("[data-voice-action]")?.dataset.voiceAction;
     if (action === "cancel") await call?.("voice_stop");

@@ -7,6 +7,7 @@ import { childStepBlocks, extractSteps, pathKey, parsePathKey } from "../yaml.js
 import { appendStepToSource } from "./mutations.js";
 import { selectStep } from "./inspector.js";
 import { applyLayoutOverrides, moveNodeByScreenDelta, zoomGraphAt } from "./graph-viewport.js";
+import { renderStepFoot } from "./node-badges.js";
 
 const GRID_SIZE = 18;
 let activeNodeDrag = null;
@@ -137,7 +138,7 @@ export function renderGraph() {
           <span class="action">${html(pos.step.action || "?")}</span>
         </div>
         <div class="graph-node-body">${withSummary || "<em style=\"color: var(--faint)\">无参数</em>"}</div>
-        ${pos.step.retry ? `<div class="graph-node-foot">retry × ${html(pos.step.retry.times || 1)}</div>` : ""}
+        ${renderStepFoot(pos.step)}
       </div>`;
     root.appendChild(fo);
   }
@@ -150,6 +151,7 @@ export function renderGraph() {
     }
   };
 }
+
 
 export function renderWithSummary(w) {
   if (!w || typeof w !== "object") return "";

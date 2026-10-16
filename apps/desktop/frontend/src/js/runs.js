@@ -9,24 +9,31 @@ import {
   parseYaml, ensureCapability, ensureLlmCapability, ensureNetworkCapability,
 } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
+import { snapshotSource } from "./editor/history.js";
 import { switchRightSection } from "./views.js";
 import { pickRunningRunIds } from "./prompt-utils.js";
+import { ensureCurrentFlowSaved } from "./flows.js";
 
 /// P0-1：取消按钮的可见性。run_flow/run_step/debug_flow 都是一次 await 到底
 /// 的 invoke，运行期间前端无事件流——发起时亮出「⏹ 取消」，settle 后隐藏。
 export function setRunInFlight(on) {
+  state.runInFlight = !!on;
+  if (on) state.inFlightRunId = null;
   const btn = $("cancelRunBtn");
   if (btn) btn.hidden = !on;
+  for (const id of ["runBtn", "runStepBtn", "debugBtn"]) {
+    const control = $(id);
+    if (control) control.disabled = on;
+  }
 }
 
-/// P0-1：点按「取消运行」。后端不在运行开始时把 run_id 推给前端，但引擎在
-/// run 启动时就以 state="running" 落库（vm.rs create_run，键与取消表同一
-/// ulid），所以点按时查一次 list_runs 挑出 running 的 run 逐个 cancel_run
-/// 即可，无需前端后台轮询。ok=false（不存在/已结束）按后端约定只提示。
+/// P0-1：点按「取消运行」。后端不在运行开始时把 run_id 推给前端，先用进度
+/// 事件记住当前 run；事件尚未到达时再查一次 list_runs，选最近的 running run。
+/// ok=false（不存在/已结束）按后端约定只提示。
 export async function cancelActiveRun() {
   try {
     const runs = await call("list_runs", { limit: 10 });
-    const ids = pickRunningRunIds(runs);
+    const ids = pickRunningRunIds(runs, state.inFlightRunId);
     let cancelled = false;
     for (const runId of ids) {
       const r = await call("cancel_run", { runId });
@@ -42,9 +49,11 @@ export async function cancelActiveRun() {
 export async function runSelectedFlow() {
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
   setStatus("运行中…", "warn");
-  $("runBtn").disabled = true;
+  state.liveRunProgress = null;
+  $("outputBox").textContent = "准备运行…";
   setRunInFlight(true);
   try {
+    await ensureCurrentFlowSaved();
     const response = await call("run_flow", {
       path: state.flowPath,
       inputsJson: $("inputsJson").value || "{}",
@@ -55,7 +64,7 @@ export async function runSelectedFlow() {
     setStatus("运行失败", "bad");
     handleRunError(error);
   } finally {
-    $("runBtn").disabled = false;
+    state.inFlightRunId = null;
     setRunInFlight(false);
   }
 }
@@ -63,8 +72,11 @@ export async function runSelectedFlow() {
 export async function runStep(stepId) {
   if (!state.flowPath || !stepId) return;
   setStatus(`单步运行 ${stepId} …`, "warn");
+  state.liveRunProgress = null;
+  $("outputBox").textContent = "准备运行单步…";
   setRunInFlight(true);
   try {
+    await ensureCurrentFlowSaved();
     const response = await call("run_step", {
       path: state.flowPath,
       stepId,
@@ -77,6 +89,7 @@ export async function runStep(stepId) {
     setStatus("单步失败", "bad");
     handleRunError(error);
   } finally {
+    state.inFlightRunId = null;
     setRunInFlight(false);
   }
 }
@@ -107,11 +120,15 @@ function handleRunError(error) {
   node.querySelector("[data-grant]").addEventListener("click", async () => {
     window.clearTimeout(timer);
     try {
+      snapshotSource("capability");
       if (kind === "network") state.source = ensureNetworkCapability(state.source, target);
       else if (kind === "llm") state.source = ensureLlmCapability(state.source);
       else state.source = ensureCapability(state.source, kind.replace(".", ""), target); // fs.read/fs.write
       state.ast = parseYaml(state.source);
-      if (state.flowPath) await call("save_flow_source", { path: state.flowPath, source: state.source });
+      if (state.flowPath) {
+        await call("save_flow_source", { path: state.flowPath, source: state.source });
+        state.savedSource = state.source;
+      }
       toast("已加入白名单", `${kind} ${target}`, "ok");
       dismiss();
       renderActiveView();
@@ -124,6 +141,7 @@ function handleRunError(error) {
 }
 
 function onRunComplete(response) {
+  state.inFlightRunId = null;
   applyRunResponse(response);
   setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
   switchRightSection("outputs");

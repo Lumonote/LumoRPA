@@ -28,13 +28,17 @@ export const state = {
   flowPath: "",
   flow: null,            // FlowSummary
   source: "",            // raw YAML
+  savedSource: "",       // last source confirmed on disk; differs while editing
   ast: null,             // parsed AST of source
   selectedStepId: null,
   selectedStepPath: null, // index path like [0, "do", 2]
+  selectedStepPaths: new Set(), // steps-view multi-select: pathKey strings
   runs: [],
   activeRun: null,
   activeRunSteps: [],
   liveRunProgress: null,
+  runInFlight: false,
+  inFlightRunId: null,
   activeStepRun: null,
   activeArtifacts: [],        // X-07: blob artifacts for the active run
   artifactBlobCache: new Map(), // artifactId -> data URL (lazy-loaded)
@@ -49,6 +53,7 @@ export const state = {
   currentView: "design",
   capabilityHubMounted: false,
   missionControlMounted: false,
+  voiceLauncher: null,      // 顶栏语音按钮控制器（{ refresh }）
   agentProjection: { runId: "preview", seq: 0, status: "idle", nodes: {}, edges: [], events: [], replans: [], activeNodeId: null },
   rightSection: "inspector",
   windowAlpha: loadAlpha("lumo.win", 0, 18),

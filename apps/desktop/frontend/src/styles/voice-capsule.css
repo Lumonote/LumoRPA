@@ -54,6 +54,24 @@ body {
   -webkit-backdrop-filter: blur(24px) saturate(1.15);
 }
 
+/* 无边框窗口靠 data-tauri-drag-region 拖动：胶囊本体是拖拽区，
+   内部装饰不吃指针事件，这样点在哪儿都能拖，只有右侧按钮照常可点。 */
+.voice-capsule {
+  cursor: grab;
+}
+
+.voice-capsule:active {
+  cursor: grabbing;
+}
+
+.voice-capsule > *:not(.vc-actions) {
+  pointer-events: none;
+}
+
+.vc-actions button {
+  cursor: pointer;
+}
+
 .voice-capsule::before {
   position: absolute;
   z-index: -1;

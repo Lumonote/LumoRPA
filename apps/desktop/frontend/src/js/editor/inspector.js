@@ -10,6 +10,9 @@ import { renderGraph } from "./graph.js";
 import { renderTree } from "./tree.js";
 import { runStep } from "../runs.js";
 import { isBreakpoint, toggleBreakpoint } from "../debug.js";
+import { snapshotSource } from "./history.js";
+
+let inspectorRenderToken = 0;
 
 export function selectStep(path) {
   state.selectedStepPath = path;
@@ -21,6 +24,7 @@ export function selectStep(path) {
 }
 
 export async function renderInspector() {
+  const renderToken = ++inspectorRenderToken;
   const body = $("inspectorBody");
   const path = state.selectedStepPath;
   if (!path) {
@@ -69,6 +73,7 @@ export async function renderInspector() {
   if (step.action) {
     try {
       const schema = await loadSchema(step.action);
+      if (renderToken !== inspectorRenderToken || state.selectedStepPath !== path) return;
       const fields = renderSchemaFields(schema, step.with || {});
       $("schemaFields").innerHTML = fields || `<em style="color: var(--faint); font-size: 11px">该动作未声明 properties</em>`;
       const presetSelect = $("presetSelect");
@@ -88,6 +93,7 @@ export async function renderInspector() {
         });
       }
     } catch (e) {
+      if (renderToken !== inspectorRenderToken || state.selectedStepPath !== path) return;
       $("schemaFields").innerHTML = `<em style="color: var(--bad); font-size: 11px">schema 加载失败: ${html(String(e))}</em>`;
     }
   } else {
@@ -113,6 +119,7 @@ function applyInspectorEdits(step) {
   // `step` so mutateStepInSource → emitStep re-emits the node's other keys
   // (when/bind/retry/ai/do/else/catch/finally) instead of silently wiping them.
   const updated = mutateStepInSource(state.source, step.id, { ...step, id: newId, action: newAction, with: newWith });
+  snapshotSource("inspector");
   state.source = updated;
   state.ast = parseYaml(state.source);
   state.selectedStepId = newId;

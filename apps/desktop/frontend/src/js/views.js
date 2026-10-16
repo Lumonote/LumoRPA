@@ -20,8 +20,9 @@ export function switchTopView(view) {
   const isDesign = view === "design";
   $("designView").style.display = isDesign ? "" : "none";
   $("rightRail").style.display = isDesign ? "" : "none";
-  // Left rail visible for design / recorder (because recorder also uses flow context)
-  document.querySelector(".left-rail").style.display = isDesign ? "" : "none";
+  // The recorder uses the selected flow as its merge/run target, so keep the
+  // flow library visible while recording too.
+  document.querySelector(".left-rail").style.display = isDesign || view === "recorder" ? "" : "none";
 
   const map = {
     recorder: "recorderView",

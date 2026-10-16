@@ -12,13 +12,15 @@ export function normalizeHumanValue(kind, raw) {
   return s === "y" || s === "yes" || s === "true" || s === "1" || s === "是";
 }
 
-/// 从 `list_runs` 结果里挑出仍在进行中的 run id（state === "running"）。
-/// 引擎在 run 启动时即以 running 状态落库（vm.rs create_run），所以取消
-/// 按钮点按时查一次运行列表即可拿到进行中 run_id，无需前端后台轮询。
-export function pickRunningRunIds(runs) {
-  return (Array.isArray(runs) ? runs : [])
+/// 从 `list_runs` 结果里挑出取消目标。优先返回当前前端请求对应的 run，
+/// 没有收到进度事件时退回最近一个 running run，避免一次点击取消掉
+/// 后台服务或其他窗口发起的所有运行。
+export function pickRunningRunIds(runs, preferredId = null) {
+  const running = (Array.isArray(runs) ? runs : [])
     .filter((r) => r && r.state === "running" && r.id)
     .map((r) => r.id);
+  if (preferredId && running.includes(preferredId)) return [preferredId];
+  return running.slice(0, 1);
 }
 
 /// 剩余毫秒 → 中文倒计时文案（向上取整到秒，负数钳为 0）。

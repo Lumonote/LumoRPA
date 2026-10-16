@@ -24,17 +24,22 @@
         </div>
 
         <nav class="tabs" aria-label="Primary">
-          <button class="tab is-active" data-view="design">设计</button>
-          <button class="tab" data-view="recorder">录制</button>
-          <button class="tab" data-view="runs">运行</button>
-          <button class="tab" data-view="mission-control">Mission Control</button>
-          <button class="tab" data-view="models">模型</button>
-          <button class="tab" data-view="features">能力地图</button>
-          <button class="tab" data-view="capability-hub">Capability Hub</button>
-          <button class="tab" data-view="settings">设置</button>
+          <button class="tab is-active" data-view="design" data-i18n="nav.design">设计</button>
+          <button class="tab" data-view="recorder" data-i18n="nav.recorder">录制</button>
+          <button class="tab" data-view="runs" data-i18n="nav.runs">运行</button>
+          <button class="tab" data-view="mission-control" data-i18n="nav.mission_control">Mission Control</button>
+          <button class="tab" data-view="models" data-i18n="nav.models">模型</button>
+          <button class="tab" data-view="features" data-i18n="nav.features">能力地图</button>
+          <button class="tab" data-view="capability-hub" data-i18n="nav.capability_hub">能力中枢</button>
+          <button class="tab" data-view="settings" data-i18n="nav.settings">设置</button>
         </nav>
 
         <div class="topbar-right">
+          <button class="voice-launcher" id="voiceToggleBtn" type="button" aria-pressed="false" title="唤起 Lumo 语音悬浮窗">
+            <span class="vl-dot" aria-hidden="true"></span>
+            <span class="vl-label">语音</span>
+            <kbd data-voice-shortcut>⌘⇧Space</kbd>
+          </button>
           <div class="alpha-slider" title="窗口底色不透明度：0 = 透明显示真实桌面，100 = 不透明">
             <span>底色</span>
             <input id="windowAlphaTop" type="range" min="0" max="100" value="0" />
@@ -107,6 +112,8 @@
 
           <div class="editor-toolbar">
             <button id="loadFlowBtn">📂 载入</button>
+            <button id="undoBtn" title="撤销 (Ctrl/Cmd+Z)" disabled>↩︎ 撤销</button>
+            <button id="redoBtn" title="重做 (Shift+Ctrl/Cmd+Z)" disabled>↪︎ 重做</button>
             <button id="validateBtn">✓ 校验</button>
             <button id="lintBtn" title="Flow Lint (D-19)：结构 / 权限 / 变量引用检查，结果以 toast 汇总">🔍 Lint</button>
             <button class="primary" id="runBtn">▶ 运行</button>
@@ -115,6 +122,7 @@
             <button id="cancelRunBtn" hidden title="取消进行中的运行 (P0-1)：中断当前步并按 cancelled 收场">⏹ 取消运行</button>
             <span class="spacer"></span>
             <button id="saveFlowBtn">💾 保存</button>
+            <button id="flowHistoryBtn" title="保存历史版本：查看差异 / 一键回滚（最近 20 版）">🕘 历史</button>
             <button class="ghost" id="resetInputBtn">重置输入</button>
           </div>
 
@@ -257,7 +265,7 @@
         <section class="panel" id="recorderView" style="grid-column: 1 / -1; display: none">
           <div class="panel-head">
             <h2>录制器 · Recorder</h2>
-            <span style="font-size: 11px; color: var(--muted)">M2 接入 CDP / AccessKit · 当前为 NoopRecorder 占位</span>
+            <span style="font-size: 11px; color: var(--muted)">CDP / 系统辅助功能录制 · 停止后可直接合并并运行</span>
           </div>
           <div class="panel-body">
             <div class="recorder-shell">
@@ -275,7 +283,7 @@
                 <button class="danger" id="recorderStopBtn" disabled>■ 停止</button>
               </div>
               <div class="note" id="recorderNote">
-                录制器目前接的是 <code>lumo-recorder::NoopRecorder</code>。设计文档 §1 已经详设了"CDP 事件 + AccessKit 桌面 + ActionBuffer 200ms 去抖 + 4 套元素指纹"的完整管线，进入 M2 阶段后会自动把当前面板替换为真实事件流。
+                录制会捕获浏览器 DOM 事件或桌面焦点变化，并在停止时合并输入事件、生成可执行的流程步骤。
               </div>
               <div class="recorder-live">
                 <div class="recorder-stat" id="recorderStatElapsed">
@@ -349,11 +357,11 @@
 
         <section class="panel" id="featuresView" style="grid-column: 1 / -1; display: none">
           <div class="panel-head">
-            <h2>能力地图 · 设计文档落地度</h2>
-            <span style="font-size: 11px; color: var(--muted)">基于 docs/01-Product-Design.md 功能矩阵</span>
+            <h2 data-i18n="features.title">能力地图 · 设计文档落地度</h2>
+            <span style="font-size: 11px; color: var(--muted)" data-i18n="features.subtitle">基于 docs/01-Product-Design.md 功能矩阵</span>
           </div>
           <div class="panel-body">
-            <div class="note" style="margin-bottom: 12px">
+            <div class="note" style="margin-bottom: 12px" data-i18n-html="features.note">
               这一页对照设计文档列出所有功能模块的当前实现状态。<strong>ready</strong> = 已可在本地跑通；<strong>partial</strong> = 部分能力可用；<strong>planned</strong> = 当前里程碑未排期，但 DSL / 架构已为其预留接口。
             </div>
             <div class="feature-grid" id="featureGrid"></div>
@@ -362,76 +370,87 @@
 
         <section class="panel" id="settingsView" style="grid-column: 1 / -1; display: none">
           <div class="panel-head">
-            <h2>外观与运行环境</h2>
+            <h2 data-i18n="settings.title">外观与运行环境</h2>
           </div>
           <div class="panel-body">
             <div class="settings-grid">
               <section class="panel">
-                <div class="panel-head"><h2>透明度</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.language">语言 / Language</h2></div>
                 <div class="panel-body flush">
-                  <div class="slider-field" title="窗口底色不透明度 — 0 = 完全透过，看到真实桌面 / 100 = 不透明">
-                    <span>窗口底色</span>
+                  <div class="theme-row" id="localeRow">
+                    <button data-locale="zh-CN" data-i18n="settings.language.zh-CN">简体中文</button>
+                    <button data-locale="en" data-i18n="settings.language.en">English</button>
+                  </div>
+                  <div class="note" style="margin: 0 14px 14px" data-i18n="settings.language_note">切换后立即生效并记住选择。尚未抽取文案的模块在英文下回落显示中文。</div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head"><h2 data-i18n="settings.opacity">透明度</h2></div>
+                <div class="panel-body flush">
+                  <div class="slider-field" data-i18n-title="settings.window_base_hint">
+                    <span data-i18n="settings.window_base">窗口底色</span>
                     <input id="windowAlphaSlider" type="range" min="0" max="100" value="0" />
                     <strong id="windowAlphaValue">0%</strong>
                   </div>
-                  <div class="slider-field" title="界面面板不透明度 — 越低越能看到桌面上正在操作的内容">
-                    <span>界面面板</span>
+                  <div class="slider-field" data-i18n-title="settings.ui_panel_hint">
+                    <span data-i18n="settings.ui_panel">界面面板</span>
                     <input id="panelAlphaSlider" type="range" min="8" max="100" value="14" />
                     <strong id="panelAlphaValue">14%</strong>
                   </div>
                   <div class="preset-row">
-                    <button data-preset="glass" class="is-active">透视操作</button>
-                    <button data-preset="frost">半透明</button>
-                    <button data-preset="solid">⬜ 实心</button>
-                    <button data-preset="invisible">极简透视</button>
+                    <button data-preset="glass" class="is-active" data-i18n="settings.preset.glass">透视操作</button>
+                    <button data-preset="frost" data-i18n="settings.preset.frost">半透明</button>
+                    <button data-preset="solid" data-i18n="settings.preset.solid">⬜ 实心</button>
+                    <button data-preset="invisible" data-i18n="settings.preset.invisible">极简透视</button>
                   </div>
-                  <div class="note" style="margin: 4px 14px 14px">两个滑块互不影响：窗口底色直接驱动 Tauri 透明背景；界面面板控制首页、工具栏和卡片自身的不透明度，用于边看桌面边编排自动化。</div>
+                  <div class="note" style="margin: 4px 14px 14px" data-i18n="settings.opacity_note">两个滑块互不影响：窗口底色直接驱动 Tauri 透明背景；界面面板控制首页、工具栏和卡片自身的不透明度，用于边看桌面边编排自动化。</div>
                 </div>
               </section>
 
               <section class="panel">
-                <div class="panel-head"><h2>主题</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.theme">主题</h2></div>
                 <div class="panel-body flush">
                   <div class="theme-row">
-                    <button data-theme="auto" class="is-active">🖥 跟随系统</button>
-                    <button data-theme="light">☀️ 浅色</button>
-                    <button data-theme="dark">🌙 深色</button>
+                    <button data-theme="auto" class="is-active" data-i18n="settings.theme.auto">🖥 跟随系统</button>
+                    <button data-theme="light" data-i18n="settings.theme.light">☀️ 浅色</button>
+                    <button data-theme="dark" data-i18n="settings.theme.dark">🌙 深色</button>
                   </div>
-                  <div class="note" style="margin: 0 14px 14px">主题影响所有 token（前景/线/卡片/选中态），毛玻璃叠加层会自适应深浅。</div>
+                  <div class="note" style="margin: 0 14px 14px" data-i18n="settings.theme_note">主题影响所有 token（前景/线/卡片/选中态），毛玻璃叠加层会自适应深浅。</div>
                 </div>
               </section>
 
               <section class="panel">
-                <div class="panel-head"><h2>运行环境</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.environment">运行环境</h2></div>
                 <div class="panel-body flush">
                   <div class="kv-list" id="environmentBox"></div>
                 </div>
               </section>
 
               <section class="panel">
-                <div class="panel-head"><h2>本地 Skills</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.local_skills">本地 Skills</h2></div>
                 <div class="panel-body flush">
                   <div class="kv-list" id="skillsBox"></div>
                 </div>
               </section>
               <section class="panel" style="grid-column:1/-1">
-                <div class="panel-head"><h2>桌面语音与隐私</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.voice_privacy">桌面语音与隐私</h2></div>
                 <div class="panel-body" id="voiceSettingsBox"></div>
               </section>
               <section class="panel" style="grid-column:1/-1">
-                <div class="panel-head"><h2>安全更新中心</h2></div>
+                <div class="panel-head"><h2 data-i18n="settings.update_center">安全更新中心</h2></div>
                 <div class="panel-body" id="updateCenterBox"></div>
               </section>
             </div>
           </div>
         </section>
-        <section id="capabilityHubView" class="capability-hub" style="grid-column: 1 / -1; display: none" aria-label="Capability Hub">
-          <header class="hub-hero"><div><span class="hub-kicker">LUMO CONTROL PLANE / 01</span><h1>Capability Hub</h1><p>Discover, govern, and compose the intelligence available to every local agent.</p></div><div class="hub-status"><span class="hub-pulse"></span><span data-hub-errors>Checking capability services…</span></div></header>
-          <nav class="hub-nav" aria-label="Capability Hub sections">
-            <button class="is-active" data-hub-section="overview">Overview</button><button data-hub-section="skills">Skills</button><button data-hub-section="servers">MCP Servers</button><button data-hub-section="catalog">Capability Catalog</button><button data-hub-section="profiles">Agent Profiles</button><button data-hub-section="jobs">Jobs</button><button data-hub-section="permissions">Permissions</button><button data-hub-section="audit">Audit</button><button data-hub-section="proposals">Improvement Proposals</button>
+        <section id="capabilityHubView" class="capability-hub" style="grid-column: 1 / -1; display: none" data-i18n-aria-label="hub.title">
+          <header class="hub-hero"><div><span class="hub-kicker" data-i18n="hub.kicker">LUMO 控制平面 / 01</span><h1 data-i18n="hub.title">能力中枢</h1><p data-i18n="hub.subtitle">发现、治理并编排每个本地 Agent 可用的能力。</p></div><div class="hub-status"><span class="hub-pulse"></span><span data-hub-errors data-i18n="hub.checking">正在检查能力服务…</span></div></header>
+          <nav class="hub-nav" data-i18n-aria-label="hub.nav_label">
+            <button class="is-active" data-hub-section="overview" data-i18n="hub.nav.overview">概览</button><button data-hub-section="skills" data-i18n="hub.nav.skills">技能</button><button data-hub-section="servers" data-i18n="hub.nav.servers">MCP 服务器</button><button data-hub-section="catalog" data-i18n="hub.nav.catalog">能力目录</button><button data-hub-section="profiles" data-i18n="hub.nav.profiles">Agent 画像</button><button data-hub-section="jobs" data-i18n="hub.nav.jobs">任务</button><button data-hub-section="permissions" data-i18n="hub.nav.permissions">权限</button><button data-hub-section="audit" data-i18n="hub.nav.audit">审计</button><button data-hub-section="proposals" data-i18n="hub.nav.proposals">改进提案</button>
           </nav>
           <div data-hub-content aria-live="polite"></div>
-          <section class="hub-card hub-import" data-import-wizard><header><div><span class="hub-eyebrow">Secure ingestion</span><h3>Import MCP configuration</h3><p>支持 JSON / JSONC / YAML / TOML；密钥仅写入 Vault，原值不会进入配置库。</p></div></header><div class="hub-import-modes"><button data-import-mode="auto-discover">Auto-discover</button><button data-import-mode="file">File</button><button data-import-mode="paste">Paste</button><button data-import-mode="manual">Manual</button></div><div class="hub-import-editor"><input data-mcp-source-name value="mcp.json" aria-label="配置文件名"><textarea data-mcp-import-content placeholder="粘贴 Claude Desktop、Cursor、VS Code 或通用 MCP 配置"></textarea><button data-preview-mcp-import>安全预览</button></div><div class="hub-import-stage"><div><span>Preview</span><strong data-import-state>Choose an import source</strong></div><div><span>Conflicts</span><strong>No scan yet</strong></div><div><span>Connection test</span><strong>Waiting</strong></div></div><div data-mcp-import-preview></div></section>
+          <section class="hub-card hub-import" data-import-wizard><header><div><span class="hub-eyebrow" data-i18n="hub.eyebrow.secure_ingestion">安全接入</span><h3 data-i18n="hub.import.title">导入 MCP 配置</h3><p data-i18n="hub.import.note">支持 JSON / JSONC / YAML / TOML；密钥仅写入 Vault，原值不会进入配置库。</p></div></header><div class="hub-import-modes"><button data-import-mode="auto-discover" data-i18n="hub.import.mode.auto-discover">自动发现</button><button data-import-mode="file" data-i18n="hub.import.mode.file">文件</button><button data-import-mode="paste" data-i18n="hub.import.mode.paste">粘贴</button><button data-import-mode="manual" data-i18n="hub.import.mode.manual">手动</button></div><div class="hub-import-editor"><input data-mcp-source-name value="mcp.json" data-i18n-aria-label="hub.import.filename_label"><textarea data-mcp-import-content data-i18n-placeholder="hub.import.placeholder"></textarea><button data-preview-mcp-import data-i18n="hub.import.safe_preview">安全预览</button></div><div class="hub-import-stage"><div><span data-i18n="hub.import.preview">预览</span><strong data-import-state data-i18n="hub.import.choose_source">请选择导入来源</strong></div><div><span data-i18n="hub.import.conflicts">冲突</span><strong data-i18n="hub.import.no_scan">尚未扫描</strong></div><div><span data-i18n="hub.import.connection_test">连接测试</span><strong data-i18n="hub.import.waiting">等待中</strong></div></div><div data-mcp-import-preview></div></section>
         </section>
         <section id="missionControlView" class="mission-control" style="display:none" aria-label="Mission Control">
           <header class="mc-head"><div><span class="mc-kicker">LUMO MISSION CONTROL / LIVE DAG</span><h1>Agent Execution</h1></div><div class="mc-metrics" data-mc-metrics></div></header>
@@ -451,6 +470,7 @@
 
     <div class="toast-stack" id="toastStack"></div>
     <div class="ai-drawer-overlay" id="aiDrawerOverlay" hidden></div>
+    <div class="ai-drawer-overlay" id="flowHistoryOverlay" hidden></div>
     <div class="ai-drawer-overlay" id="magicPromptOverlay" hidden></div>
     <!-- P1（人机交互）：human.* 的全局提示模态，human-prompt 事件驱动 -->
     <div class="ai-drawer-overlay" id="humanPromptOverlay" hidden></div>

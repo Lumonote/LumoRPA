@@ -2,6 +2,7 @@ import { renderImprovementProposals, runImprovementAction } from "./improvements
 import { buildMcpApplyRequest, collectMcpToolArguments, renderMcpGovernance, renderMcpImportWorkspace, renderMcpToolCall, runMcpGovernanceAction } from "./mcp-manager.js";
 import { renderSecurityCenter, runSecurityAction } from "./security-center.js";
 import { renderJobs, runJobAction } from "./job-manager.js";
+import { applyStaticTranslations, getLocale, subscribeLocale, t, tEnum } from "./i18n.js";
 
 const escapeHtml = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -10,56 +11,56 @@ const escapeHtml = (value) => String(value ?? "")
 const label = (value) => String(value || "unknown").replaceAll(/[_-]+/g, " ")
   .replace(/\b\w/g, (char) => char.toUpperCase());
 
+const numberLocale = () => (getLocale() === "zh-CN" ? "zh-CN" : "en-US");
+
 export function redactedValue() { return "••••••••"; }
 
 function emptyRow(message) {
-  return `<div class="hub-empty"><strong>${escapeHtml(message)}</strong><span>Connect or import a capability to populate this view.</span></div>`;
+  return `<div class="hub-empty"><strong>${escapeHtml(message)}</strong><span>${escapeHtml(t("hub.empty.hint"))}</span></div>`;
 }
 
 export function renderServerRows(servers = []) {
-  if (!servers.length) return emptyRow("No MCP servers configured");
+  if (!servers.length) return emptyRow(t("hub.empty.servers"));
   return servers.map((server) => {
     const health = server.health || server.status || "unknown";
     const tools = Array.isArray(server.tools) ? server.tools : [];
-    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(server.description || `${tools.length || server.tools || 0} tools available`)}</span><div class="hub-tool-chips">${tools.slice(0, 6).map((tool) => `<button data-mcp-tool="${escapeHtml(tool.name)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(tool.name)}</button>`).join("")}</div>${renderMcpGovernance(server)}</div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(label(health))}</span><button data-mcp-action="test" data-server-id="${escapeHtml(server.id)}">Test</button><button data-mcp-action="discover" data-server-id="${escapeHtml(server.id)}">Discover</button><button data-mcp-action="toggle" data-enabled="${Boolean(server.enabled)}" data-server-id="${escapeHtml(server.id)}">${server.enabled === false ? "Enable" : "Disable"}</button><button data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">Delete</button></div></article>`;
+    return `<article class="hub-row"><div><strong>${escapeHtml(server.name || server.id || t("hub.unnamed_server"))}</strong><span>${escapeHtml(server.description || t("hub.tools_available", { n: tools.length || server.tools || 0 }))}</span><div class="hub-tool-chips">${tools.slice(0, 6).map((tool) => `<button data-mcp-tool="${escapeHtml(tool.name)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(tool.name)}</button>`).join("")}</div>${renderMcpGovernance(server)}</div><div class="hub-tags"><span class="hub-tag">${escapeHtml(String(server.transport || "unknown").toUpperCase())}</span><span class="hub-tag health-${escapeHtml(health)}">${escapeHtml(tEnum("hub.status", health, label(health)))}</span><button data-mcp-action="test" data-server-id="${escapeHtml(server.id)}">${escapeHtml(t("hub.action.test"))}</button><button data-mcp-action="discover" data-server-id="${escapeHtml(server.id)}">${escapeHtml(t("hub.action.discover"))}</button><button data-mcp-action="toggle" data-enabled="${Boolean(server.enabled)}" data-server-id="${escapeHtml(server.id)}">${escapeHtml(server.enabled === false ? t("hub.action.enable") : t("hub.action.disable"))}</button><button data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">${escapeHtml(t("hub.action.delete"))}</button></div></article>`;
   }).join("");
 }
 
 export function renderSkillRows(skills = []) {
-  if (!skills.length) return emptyRow("No skills installed");
-  return skills.map((skill) => `<article class="hub-row"><div><strong>${escapeHtml(skill.name || "Unnamed skill")}</strong><span>${escapeHtml(skill.description || "No description")}</span><small>${escapeHtml(skill.hash || skill.version || "legacy")}</small></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(label(skill.status || (skill.enabled === false ? "disabled" : "active")))}</span>${skill.hash ? `<button data-skill-action="validate" data-skill-name="${escapeHtml(skill.name)}" data-skill-hash="${escapeHtml(skill.hash)}">Validate</button><button data-skill-action="rollback" data-skill-name="${escapeHtml(skill.name)}">Rollback</button><button data-skill-action="toggle" data-skill-name="${escapeHtml(skill.name)}" data-enabled="${Boolean(skill.enabled)}">${skill.enabled === false ? "Enable" : "Disable"}</button>` : ""}</div></article>`).join("");
+  if (!skills.length) return emptyRow(t("hub.empty.skills"));
+  return skills.map((skill) => `<article class="hub-row"><div><strong>${escapeHtml(skill.name || t("hub.unnamed_skill"))}</strong><span>${escapeHtml(skill.description || t("hub.no_description"))}</span><small>${escapeHtml(skill.hash || skill.version || t("hub.legacy"))}</small></div><div class="hub-tags"><span class="hub-tag">${escapeHtml(tEnum("hub.status", skill.status || (skill.enabled === false ? "disabled" : "active"), label(skill.status)))}</span>${skill.hash ? `<button data-skill-action="validate" data-skill-name="${escapeHtml(skill.name)}" data-skill-hash="${escapeHtml(skill.hash)}">${escapeHtml(t("hub.action.validate"))}</button><button data-skill-action="rollback" data-skill-name="${escapeHtml(skill.name)}">${escapeHtml(t("hub.action.rollback"))}</button><button data-skill-action="toggle" data-skill-name="${escapeHtml(skill.name)}" data-enabled="${Boolean(skill.enabled)}">${escapeHtml(skill.enabled === false ? t("hub.action.enable") : t("hub.action.disable"))}</button>` : ""}</div></article>`).join("");
 }
 
 export function renderAgentProfileRows(profiles = []) {
-  if (!profiles.length) return emptyRow("No agent profiles created");
+  if (!profiles.length) return emptyRow(t("hub.empty.profiles"));
   return profiles.map((profile) => {
     const budgets = profile.budgets || profile.budget || {};
-    const tools = Number(budgets.tools ?? profile.toolBudget ?? 0).toLocaleString("en-US");
-    const tokens = Number(budgets.tokens ?? profile.tokenBudget ?? 0).toLocaleString("en-US");
-    return `<article class="hub-row"><div><strong>${escapeHtml(profile.name || "Unnamed profile")}</strong><span>${escapeHtml(profile.model || "Default model")}</span></div><div class="hub-budget"><span>${tools} tools</span><span>${tokens} tokens</span></div></article>`;
+    const tools = Number(budgets.tools ?? profile.toolBudget ?? 0).toLocaleString(numberLocale());
+    const tokens = Number(budgets.tokens ?? profile.tokenBudget ?? 0).toLocaleString(numberLocale());
+    return `<article class="hub-row"><div><strong>${escapeHtml(profile.name || t("hub.unnamed_profile"))}</strong><span>${escapeHtml(profile.model || t("hub.default_model"))}</span></div><div class="hub-budget"><span>${escapeHtml(t("hub.budget_tools", { n: tools }))}</span><span>${escapeHtml(t("hub.budget_tokens", { n: tokens }))}</span></div></article>`;
   }).join("");
 }
 
 export function renderToolSchema(tool = {}) {
   const schema = tool.inputSchema || tool.input_schema || tool.schema || {};
-  return `<section class="hub-schema"><div><strong>${escapeHtml(tool.name || "Tool schema")}</strong><span>${escapeHtml(tool.description || "Input contract")}</span></div><pre>${escapeHtml(JSON.stringify(schema, null, 2))}</pre></section>`;
+  return `<section class="hub-schema"><div><strong>${escapeHtml(tool.name || t("hub.tool_schema"))}</strong><span>${escapeHtml(tool.description || t("hub.input_contract"))}</span></div><pre>${escapeHtml(JSON.stringify(schema, null, 2))}</pre></section>`;
 }
 
 export function renderImportPreview(batch = {}) {
   const servers = Array.isArray(batch.servers) ? batch.servers : [];
   const secrets = Array.isArray(batch.secretCandidates) ? batch.secretCandidates : [];
   const conflicts = Array.isArray(batch.conflicts) ? batch.conflicts : [];
-  return `<div class="hub-preview-summary"><div><strong>${servers.length}</strong><span>servers detected</span></div><div><strong>${secrets.length} ${secrets.length === 1 ? "secret" : "secrets"}</strong><span>→ ${escapeHtml(batch.vaultTarget || "Lumo Vault")}</span></div><div><strong>${conflicts.length}</strong><span>conflicts</span></div></div>${servers.map((server) => `<div class="hub-preview-item"><strong>${escapeHtml(server.name || server.id || "Unnamed server")}</strong><span>${escapeHtml(String(server.transport || "auto").toUpperCase())}</span></div>`).join("")}`;
+  return `<div class="hub-preview-summary"><div><strong>${servers.length}</strong><span>${escapeHtml(t("hub.preview.servers_detected"))}</span></div><div><strong>${secrets.length}</strong><span>${escapeHtml(t("hub.preview.secrets"))} → ${escapeHtml(batch.vaultTarget || "Lumo Vault")}</span></div><div><strong>${conflicts.length}</strong><span>${escapeHtml(t("hub.preview.conflicts"))}</span></div></div>${servers.map((server) => `<div class="hub-preview-item"><strong>${escapeHtml(server.name || server.id || t("hub.unnamed_server"))}</strong><span>${escapeHtml(String(server.transport || "auto").toUpperCase())}</span></div>`).join("")}`;
 }
 
-const sections = {
-  overview: "Overview", skills: "Skills", servers: "MCP Servers", catalog: "Capability Catalog",
-  profiles: "Agent Profiles", jobs: "Jobs", permissions: "Permissions", audit: "Audit", proposals: "Improvement Proposals",
-};
+const sectionTitle = (key) => t(`hub.nav.${key}`);
 
 function overviewMarkup(data) {
-  return `<div class="hub-metrics"><article><span>Connected servers</span><strong>${data.servers.length}</strong></article><article><span>Installed skills</span><strong>${data.skills.length}</strong></article><article><span>Agent profiles</span><strong>${data.profiles.length}</strong></article><article><span>Vault posture</span><strong>Protected</strong></article></div><div class="hub-grid"><section class="hub-card"><header><div><span class="hub-eyebrow">Runtime mesh</span><h3>MCP Servers</h3></div></header>${renderServerRows(data.servers)}</section><section class="hub-card"><header><div><span class="hub-eyebrow">Operator layer</span><h3>Agent Profiles</h3></div></header>${renderAgentProfileRows(data.profiles)}</section></div>`;
+  return `<div class="hub-metrics"><article><span>${escapeHtml(t("hub.metric.servers"))}</span><strong>${data.servers.length}</strong></article><article><span>${escapeHtml(t("hub.metric.skills"))}</span><strong>${data.skills.length}</strong></article><article><span>${escapeHtml(t("hub.metric.profiles"))}</span><strong>${data.profiles.length}</strong></article><article><span>${escapeHtml(t("hub.metric.vault"))}</span><strong>${escapeHtml(t("hub.metric.protected"))}</strong></article></div><div class="hub-grid"><section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.runtime_mesh"))}</span><h3>${escapeHtml(t("hub.card.servers"))}</h3></div></header>${renderServerRows(data.servers)}</section><section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.operator_layer"))}</span><h3>${escapeHtml(t("hub.card.profiles"))}</h3></div></header>${renderAgentProfileRows(data.profiles)}</section></div>`;
 }
+
 
 export function mountCapabilityHub({ call, root }) {
   if (!root) return { refresh: async () => {} };
@@ -67,29 +68,32 @@ export function mountCapabilityHub({ call, root }) {
   let active = "overview";
   const content = root.querySelector("[data-hub-content]");
   const render = () => {
+    // 静态骨架（导航、导入向导）由词表驱动，语言切换后一并刷新
+    applyStaticTranslations(root);
     root.querySelectorAll("[data-hub-section]").forEach((button) => button.classList.toggle("is-active", button.dataset.hubSection === active));
     if (active === "overview") content.innerHTML = overviewMarkup(data);
-    else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Protocol fabric</span><h3>MCP Servers</h3></div><button class="primary" data-open-import>Import server</button></header>${renderServerRows(data.servers)}<div data-mcp-tool-call></div></section>`;
-    else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Local intelligence</span><h3>Skills</h3></div></header><div class="hub-import-editor"><input data-skill-local-path placeholder="本地 SKILL.md 或目录路径"><button data-skill-import-local>导入本地 Skill</button><input data-skill-git-url placeholder="Git repository URL"><input data-skill-git-revision placeholder="revision（可选）"><button data-skill-import-git>导入 Git Skill</button></div>${renderSkillRows(data.skills)}</section>`;
-    else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Execution policy</span><h3>Agent Profiles</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
-    else if (active === "jobs") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Durable scheduler</span><h3>Agent Jobs</h3></div></header>${renderJobs(data.jobs)}</section>`;
+    else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.protocol_fabric"))}</span><h3>${escapeHtml(t("hub.card.servers"))}</h3></div><button class="primary" data-open-import>${escapeHtml(t("hub.action.import_server"))}</button></header>${renderServerRows(data.servers)}<div data-mcp-tool-call></div></section>`;
+    else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.local_intelligence"))}</span><h3>${escapeHtml(t("hub.card.skills"))}</h3></div></header><div class="hub-import-editor"><input data-skill-local-path placeholder="${escapeHtml(t("hub.skill.local_path"))}"><button data-skill-import-local>${escapeHtml(t("hub.skill.import_local"))}</button><input data-skill-git-url placeholder="${escapeHtml(t("hub.skill.git_url"))}"><input data-skill-git-revision placeholder="${escapeHtml(t("hub.skill.git_revision"))}"><button data-skill-import-git>${escapeHtml(t("hub.skill.import_git"))}</button></div>${renderSkillRows(data.skills)}</section>`;
+    else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.execution_policy"))}</span><h3>${escapeHtml(t("hub.card.profiles"))}</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
+    else if (active === "jobs") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.scheduler"))}</span><h3>${escapeHtml(t("hub.card.jobs"))}</h3></div></header>${renderJobs(data.jobs)}</section>`;
     else if (active === "permissions") content.innerHTML = `<section class="hub-card">${renderSecurityCenter(data.security || {})}</section>`;
-    else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">Supervised evolution</span><h3>改进提案</h3><p>所有变更先评估、再人工批准，并以新版本应用。</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
-    else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sections[active])}</span><h3>Policy-ready workspace</h3><p>This surface is ready for backend data and actions. Empty state is intentional while commands are being connected.</p></section>`;
+    else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.evolution"))}</span><h3>${escapeHtml(t("hub.card.proposals"))}</h3><p>${escapeHtml(t("hub.proposals_note"))}</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
+    else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sectionTitle(active))}</span><h3>${escapeHtml(t("hub.coming.title"))}</h3><p>${escapeHtml(t("hub.coming.note"))}</p></section>`;
     const error = root.querySelector("[data-hub-errors]");
-    error.textContent = data.errors.length ? `Backend not connected: ${data.errors.join(" · ")}` : "Capability services online";
+    error.textContent = data.errors.length ? t("hub.backend_error", { detail: data.errors.join(" · ") }) : t("hub.online");
     error.classList.toggle("is-warning", data.errors.length > 0);
   };
+  subscribeLocale(() => render());
   root.addEventListener("click", async (event) => {
     const tab = event.target.closest("[data-hub-section]");
     if (tab) { active = tab.dataset.hubSection; render(); }
     const importButton = event.target.closest("[data-import-mode]");
-    if (importButton) root.querySelector("[data-import-state]").textContent = `${label(importButton.dataset.importMode)} selected — awaiting source input.`;
+    if (importButton) root.querySelector("[data-import-state]").textContent = t("hub.import.selected", { mode: tEnum("hub.import.mode", importButton.dataset.importMode, label(importButton.dataset.importMode)) });
     if (event.target.closest("[data-open-import]")) root.querySelector("[data-import-wizard]")?.scrollIntoView({ behavior: "smooth" });
     if (event.target.closest("[data-preview-mcp-import]")) {
       const preview = await call("preview_mcp_import", { sourceName: root.querySelector("[data-mcp-source-name]").value, content: root.querySelector("[data-mcp-import-content]").value });
       root.querySelector("[data-mcp-import-preview]").innerHTML = renderMcpImportWorkspace(preview);
-      root.querySelector("[data-import-state]").textContent = `${preview.servers?.length || 0} servers · ${preview.secrets?.length || 0} secrets`;
+      root.querySelector("[data-import-state]").textContent = t("hub.import.summary", { servers: preview.servers?.length || 0, secrets: preview.secrets?.length || 0 });
     }
     if (event.target.closest("[data-apply-mcp-import]")) {
       const previewRoot = root.querySelector("[data-import-token]");

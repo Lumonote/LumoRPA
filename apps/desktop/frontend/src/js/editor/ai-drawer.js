@@ -8,6 +8,7 @@ import {
 } from "../yaml.js";
 import { AI_MODES, AI_LABEL } from "../constants.js";
 import { renderActiveView } from "./render.js";
+import { snapshotSource } from "./history.js";
 
 export function openAiDrawer(path) {
   const step = findStepByPath(extractSteps(state.ast), path);
@@ -74,6 +75,7 @@ export function openAiDrawer(path) {
       do: step.do, else: step.else, catch: step.catch, finally: step.finally, branches: step.branches,
     });
     if (addCap && newMode !== "off") updated = ensureLlmCapability(updated);
+    snapshotSource("ai-drawer");
     state.source = updated;
     state.ast = parseYaml(state.source);
     close();

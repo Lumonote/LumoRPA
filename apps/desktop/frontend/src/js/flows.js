@@ -7,6 +7,7 @@ import { BLANK_FLOW_TEMPLATE } from "./constants.js";
 import { parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { renderInspector } from "./editor/inspector.js";
+import { resetHistory } from "./editor/history.js";
 
 export async function refreshFlows() {
   state.examples = await call("list_flow_library");
@@ -190,6 +191,10 @@ export function renderFlowList() {
 
 export async function loadFlow(path = state.flowPath) {
   if (!path) return;
+  if (path !== state.flowPath && state.flowPath && state.source !== state.savedSource) {
+    const keep = confirm("当前流程有未保存修改。保存后再切换吗？\n\n确定 = 保存并切换\n取消 = 放弃修改并切换");
+    if (keep) await saveFlowSource();
+  }
   state.flowPath = path;
   renderFlowConfigCard();
   setStatus("载入中…", "warn");
@@ -200,9 +205,12 @@ export async function loadFlow(path = state.flowPath) {
     ]);
     state.flow = flow;
     state.source = source;
+    state.savedSource = source;
     state.ast = parseYaml(source);
     state.selectedStepId = null;
     state.selectedStepPath = null;
+    state.selectedStepPaths?.clear();
+    resetHistory();
     $("flowTitle").textContent = flow.name || flow.id || flow.fileName || "未选择流程";
     $("flowSubtitle").textContent = `${displayFlowSource(flow.source)} · ${flow.fileName} · ${flow.stepCount} 步 · ${flow.valid ? "校验通过" : "校验异常: " + flow.error}`;
     if (flow.valid) {
@@ -262,6 +270,23 @@ export async function saveFlowSource() {
   if (!state.flowPath) return;
   await call("save_flow_source", { path: state.flowPath, source: state.source });
   state.ast = parseYaml(state.source);
+  state.savedSource = state.source;
   toast("已保存", state.flowPath, "ok");
-  await loadFlow(state.flowPath);
+  // Keep the current selection, history and execution timeline intact. A full
+  // reload here made save feel like a navigation and broke rapid edit→run.
+  renderActiveView();
+  renderInspector();
+  renderFlowConfigCard();
+}
+
+/** Persist the editor buffer before an execution command reads the flow file. */
+export async function ensureCurrentFlowSaved() {
+  if (!state.flowPath || state.source === state.savedSource) return false;
+  // Parse before writing so a malformed edit cannot replace the last runnable
+  // version on disk with content that the backend will reject.
+  state.ast = parseYaml(state.source);
+  await call("save_flow_source", { path: state.flowPath, source: state.source });
+  state.savedSource = state.source;
+  renderFlowConfigCard();
+  return true;
 }

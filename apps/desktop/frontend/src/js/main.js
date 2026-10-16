@@ -17,7 +17,12 @@ import {
   deleteElementById, duplicateElementById, syncElementGroups,
   refreshElementLibrary, persistElementLibrary,
 } from "./elements.js";
-import { appendStepToSource, appendStepWithSelector } from "./editor/mutations.js";
+import {
+  appendStepToSource, appendStepWithSelector, duplicateStepByPath,
+  copySelectedSteps, pasteStepsFromClipboard, deleteSelectedSteps,
+} from "./editor/mutations.js";
+import { undoEdit, redoEdit, snapshotSource } from "./editor/history.js";
+import { clearMultiSelection } from "./editor/steps.js";
 import { syncGutter } from "./editor/code.js";
 import { runSelectedFlow, runStep, refreshRuns, cancelActiveRun } from "./runs.js";
 import { startDebug } from "./debug.js";
@@ -29,12 +34,15 @@ import {
 import {
   ensureRecorderListener, startRecording, stopRecording,
 } from "./recorder.js";
-import { refreshSettings } from "./settings.js";
+import { refreshSettings, renderLocaleRow } from "./settings.js";
 import { loadFeatureMap } from "./features.js";
 import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
+import { openFlowHistory } from "./flow-history.js";
 import { mountCapabilityHub } from "./capability-hub.js";
+import { applyStaticTranslations, subscribeLocale } from "./i18n.js";
 import { mountMissionControl, refreshVoiceHistory, updateMissionControl } from "./mission-control.js";
+import { mountVoiceLauncher } from "./voice-launcher.js";
 import { normalizeToastEvent, reduceRunProgress, restoreAndSubscribeAgentEvents } from "./app-events.js";
 
 let bootStarted = false;
@@ -60,6 +68,7 @@ async function bindAppEvents() {
     await listen("lumo://run-progress", (event) => {
       state.liveRunProgress = reduceRunProgress(state.liveRunProgress, event?.payload);
       const progress = state.liveRunProgress;
+      if (state.runInFlight && progress.runId) state.inFlightRunId = progress.runId;
       if (progress.currentStep) setStatus(`运行中 · ${progress.currentStep}`, "warn");
       if (progress.logs.length) {
         const dropped = progress.droppedLogs ? `\n… 已截断 ${progress.droppedLogs} 条较早日志` : "";
@@ -109,6 +118,15 @@ function bindEvents() {
   $$("#viewSwitch button").forEach((b) => b.addEventListener("click", () => switchEditorMode(b.dataset.mode)));
   // Right tabs
   $$("#rightTabs button").forEach((b) => b.addEventListener("click", () => switchRightSection(b.dataset.section)));
+  // Voice launcher: the capsule is its own window, so the topbar keeps a
+  // permanent way back in (and shows the shortcut that also works).
+  state.voiceLauncher = mountVoiceLauncher({
+    button: $("voiceToggleBtn"),
+    call,
+    listen: window.__TAURI__?.event?.listen,
+    onError: reportError,
+  });
+  document.addEventListener("lumo:voice-config-saved", () => state.voiceLauncher?.refresh?.());
   // Theme + opacity
   $("themeToggleBtn").addEventListener("click", () => applyTheme(state.theme === "dark" ? "light" : "dark"));
   $$("[data-theme]").forEach((b) => b.addEventListener("click", () => applyTheme(b.dataset.theme)));
@@ -292,6 +310,8 @@ function bindEvents() {
 
   // Editor toolbar
   $("loadFlowBtn").addEventListener("click", () => loadFlow().catch(reportError));
+  $("undoBtn").addEventListener("click", () => undoEdit());
+  $("redoBtn").addEventListener("click", () => redoEdit());
   $("validateBtn").addEventListener("click", async () => {
     if (!state.flowPath) return;
     try {
@@ -329,14 +349,25 @@ function bindEvents() {
   $("debugBtn").addEventListener("click", () => startDebug());
   $("cancelRunBtn").addEventListener("click", () => cancelActiveRun());
   $("saveFlowBtn").addEventListener("click", () => saveFlowSource().catch(reportError));
+  $("flowHistoryBtn").addEventListener("click", () => openFlowHistory().catch(reportError));
   $("resetInputBtn").addEventListener("click", () => {
     if (state.flow) $("inputsJson").value = pretty(defaultInputs(state.flow));
   });
 
   // Code editor
   $("codeEditor").addEventListener("input", (e) => {
+    snapshotSource("code-edit", 1200);
     state.source = e.target.value;
-    state.ast = parseYaml(state.source);
+    try {
+      state.ast = parseYaml(state.source);
+      setStatus("未保存编辑", "warn");
+    } catch {
+      // YAML is frequently incomplete while the user is typing. Keep the raw
+      // buffer so it can be fixed, but do not let one transient parse error
+      // break the editor event loop.
+      state.ast = null;
+      setStatus("YAML 编辑中…", "warn");
+    }
     syncGutter();
   });
   $("codeEditor").addEventListener("scroll", () => {
@@ -368,6 +399,44 @@ function bindEvents() {
   $("recorderStartBtn").addEventListener("click", startRecording);
   $("recorderStopBtn").addEventListener("click", stopRecording);
 
+  // Editor keyboard: undo/redo + step clipboard + batch delete (design view)
+  document.addEventListener("keydown", (e) => {
+    if (state.currentView !== "design") return;
+    const mod = e.metaKey || e.ctrlKey;
+    const t = e.target;
+    const editable = !!t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+    if (mod && !e.altKey && (e.key === "z" || e.key === "Z")) {
+      if (editable) return; // native undo inside inputs / the code textarea
+      e.preventDefault();
+      if (e.shiftKey) redoEdit();
+      else undoEdit();
+      return;
+    }
+    if (editable) return;
+    if (mod && !e.shiftKey && (e.key === "c" || e.key === "C")) {
+      if (window.getSelection && String(window.getSelection())) return; // real text copy
+      if (copySelectedSteps()) e.preventDefault();
+      return;
+    }
+    if (mod && !e.shiftKey && (e.key === "v" || e.key === "V")) {
+      e.preventDefault();
+      pasteStepsFromClipboard();
+      return;
+    }
+    if (mod && !e.shiftKey && (e.key === "d" || e.key === "D")) {
+      if (state.selectedStepPath) {
+        e.preventDefault();
+        duplicateStepByPath(state.selectedStepPath);
+      }
+      return;
+    }
+    if (!mod && (e.key === "Delete" || e.key === "Backspace")) {
+      if (deleteSelectedSteps()) e.preventDefault();
+      return;
+    }
+    if (e.key === "Escape") clearMultiSelection();
+  });
+
   // System theme listener
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
@@ -380,6 +449,14 @@ async function boot() {
   if (bootStarted) return;
   bootStarted = true;
 
+  applyStaticTranslations();
+  // 语言切换后：静态文案就地替换，动态视图按当前视图重渲染。Capability Hub
+  // 自己订阅了 locale，这里只负责应用外壳与当前视图。
+  subscribeLocale(() => {
+    applyStaticTranslations();
+    renderLocaleRow();
+    if (state.currentView) switchTopView(state.currentView);
+  });
   bindEvents();
   applyTheme(state.theme);
   applyWindowAlpha(state.windowAlpha);

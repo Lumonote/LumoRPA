@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectQuickCommands, exportQuickCommands, mergeQuickCommands, normalizeQuickCommands, normalizeVoiceSettings, renderQuickCommandRow, renderVoiceSettings, serializeVoiceSettings } from "../src/js/voice-settings.js";
+import { collectQuickCommands, exportQuickCommands, mergeQuickCommands, normalizeQuickCommands, normalizeVoiceSettings, renderQuickCommandRow, renderVoiceSettings, renderVoiceSummonGuide, serializeVoiceSettings } from "../src/js/voice-settings.js";
 
 test("renders privacy-first voice defaults and model health", () => {
   const html = renderVoiceSettings({ wakeWordEnabled: true, shortcut: "Option+Space", sttProfile: "local", retainAudio: false, models: [{ id: "kws-zh", status: "checksum_failed" }] });
@@ -108,4 +108,22 @@ test("exports and merges quick commands with imported phrases winning", () => {
   assert.equal(replaced.confirm, true);
   assert.ok(merged.some((command) => command.phrase === "收工"));
   assert.ok(merged.some((command) => command.phrase === "静音一下"));
+});
+
+test("voice settings lead with the three ways to summon the capsule", () => {
+  const html = renderVoiceSettings({ shortcuts: [{ id: "b", action: "voice_toggle", accelerator: "Alt+L", enabled: true }] });
+  assert.match(html, /voice-summon-guide/);
+  assert.match(html, /全局快捷键/);
+  assert.match(html, /顶栏「语音」按钮/);
+  assert.match(html, /系统托盘菜单/);
+  assert.match(html, /data-voice-summon-shortcut/);
+  assert.match(html, /拖到任意位置/);
+  // 引导块排在设置项之前，用户一进面板就能看到。
+  assert.ok(html.indexOf("voice-summon-guide") < html.indexOf("voice-settings-grid"));
+});
+
+test("summon guide renders the bound accelerator per platform", () => {
+  const settings = { shortcuts: [{ id: "b", action: "voice_toggle", accelerator: "CommandOrControl+Shift+Space", enabled: true }] };
+  assert.match(renderVoiceSummonGuide(settings, true), /⌘⇧Space/);
+  assert.match(renderVoiceSummonGuide(settings, false), /Ctrl\+Shift\+Space/);
 });
