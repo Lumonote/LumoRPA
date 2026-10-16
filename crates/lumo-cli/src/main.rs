@@ -35,6 +35,10 @@ enum Cmd {
     Validate(cmd::validate::Args),
     /// Lint a flow YAML file (capabilities, refs, retry policies)
     Lint(cmd::lint::Args),
+    /// Doctor: check the local environment for common runtime problems
+    Doctor(cmd::doctor::Args),
+    /// Install / remove the login scheduler daemon (wraps `lumo serve`)
+    Service(cmd::service::Args),
     /// Run a flow file once
     Run(cmd::run::Args),
     /// Inspect previous runs
@@ -70,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Init(a) => cmd::init::run(a).await,
         Cmd::Validate(a) => cmd::validate::run(home, a).await,
         Cmd::Lint(a) => cmd::lint::run(home, a).await,
+        Cmd::Doctor(a) => cmd::doctor::run(home, a).await,
+        Cmd::Service(a) => cmd::service::run(home, a).await,
         Cmd::Run(a) => cmd::run::run(home, a).await,
         Cmd::Runs(a) => cmd::runs::run(home, a).await,
         Cmd::Actions(a) => cmd::actions::run(home, a).await,

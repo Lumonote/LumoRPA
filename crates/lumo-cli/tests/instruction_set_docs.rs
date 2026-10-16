@@ -14,6 +14,18 @@ fn full_cli_registry() -> ActionRegistry {
     registry
 }
 
+/// 仅当 `desktop` crate feature 打开时才注册的动作族。
+///
+/// 指令集表格记录的是完整产品面,所以无条件列出它们;而本测试比对的是
+/// **默认 feature** 构建出来的注册表。这里把它们从「注册表方向」的比对中
+/// 排除,既让文档对读者保持完整,又不放过真正的漂移 —— 一个既没写进文档、
+/// 也不属于 feature 门控的动作,依然是硬失败。
+const FEATURE_GATED_PREFIXES: &[&str] = &["desktop.", "window."];
+
+fn is_feature_gated(id: &str) -> bool {
+    FEATURE_GATED_PREFIXES.iter().any(|p| id.starts_with(p))
+}
+
 fn documented_action_ids() -> BTreeSet<String> {
     let doc = include_str!("../../../docs/05-LumoFlow-Instruction-Set.md");
     let start = doc
@@ -52,8 +64,15 @@ fn instruction_set_action_list_matches_default_cli_registry() {
     let registered: BTreeSet<String> = registry.iter_ids().collect();
     let documented = documented_action_ids();
 
+    // feature 门控动作只豁免「注册表方向」的比对;文档方向不过滤。
+    let expected: BTreeSet<String> = documented
+        .iter()
+        .filter(|id| !is_feature_gated(id))
+        .cloned()
+        .collect();
+
     let missing_from_doc: Vec<_> = registered.difference(&documented).cloned().collect();
-    let missing_from_registry: Vec<_> = documented.difference(&registered).cloned().collect();
+    let missing_from_registry: Vec<_> = expected.difference(&registered).cloned().collect();
 
     assert!(
         missing_from_doc.is_empty() && missing_from_registry.is_empty(),
@@ -65,6 +84,10 @@ fn instruction_set_action_list_matches_default_cli_registry() {
 fn documented_actions_have_summaries_and_object_schemas() {
     let registry = full_cli_registry();
     for id in documented_action_ids() {
+        // feature 门控动作在默认 feature 下取不到对象,跳过。
+        if is_feature_gated(&id) {
+            continue;
+        }
         let action = registry
             .get(&id)
             .unwrap_or_else(|| panic!("documented action `{id}` is not registered"));

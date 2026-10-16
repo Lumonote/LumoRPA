@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod copilot;
+pub mod doctor;
 pub mod hotkey;
 pub mod human;
 pub mod init;
@@ -9,6 +10,7 @@ pub mod providers;
 pub mod run;
 pub mod runs;
 pub mod serve;
+pub mod service;
 pub mod skills;
 pub mod validate;
 pub mod vault;
