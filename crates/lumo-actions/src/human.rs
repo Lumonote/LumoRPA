@@ -80,6 +80,34 @@ async fn wait_for_human(
     }
 }
 
+/// 通用宿主请求入口:把一次结构化提示发给宿主并取回**原始回执值**。
+///
+/// 这是给兼容族(dialog.* / dir.selected_dirs_or_files / dir.open)复用的
+/// 通道 —— 它们要的不是「文本」或「是/否」,而是宿主自己解释的结构化回执
+/// (选中路径、按钮名、表单值)。语义与 human.* 完全一致:
+///
+/// * 无 prompter 接入 → 立刻返回可读错误(绝不 panic/挂死),文案统一为
+///   `{action}: host does not support human interaction (no prompter attached)`;
+/// * 有 prompter → 与运行取消、timeout_ms 竞速,超时返回明确错误。
+///
+/// request 是动作自定义的载荷,原样交给宿主解释。
+pub async fn ask_host(ctx: &StepCtx, action: &str, request: Value) -> Result<Value, StepError> {
+    let req = build_request(
+        ctx,
+        HumanPromptKind::Input,
+        // 兼容族用 JSON 载荷承载结构化请求;宿主按 action 分派。
+        serde_json::json!({ "action": action, "request": request }).to_string(),
+        Some(request),
+        default_timeout_ms(),
+    );
+    match wait_for_human(ctx, action, req).await? {
+        WaitOutcome::Response(r) => Ok(r.value),
+        WaitOutcome::TimedOut => Err(StepError::msg(format!(
+            "{action}: timed out waiting for the host response"
+        ))),
+    }
+}
+
 fn build_request(
     ctx: &StepCtx,
     kind: HumanPromptKind,

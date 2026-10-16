@@ -1411,6 +1411,9 @@ mod tests {
             .await
             .expect_err("nothing listens on the freed port");
         assert_eq!(err.kind(), ErrorKind::Network, "got: {err:?}");
-        assert!(err.to_string().contains("email.fetch connect"), "got: {err}");
+        assert!(
+            err.to_string().contains("email.fetch connect"),
+            "got: {err}"
+        );
     }
 }

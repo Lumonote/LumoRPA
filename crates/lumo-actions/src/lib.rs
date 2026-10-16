@@ -9,12 +9,16 @@ pub mod csv_ops;
 pub mod data;
 pub mod date_ops;
 pub mod db_ops;
+// 兼容族:字典操作 / 文本操作。纯数据变换,无 capability 门禁。
 #[cfg(feature = "desktop")]
 pub mod desktop;
 #[cfg(feature = "desktop")]
 pub mod desktop_screen;
 #[cfg(feature = "desktop")]
 pub mod desktop_text;
+pub mod dialog;
+pub mod dict_ops;
+pub mod doc;
 pub mod docx;
 pub mod email;
 pub mod excel;
@@ -28,6 +32,8 @@ pub mod list_ops;
 pub mod math_ops;
 pub mod mcp;
 pub mod notify;
+// OCR 引擎与路由:本地小模型 / 远程接口 / 云 VLM 三档,云端默认关闭。
+pub mod ocr;
 pub mod pdf;
 pub mod regex_ops;
 pub mod resource_store;
@@ -37,6 +43,7 @@ pub mod selectors;
 pub mod string_ops;
 pub mod system_ops;
 pub mod table_ops;
+pub mod text_ops;
 pub mod transfer;
 pub mod vision;
 pub mod xml_ops;
@@ -93,8 +100,16 @@ pub fn register_all(registry: &mut ActionRegistry) {
     table_ops::register(registry);
     transfer::register(registry);
     docx::register(registry);
+    // doc.*:文档理解族(DocIR)。与 pdf/docx/excel 的「格式操作」正交并存。
+    doc::register(registry);
     // 指令集缺口 P0:XML 族(SOAP/政企对接/电子发票)。纯数据变换,不进 capability gate。
     xml_ops::register(registry);
+    // 兼容族:dictionary.* 字典操作 + text.* 文本操作。
+    // 与既有 json.*/string.* 并存(本族是同名门面),全部纯数据变换。
+    dict_ops::register(registry);
+    text_ops::register(registry);
+    // dialog.* 全族走 human::ask_host 宿主回执通道,无 capability 门禁。
+    dialog::register(registry);
 }
 
 /// X-07(时光回溯):以 best-effort 方式把 blob 归档为当前步骤的 artifact。
@@ -292,6 +307,56 @@ mod capability_caps_sync {
         "xml.build",
         "xml.parse",
         "xml.xpath",
+        // ---- 兼容族 ----
+        // dictionary.* / text.* / list.* 新增项全是**纯内存数据变换**:不碰文件、
+        // 不发网络、不调 LLM、不动桌面 —— 实现里没有任何 ensure_* 调用,故一律
+        // 进本白名单而不是 ACTION_CAPS。
+        // dir.open / dir.selected_dirs_or_files 是宿主交互(打开文件管理器、
+        // 弹选择器),不触碰受限资源本身,故无 capability 门禁。
+        // 剪贴板与对话框:本地/宿主交互,不触碰受限资源。
+        "clipboard.clear",
+        "clipboard.get_text",
+        "clipboard.set_text",
+        "dialog.confirm",
+        "dialog.custom",
+        "dialog.form",
+        "dialog.input",
+        "dialog.message",
+        "dialog.progress",
+        "dialog.select",
+        "dialog.select_dir",
+        "dialog.select_file",
+        "dir.open",
+        "dir.selected_dirs_or_files",
+        "dictionary.create",
+        "dictionary.get_keys",
+        "dictionary.get_value",
+        "dictionary.get_values",
+        "dictionary.pop",
+        "dictionary.set",
+        "list.append_or_insert",
+        "list.clear",
+        "list.create",
+        "list.extend",
+        "list.get_duplicate",
+        "list.get_elem",
+        "list.get_index",
+        "list.get_len",
+        "list.remove",
+        "list.remove_duplicate",
+        "list.remove_list",
+        "list.set_elem",
+        "list.shuffle",
+        "text.append_text_in_newline",
+        "text.change_text_case",
+        "text.extract_content_from_text",
+        "text.get_text_length",
+        "text.join_list_to_text",
+        "text.pad_text",
+        "text.replace_content_from_text",
+        "text.split_text_to_list",
+        "text.sub_text",
+        "text.trim_text",
     ];
 
     /// 表里存在、但不由本 crate 的 `register_all` 注册的动作:`ai.chat` 在

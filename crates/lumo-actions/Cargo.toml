@@ -14,7 +14,11 @@ tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# preserve_order:兼容族(dictionary.*)与 JSON 往返都必须保留**键插入序** ——
+# 「字典」的键序就是用户添加顺序,默认的 BTreeMap 后端会按字典序重排,
+# 让 dictionary.get_keys / json.* 的输出与用户预期不符。indexmap 已是本仓
+# 传递依赖(lumo-agent 同款配置、Cargo.lock 已锁 2.14.0),零新增依赖树。
+serde_json = { workspace = true, features = ["preserve_order"] }
 schemars.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -30,6 +34,8 @@ sqlx.workspace = true
 reqwest.workspace = true
 chromiumoxide.workspace = true
 calamine.workspace = true
+libloading = { version = "0.8", optional = true }
+lumo-doc.workspace = true
 rust_xlsxwriter.workspace = true
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
@@ -119,6 +125,9 @@ sxd-document = "0.3"
 sxd-xpath = "0.4"
 
 [features]
+# 本地小 OCR 模型:libloading 运行时加载 ONNX Runtime(同 lumo-voice 的
+# sherpa-native 范式),不编译期链接 C 库,默认构建仍是纯 Rust。
+ocr-native = ["dep:libloading"]
 # 桌面输入动作族 desktop.*(rdev)。默认关闭 —— 信创/headless 交叉编译不受影响,
 # 文本输入走剪贴板粘贴(arboard,Unicode/中文安全)。同特性还启用原生截屏
 # desktop.screenshot 与窗口管理 window.*(xcap;Windows 激活/改几何走 windows-sys)。

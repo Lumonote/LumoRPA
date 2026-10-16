@@ -25,6 +25,20 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(MetadataAction);
     r.register(AppendAction);
     r.register(WaitAction);
+
+    // ---- 兼容族:dir.* 目录操作(复用 file.* 内部机制) ----
+    r.register(DirIfExistAction);
+    r.register(DirMakedirAction);
+    r.register(DirRemoveAction);
+    r.register(DirFindFilesAction);
+    r.register(DirFindSubdirsAction);
+    r.register(DirGetSpecialDirAction);
+    r.register(DirSelectedAction);
+    r.register(DirRenameAction);
+    r.register(DirMoveAction);
+    r.register(DirCopyAction);
+    r.register(DirEmptyAction);
+    r.register(DirOpenAction);
 }
 
 pub struct ReadAction;
@@ -560,9 +574,9 @@ impl Action for AppendAction {
             .await
             .map_err(|e| StepError::io(format!("file.append write {}: {e}", path.display())))?;
         if newline {
-            f.write_all(b"\n").await.map_err(|e| {
-                StepError::io(format!("file.append write {}: {e}", path.display()))
-            })?;
+            f.write_all(b"\n")
+                .await
+                .map_err(|e| StepError::io(format!("file.append write {}: {e}", path.display())))?;
         }
         Ok(ActionResult::from(serde_json::json!({ "path": path })))
     }
@@ -1001,4 +1015,641 @@ fn time_ms(time: std::io::Result<SystemTime>) -> Option<u64> {
     time.ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+// ---------------------------------------------------------------------------
+// 兼容族:dir.* 目录操作
+// ---------------------------------------------------------------------------
+//
+// 把「文件」与「文件夹」拆成两个指令分类,本族是后者。实现**全部复用**上面
+// 已有的 file.* 内部机制(ensure_fs_read / ensure_fs_write / list_entries /
+// ensure_tree / remove_path),不重复造文件系统逻辑 —— 保证目录与文件两条路径
+// 的安全语义(符号链接拒绝、dry_run、缺失容错)完全一致。
+
+/// 目录是否存在(等同于 file.exists 的目录语义门面)。
+pub struct DirIfExistAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirIfExistIn {
+    path: PathBuf,
+}
+#[async_trait]
+impl Action for DirIfExistAction {
+    fn id(&self) -> &'static str {
+        "dir.if_exist"
+    }
+    fn summary(&self) -> &'static str {
+        "Whether a directory exists (false for files and missing paths)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirIfExistIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirIfExistIn { path } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.if_exist input invalid: {e}")))?;
+        ctx.ensure_fs_read(&path)?;
+        // 用 symlink_metadata:符号链接本身不算目录,避免顺着链接越出沙箱判定。
+        let is_dir = tokio::fs::symlink_metadata(&path)
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        Ok(ActionResult::from(Value::Bool(is_dir)))
+    }
+}
+
+/// 递归创建目录(等同 mkdir -p)。
+pub struct DirMakedirAction;
+#[async_trait]
+impl Action for DirMakedirAction {
+    fn id(&self) -> &'static str {
+        "dir.makedir"
+    }
+    fn summary(&self) -> &'static str {
+        "Create a directory and any missing parents (mkdir -p)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirIfExistIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirIfExistIn { path } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.makedir input invalid: {e}")))?;
+        ctx.ensure_fs_write(&path)?;
+        tokio::fs::create_dir_all(&path)
+            .await
+            .map_err(|e| StepError::io(format!("dir.makedir {}: {e}", path.display())))?;
+        Ok(ActionResult::from(serde_json::json!({
+            "path": path,
+            "created": true,
+        })))
+    }
+}
+
+/// 删除目录。
+pub struct DirRemoveAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirRemoveIn {
+    path: PathBuf,
+    /// Delete a non-empty directory recursively.
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    missing_ok: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+#[async_trait]
+impl Action for DirRemoveAction {
+    fn id(&self) -> &'static str {
+        "dir.remove"
+    }
+    fn summary(&self) -> &'static str {
+        "Remove a directory; `recursive` is required for a non-empty one"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirRemoveIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirRemoveIn {
+            path,
+            recursive,
+            missing_ok,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.remove input invalid: {e}")))?;
+        ctx.ensure_fs_write(&path)?;
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Err(StepError::msg(format!(
+                        "dir.remove path is not a directory: {} (use file.delete for files)",
+                        path.display()
+                    )));
+                }
+                if recursive {
+                    ensure_tree(ctx, &path, false, true, "dir.remove").await?;
+                }
+                if !dry_run {
+                    remove_path(&path, recursive, "dir.remove").await?;
+                }
+                Ok(ActionResult::from(serde_json::json!({
+                    "path": path,
+                    "dry_run": dry_run,
+                    "would_delete": true,
+                    "deleted": !dry_run,
+                })))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound && missing_ok => {
+                Ok(ActionResult::from(serde_json::json!({
+                    "path": path,
+                    "dry_run": dry_run,
+                    "would_delete": false,
+                    "deleted": false,
+                })))
+            }
+            Err(e) => Err(StepError::io(format!(
+                "dir.remove stat {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+}
+
+/// 查找目录下的文件。
+pub struct DirFindFilesAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirFindIn {
+    path: PathBuf,
+    #[serde(default)]
+    recursive: bool,
+    /// Glob-ish substring filter on the file name.
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    include_hidden: bool,
+    #[serde(default = "crate::contracts::default_collection_limit")]
+    limit: usize,
+}
+#[async_trait]
+impl Action for DirFindFilesAction {
+    fn id(&self) -> &'static str {
+        "dir.find_files"
+    }
+    fn summary(&self) -> &'static str {
+        "Find files under a directory (optional recursion and pattern)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirFindIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirFindIn {
+            path,
+            recursive,
+            pattern,
+            include_hidden,
+            limit,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.find_files input invalid: {e}")))?;
+        let limit = crate::contracts::checked_limit("dir.find_files", limit)?;
+        ctx.ensure_fs_read(&path)?;
+        let mut entries = list_entries(
+            ctx,
+            &path,
+            recursive,
+            ListKind::Files,
+            pattern.as_deref(),
+            include_hidden,
+            ListSortBy::Name,
+            false,
+        )
+        .await?;
+        let truncated = crate::contracts::truncate_with_flag(&mut entries, limit);
+        let count = entries.len();
+        Ok(ActionResult::from(serde_json::json!({
+            "path": path,
+            "count": count,
+            "limit": limit,
+            "truncated": truncated,
+            "files": entries,
+        })))
+    }
+}
+
+/// 查找子目录。
+pub struct DirFindSubdirsAction;
+#[async_trait]
+impl Action for DirFindSubdirsAction {
+    fn id(&self) -> &'static str {
+        "dir.find_subdirs"
+    }
+    fn summary(&self) -> &'static str {
+        "Find sub-directories under a directory"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirFindIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirFindIn {
+            path,
+            recursive,
+            pattern,
+            include_hidden,
+            limit,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.find_subdirs input invalid: {e}")))?;
+        let limit = crate::contracts::checked_limit("dir.find_subdirs", limit)?;
+        ctx.ensure_fs_read(&path)?;
+        let mut entries = list_entries(
+            ctx,
+            &path,
+            recursive,
+            ListKind::Directories,
+            pattern.as_deref(),
+            include_hidden,
+            ListSortBy::Name,
+            false,
+        )
+        .await?;
+        let truncated = crate::contracts::truncate_with_flag(&mut entries, limit);
+        let count = entries.len();
+        Ok(ActionResult::from(serde_json::json!({
+            "path": path,
+            "count": count,
+            "limit": limit,
+            "truncated": truncated,
+            "directories": entries,
+        })))
+    }
+}
+
+/// 取系统特殊目录(桌面/下载/文档/临时/主目录)。
+pub struct DirGetSpecialDirAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirGetSpecialDirIn {
+    /// One of: home, desktop, downloads, documents, temp. Defaults to home.
+    #[serde(default)]
+    name: Option<String>,
+}
+#[async_trait]
+impl Action for DirGetSpecialDirAction {
+    fn id(&self) -> &'static str {
+        "dir.get_special_dir"
+    }
+    fn summary(&self) -> &'static str {
+        "Resolve a well-known directory: home | desktop | downloads | documents | temp"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirGetSpecialDirIn>);
+        &S
+    }
+    async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirGetSpecialDirIn { name } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.get_special_dir input invalid: {e}")))?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| StepError::msg("dir.get_special_dir: HOME is not set on this host"))?;
+        let key = name.as_deref().unwrap_or("home");
+        let path = match key {
+            "home" => home.clone(),
+            "desktop" => home.join("Desktop"),
+            "downloads" => home.join("Downloads"),
+            "documents" => home.join("Documents"),
+            "temp" => std::env::temp_dir(),
+            other => {
+                return Err(StepError::msg(format!(
+                    "dir.get_special_dir: unknown name `{other}` (expected home | desktop | downloads | documents | temp)"
+                )))
+            }
+        };
+        Ok(ActionResult::from(serde_json::json!({
+            "name": key,
+            "path": path,
+        })))
+    }
+}
+
+/// GUI 目录/文件选择器。
+///
+/// 走 `human.*` 的宿主回执通道(与本 crate 的 human.rs 同一机制)。**无宿主接入时
+/// 必须明确报错而不是 panic/挂死** —— CLI `--no-store` 路径下没有 UI 线程,
+/// 静默返回空列表会让流程拿着空路径继续跑,比直接失败更难排查。
+pub struct DirSelectedAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirSelectedIn {
+    /// `files` (default) | `directories`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Allow selecting more than one entry.
+    #[serde(default)]
+    multiple: bool,
+}
+#[async_trait]
+impl Action for DirSelectedAction {
+    fn id(&self) -> &'static str {
+        "dir.selected_dirs_or_files"
+    }
+    fn summary(&self) -> &'static str {
+        "Ask the host UI to pick files or directories; errors without a host"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirSelectedIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirSelectedIn { kind, multiple } = serde_json::from_value(input).map_err(|e| {
+            StepError::msg(format!("dir.selected_dirs_or_files input invalid: {e}"))
+        })?;
+        let kind = kind.as_deref().unwrap_or("files");
+        if kind != "files" && kind != "directories" {
+            return Err(StepError::msg(format!(
+                "dir.selected_dirs_or_files: unknown kind `{kind}` (expected files | directories)"
+            )));
+        }
+        // 复用 human.* 的宿主交互通道:同一个 ask_host,同一套无宿主错误语义。
+        match crate::human::ask_host(
+            ctx,
+            "dir.selected_dirs_or_files",
+            serde_json::json!({ "kind": kind, "multiple": multiple }),
+        )
+        .await
+        {
+            Ok(v) => Ok(ActionResult::from(v)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// 重命名目录。
+pub struct DirRenameAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirRenameIn {
+    path: PathBuf,
+    to: PathBuf,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+#[async_trait]
+impl Action for DirRenameAction {
+    fn id(&self) -> &'static str {
+        "dir.rename"
+    }
+    fn summary(&self) -> &'static str {
+        "Rename a directory within its parent (same as dir.move)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirRenameIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirRenameIn {
+            path,
+            to,
+            overwrite,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.rename input invalid: {e}")))?;
+        ctx.ensure_fs_write(&path)?;
+        ctx.ensure_fs_write(&to)?;
+        if !dry_run {
+            if !overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+                return Err(StepError::msg(format!(
+                    "dir.rename target already exists: {} (pass `overwrite: true` to replace)",
+                    to.display()
+                )));
+            }
+            tokio::fs::rename(&path, &to).await.map_err(|e| {
+                StepError::io(format!(
+                    "dir.rename {} -> {}: {e}",
+                    path.display(),
+                    to.display()
+                ))
+            })?;
+        }
+        Ok(ActionResult::from(serde_json::json!({
+            "from": path,
+            "to": to,
+            "dry_run": dry_run,
+            "renamed": !dry_run,
+        })))
+    }
+}
+
+/// 移动目录(与重命名同实现,提供同名指令)。
+pub struct DirMoveAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirMoveIn {
+    path: PathBuf,
+    to: PathBuf,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+#[async_trait]
+impl Action for DirMoveAction {
+    fn id(&self) -> &'static str {
+        "dir.move"
+    }
+    fn summary(&self) -> &'static str {
+        "Move a directory to `to`"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirMoveIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirMoveIn {
+            path,
+            to,
+            overwrite,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.move input invalid: {e}")))?;
+        ctx.ensure_fs_write(&path)?;
+        ctx.ensure_fs_write(&to)?;
+        if !dry_run {
+            if !overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+                return Err(StepError::msg(format!(
+                    "dir.move target already exists: {} (pass `overwrite: true` to replace)",
+                    to.display()
+                )));
+            }
+            tokio::fs::rename(&path, &to).await.map_err(|e| {
+                StepError::io(format!(
+                    "dir.move {} -> {}: {e}",
+                    path.display(),
+                    to.display()
+                ))
+            })?;
+        }
+        Ok(ActionResult::from(serde_json::json!({
+            "from": path,
+            "to": to,
+            "dry_run": dry_run,
+            "moved": !dry_run,
+        })))
+    }
+}
+
+/// 复制目录(递归)。
+pub struct DirCopyAction;
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DirCopyIn {
+    path: PathBuf,
+    to: PathBuf,
+    #[serde(default)]
+    overwrite: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+#[async_trait]
+impl Action for DirCopyAction {
+    fn id(&self) -> &'static str {
+        "dir.copy"
+    }
+    fn summary(&self) -> &'static str {
+        "Recursively copy a directory tree"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirCopyIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirCopyIn {
+            path,
+            to,
+            overwrite,
+            dry_run,
+        } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.copy input invalid: {e}")))?;
+        ctx.ensure_fs_read(&path)?;
+        ctx.ensure_fs_write(&to)?;
+        // 只对**已存在**的目标做覆盖判定;源自动展开成 to/<basename> 时不算冲突。
+        let dest_conflict = tokio::fs::try_exists(&to).await.unwrap_or(false);
+        if dest_conflict && !overwrite {
+            return Err(StepError::msg(format!(
+                "dir.copy target already exists: {} (pass `overwrite: true` to merge/replace)",
+                to.display()
+            )));
+        }
+        let mut files = 0u64;
+        let mut dirs = 0u64;
+        if !dry_run {
+            copy_tree(&path, &to, overwrite, &mut files, &mut dirs).await?;
+        }
+        Ok(ActionResult::from(serde_json::json!({
+            "from": path,
+            "to": to,
+            "dry_run": dry_run,
+            "overwrite": overwrite,
+            "files": files,
+            "directories": dirs,
+        })))
+    }
+}
+
+/// 递归复制目录树。
+fn copy_tree<'a>(
+    from: &'a Path,
+    to: &'a Path,
+    overwrite: bool,
+    files: &'a mut u64,
+    dirs: &'a mut u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StepError>> + Send + 'a>> {
+    Box::pin(async move {
+        tokio::fs::create_dir_all(to)
+            .await
+            .map_err(|e| StepError::io(format!("dir.copy mkdir {}: {e}", to.display())))?;
+        *dirs += 1;
+        let mut rd = tokio::fs::read_dir(from)
+            .await
+            .map_err(|e| StepError::io(format!("dir.copy read {}: {e}", from.display())))?;
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| StepError::io(format!("dir.copy read entry: {e}")))?
+        {
+            let src = entry.path();
+            let dst = to.join(entry.file_name());
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|e| StepError::io(format!("dir.copy stat {}: {e}", src.display())))?;
+            if meta.is_dir() {
+                copy_tree(&src, &dst, overwrite, files, dirs).await?;
+            } else {
+                if !overwrite && tokio::fs::try_exists(&dst).await.unwrap_or(false) {
+                    return Err(StepError::msg(format!(
+                        "dir.copy target already exists: {} (pass `overwrite: true`)",
+                        dst.display()
+                    )));
+                }
+                tokio::fs::copy(&src, &dst).await.map_err(|e| {
+                    StepError::io(format!(
+                        "dir.copy {} -> {}: {e}",
+                        src.display(),
+                        dst.display()
+                    ))
+                })?;
+                *files += 1;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 判定目录是否为空。
+pub struct DirEmptyAction;
+#[async_trait]
+impl Action for DirEmptyAction {
+    fn id(&self) -> &'static str {
+        "dir.empty"
+    }
+    fn summary(&self) -> &'static str {
+        "Whether a directory holds no entries (missing directories count as empty)"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirIfExistIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirIfExistIn { path } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.empty input invalid: {e}")))?;
+        ctx.ensure_fs_read(&path)?;
+        let mut rd = match tokio::fs::read_dir(&path).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return Ok(ActionResult::from(Value::Bool(true)))
+            }
+            Err(e) => return Err(StepError::io(format!("dir.empty {}: {e}", path.display()))),
+        };
+        let next = rd
+            .next_entry()
+            .await
+            .map_err(|e| StepError::io(format!("dir.empty {}: {e}", path.display())))?;
+        Ok(ActionResult::from(Value::Bool(next.is_none())))
+    }
+}
+
+/// 在系统文件管理器中打开目录。
+///
+/// 无 GUI 的宿主会明确报 unsupported,而不是假装成功 —— 里这条指令是
+/// 「给人看」的副作用,静默 no-op 会让流程比失败更难排查。
+pub struct DirOpenAction;
+#[async_trait]
+impl Action for DirOpenAction {
+    fn id(&self) -> &'static str {
+        "dir.open"
+    }
+    fn summary(&self) -> &'static str {
+        "Reveal a directory in the host file manager; unsupported without a GUI host"
+    }
+    fn schema(&self) -> &'static Value {
+        static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DirIfExistIn>);
+        &S
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let DirIfExistIn { path } = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("dir.open input invalid: {e}")))?;
+        ctx.ensure_fs_read(&path)?;
+        crate::human::ask_host(
+            ctx,
+            "dir.open",
+            serde_json::json!({ "path": path, "action": "reveal" }),
+        )
+        .await
+        .map(ActionResult::from)
+    }
 }
