@@ -164,12 +164,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install desktop build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libayatana-appindicator3-dev patchelf
+      # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
+      # lumo-actions' `desktop` feature (rdev/xcap) and lumo-voice's `capture`
+      # feature (cpal) need. Shared with ci.yml so the two lists cannot drift.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
       # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
@@ -205,12 +204,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install desktop build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libayatana-appindicator3-dev patchelf
+      # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
+      # lumo-actions' `desktop` feature (rdev/xcap) and lumo-voice's `capture`
+      # feature (cpal) need. Shared with ci.yml so the two lists cannot drift.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
       # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
@@ -257,9 +255,17 @@ jobs:
       # binary. A full desktop package needs a native 麒麟/龙芯 or QEMU
       # self-hosted runner. ring/rusqlite compile C for the target, so the cross
       # CC must be wired in via cc-crate's per-triple env (mirrors ci.yml).
+      #
+      # LUMO_CLI_CARGO_FEATURES drops lumo-cli's default-on `hotkey-rdev`
+      # feature. rdev reaches X11 through pkg-config, which cannot resolve for a
+      # foreign target here (no loongarch64 sysroot on the runner), so the global
+      # hotkey backend falls back to its stub. That is an honest limitation of
+      # this convenience build, not a silent one; a native 龙芯 build keeps the
+      # real backend.
       - name: Package CLI (cross)
         env:
           CROSS_CC: loongarch64-linux-gnu-gcc-14
+          LUMO_CLI_CARGO_FEATURES: --no-default-features
         run: |
           export CC_loongarch64_unknown_linux_gnu="$CROSS_CC"
           export CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC"

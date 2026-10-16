@@ -1,0 +1,31 @@
+name: Linux system dependencies
+description: >
+  Install the Linux C development packages the workspace needs to compile.
+  Required by any job that builds lumo-actions' `desktop` feature (rdev/xcap →
+  X11, xcb, pipewire, wayland, dbus), lumo-voice's `capture` feature (cpal →
+  ALSA), or the Tauri desktop shell (webkit2gtk, gtk3, rsvg, appindicator).
+
+  Why a shared action instead of an inline step: four separate jobs in ci.yml
+  need this list, and the earlier inline copy drifted — it was added to one job
+  and the others kept failing in a different build script each time. One list,
+  one place to update.
+
+  NOTE: this only satisfies *host* builds. Cross-compiling these crates needs a
+  target sysroot plus a pkg-config wrapper; ci.yml's cross-check job therefore
+  excludes the desktop shell, and the crates themselves are expected to keep
+  their platform C dependencies behind non-default features.
+
+runs:
+  using: composite
+  steps:
+    - name: apt-get install
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+          libayatana-appindicator3-dev patchelf \
+          libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+          libxcb-shm0-dev libxcb-shape0-dev libxkbcommon-dev \
+          libpipewire-0.3-dev libdbus-1-dev libwayland-dev \
+          libasound2-dev

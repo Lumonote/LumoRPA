@@ -35,6 +35,19 @@ fi
 BIN_NAME="lumo"
 ARCHIVE="tar.gz"
 
+# Extra cargo flags for the CLI build, e.g. `--no-default-features`.
+#
+# Why this exists: lumo-cli's default `hotkey-rdev` feature pulls in rdev,
+# which needs X11 headers via pkg-config on Linux. That is correct for a real
+# desktop release, but it makes *cross*-compilation impossible without a target
+# sysroot — pkg-config refuses to use host .pc files for a foreign target, and
+# installing host dev packages does not help. A cross build that only needs the
+# CLI (loongarch64 on CI) can pass `--no-default-features`, which selects the
+# stub hotkey backend (see the `#[cfg(not(feature = "hotkey-rdev"))]` arm in
+# crates/lumo-cli/src/cmd/hotkey.rs). Host builds leave this empty and keep the
+# real backend.
+CLI_CARGO_FEATURES="${LUMO_CLI_CARGO_FEATURES:-}"
+
 if [[ "$TARGET" == "universal-apple-darwin" ]]; then
   # cargo has no native universal target: build each arch, then lipo-merge the
   # two release binaries into a single fat Mach-O (one package, Intel + ARM).
@@ -42,8 +55,8 @@ if [[ "$TARGET" == "universal-apple-darwin" ]]; then
     echo "error: 'lipo' not found (macOS-only; required for universal builds)" >&2
     exit 1
   fi
-  cargo build --release -p lumo-cli --target x86_64-apple-darwin
-  cargo build --release -p lumo-cli --target aarch64-apple-darwin
+  cargo build --release -p lumo-cli --target x86_64-apple-darwin $CLI_CARGO_FEATURES
+  cargo build --release -p lumo-cli --target aarch64-apple-darwin $CLI_CARGO_FEATURES
   BIN_DIR="target/universal-apple-darwin/release"
   mkdir -p "$BIN_DIR"
   lipo -create \
@@ -53,7 +66,7 @@ if [[ "$TARGET" == "universal-apple-darwin" ]]; then
   OS="darwin"
   ARCH="universal"
 elif [[ -n "$TARGET" ]]; then
-  cargo build --release -p lumo-cli --target "$TARGET"
+  cargo build --release -p lumo-cli --target "$TARGET" $CLI_CARGO_FEATURES
   BIN_DIR="target/$TARGET/release"
   ARCH="${TARGET%%-*}"
   case "$TARGET" in
@@ -63,7 +76,7 @@ elif [[ -n "$TARGET" ]]; then
     *)             OS="unknown" ;;
   esac
 else
-  cargo build --release -p lumo-cli
+  cargo build --release -p lumo-cli $CLI_CARGO_FEATURES
   BIN_DIR="target/release"
   OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"

@@ -25,7 +25,9 @@ lumo-dsl.workspace = true
 lumo-recorder.workspace = true
 lumo-skills.workspace = true
 lumo-storage.workspace = true
-lumo-voice.workspace = true
+# 桌面壳是真的要录音的宿主，所以显式打开麦克风采集（cpal）。其他成员
+# 默认不打开，避免整个 workspace 被拖上 ALSA/X11 这类平台 C 依赖。
+lumo-voice = { workspace = true, features = ["capture"] }
 anyhow.workspace = true
 async-trait.workspace = true
 base64 = "0.22"

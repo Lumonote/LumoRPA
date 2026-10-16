@@ -1,5 +1,8 @@
 pub mod audio;
 pub mod cloud_stt;
+/// 麦克风采集，随 `capture` feature 编译（见 Cargo.toml：cpal 在 Linux 上
+/// 需要 ALSA 开发包，在交叉编译时需要目标 sysroot）。默认关闭。
+#[cfg(feature = "capture")]
 pub mod cpal_capture;
 pub mod macos_tts;
 pub mod model_installer;

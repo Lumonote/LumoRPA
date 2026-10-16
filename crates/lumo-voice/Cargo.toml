@@ -7,11 +7,18 @@ license.workspace = true
 
 [features]
 default = []
+# 麦克风采集（CpalAudioCapture）。**默认关闭**：cpal 在 Linux 上无条件链接
+# ALSA（`alsa-sys` 走 pkg-config），Windows 走 WASAPI、macOS 走 CoreAudio。
+# 只有真正要录音的宿主才该打开它 —— 目前是桌面壳。默认打开会让任何
+# `cargo build --workspace` / `cargo check` 在没有声卡开发包的机器上失败，
+# 也会让交叉编译额外需要一个目标平台 sysroot。
+capture = ["dep:cpal"]
+# 本地 sherpa 语音模型:libloading 运行时加载,不编译期链接 C 库。
 sherpa-native = ["dep:libloading"]
 
 [dependencies]
 async-trait.workspace = true
-cpal = "0.15"
+cpal = { version = "0.15", optional = true }
 libloading = { version = "0.8", optional = true }
 serde.workspace = true
 serde_json.workspace = true

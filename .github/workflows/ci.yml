@@ -28,6 +28,13 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      # Linux needs the platform C headers for the desktop shell, lumo-actions'
+      # `desktop` feature and lumo-voice's `capture` feature; macOS/Windows use
+      # Cocoa / CoreAudio / Win32 instead and need nothing. See the action for
+      # the full list and rationale.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
       - name: Build (workspace)
         run: cargo build --workspace --locked --all-targets
       - name: Test (workspace, excluding browser)
@@ -59,6 +66,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # `clippy --workspace --all-targets` compiles the same tree `build-test`
+      # does, so it needs the same Linux C headers.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -78,6 +89,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+      # Excluding lumorpa-desktop drops Tauri's GTK/WebKit, but *not* the Linux
+      # C dependencies that come from lumo-actions' `desktop` feature (rdev/x11)
+      # or lumo-voice's `capture` feature (cpal/alsa): cargo unifies features
+      # workspace-wide, so those reach this build through lumo-cli even with the
+      # desktop shell excluded.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
       # Browser/vision/selector actions need a real Chrome, the recorder drives
       # CDP, and the Tauri shell needs system webkit libs — none are reachable on
       # CI, so they're kept out of the coverage denominator. `--summary-only`
@@ -113,6 +131,10 @@ jobs:
       - name: Install Rust 1.83 (declared rust-version)
         uses: dtolnay/rust-toolchain@1.83.0
       - uses: Swatinem/rust-cache@v2
+      # Same reasoning as coverage: `--exclude lumorpa-desktop` does not remove
+      # the feature-unified rdev/x11 and cpal/alsa dependencies.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
       # Compile the shipped library/binary code on the pinned MSRV. The Tauri
       # shell is excluded (its system-lib build is environment-specific, not a
       # portability concern); dev-only test deps are out of the MSRV contract,
@@ -154,7 +176,24 @@ jobs:
       # the cross C compiler must be wired in via cc-crate's CC_<triple> env.
       # Only the per-target var is set — clobbering host CC would break build
       # scripts/proc-macros that compile for the runner itself.
-      - name: cargo check (cross, desktop excluded)
+      #
+      # --no-default-features is load-bearing here, not cosmetic. Two crates
+      # keep their platform C dependencies behind a *default-on* feature:
+      # lumo-cli's `hotkey-rdev` (rdev → X11 on Linux) and lumo-voice's
+      # `capture` (cpal → ALSA). Both walk through pkg-config, which refuses to
+      # use host .pc files for a foreign target ("pkg-config has not been
+      # configured to support cross-compilation") — installing the host dev
+      # packages cannot fix that, only a target sysroot would. Turning the
+      # features off makes cargo check a pure-Rust cross build. The stubs that
+      # replace them are already implemented: see the `#[cfg(not(feature =
+      # "hotkey-rdev"))]` arm in crates/lumo-cli/src/cmd/hotkey.rs and the
+      # `#[cfg(feature = "capture")]` gate in crates/lumo-voice/src/lib.rs.
+      #
+      # --exclude lumorpa-desktop drops the Tauri shell (its GTK/WebKit is a
+      # host-only system-lib build). It does *not* by itself remove rdev/x11 —
+      # that comes from lumo-cli, which the previous revision of this job
+      # assumed it did.
+      - name: cargo check (cross, desktop + native-only features excluded)
         env:
           TARGET: ${{ matrix.target }}
           CROSS_CC: ${{ matrix.cc }}
@@ -162,4 +201,5 @@ jobs:
           underscore="${TARGET//-/_}"
           export "CC_${underscore}=${CROSS_CC}"
           export "CARGO_TARGET_$(echo "$underscore" | tr '[:lower:]' '[:upper:]')_LINKER=${CROSS_CC}"
-          cargo check --workspace --locked --exclude lumorpa-desktop --target "$TARGET"
+          cargo check --workspace --locked --exclude lumorpa-desktop \
+            --no-default-features --target "$TARGET"
