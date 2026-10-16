@@ -39,6 +39,7 @@ rusqlite.workspace = true
 tauri = { version = "2.3.1", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2.10.1"
+tauri-plugin-autostart = "2"
 tokio.workspace = true
 tokio-util = "0.7"
 tracing.workspace = true

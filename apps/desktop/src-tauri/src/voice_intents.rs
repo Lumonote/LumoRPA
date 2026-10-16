@@ -19,46 +19,104 @@ const QUICK_VIEWS: &[(&str, &str, &[&str])] = &[
         "能力中心",
         &["能力中心", "能力面板", "capabilityhub"],
     ),
-    ("settings", "设置", &["设置", "设置页", "系统设置", "settings"]),
+    (
+        "settings",
+        "设置",
+        &["设置", "设置页", "系统设置", "settings"],
+    ),
     (
         "runs",
         "运行记录",
         &["运行记录", "执行记录", "运行历史", "runs"],
     ),
-    ("design", "编排画布", &["编排画布", "画布", "流程编辑", "design"]),
+    (
+        "design",
+        "编排画布",
+        &["编排画布", "画布", "流程编辑", "design"],
+    ),
     ("recorder", "录制器", &["录制器", "录制", "recorder"]),
 ];
 
 const VIEW_VERBS: &[&str] = &[
-    "打开", "进入", "切换到", "切到", "查看", "看看", "去", "open", "show", "goto",
+    "打开",
+    "进入",
+    "切换到",
+    "切到",
+    "查看",
+    "看看",
+    "去",
+    "open",
+    "show",
+    "goto",
 ];
 const STOP_ALIASES: &[&str] = &[
-    "停止", "停下", "停", "取消", "停止任务", "取消任务", "全部停止", "别做了", "stop", "cancel",
+    "停止",
+    "停下",
+    "停",
+    "取消",
+    "停止任务",
+    "取消任务",
+    "全部停止",
+    "别做了",
+    "stop",
+    "cancel",
     "stopall",
 ];
 const MUTE_ALIASES: &[&str] = &["静音", "闭麦", "别听了", "不要听", "mute"];
 const UNMUTE_ALIASES: &[&str] = &[
-    "取消静音", "解除静音", "恢复声音", "恢复拾音", "开麦", "unmute",
+    "取消静音",
+    "解除静音",
+    "恢复声音",
+    "恢复拾音",
+    "开麦",
+    "unmute",
 ];
 const LISTEN_ALIASES: &[&str] = &[
-    "开始听写", "开始录音", "听我说", "我要说话", "startlistening", "listen",
+    "开始听写",
+    "开始录音",
+    "听我说",
+    "我要说话",
+    "startlistening",
+    "listen",
 ];
 const STATUS_ALIASES: &[&str] = &[
-    "现在什么状态", "现在状态", "当前状态", "系统状态", "任务状态", "状态", "status",
+    "现在什么状态",
+    "现在状态",
+    "当前状态",
+    "系统状态",
+    "任务状态",
+    "状态",
+    "status",
 ];
 const RUN_PREFIXES: &[&str] = &["运行", "执行", "启动", "跑一下", "跑", "run", "execute"];
 const FLOW_SUFFIXES: &[&str] = &["流程", "任务", "flow"];
 
 /// 归一化时剥离的前导唤醒/客套词（循环剥离直到稳定）。
 const STRIP_PREFIXES: &[&str] = &[
-    "你好lumo", "heylumo", "lumo", "麻烦你", "麻烦", "请你", "请", "帮我", "帮忙", "给我", "先",
+    "你好lumo",
+    "heylumo",
+    "lumo",
+    "麻烦你",
+    "麻烦",
+    "请你",
+    "请",
+    "帮我",
+    "帮忙",
+    "给我",
+    "先",
 ];
 
 /// 多指令连接词（长词在前，避免「紧接着」被「接着」截断）。
 const SEQUENCE_CONNECTORS: &[&str] = &["紧接着", "然后", "接着", "随后", "andthen"];
 
 pub(crate) const QUICK_ACTIONS: &[&str] = &[
-    "open_view", "run_flow", "stop", "mute", "unmute", "status", "listen",
+    "open_view",
+    "run_flow",
+    "stop",
+    "mute",
+    "unmute",
+    "status",
+    "listen",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,7 +376,9 @@ pub(crate) fn is_negative_reply(text: &str) -> bool {
 
 /// 语音回答 → 流程输入值的粗类型转换。number/boolean 之外一律按字符串。
 pub(crate) fn coerce_input_value(kind: &str, reply: &str) -> Result<Value, String> {
-    let trimmed = reply.trim().trim_matches(|c: char| "。，！？!?,.".contains(c));
+    let trimmed = reply
+        .trim()
+        .trim_matches(|c: char| "。，！？!?,.".contains(c));
     match kind.to_ascii_lowercase().as_str() {
         "number" | "integer" | "float" => {
             let cleaned: String = trimmed
@@ -487,9 +547,15 @@ mod tests {
 
     #[test]
     fn normalization_strips_punctuation_whitespace_and_wake_prefixes() {
-        assert_eq!(normalize_utterance("  Lumo，打开 任务中心！"), "打开任务中心");
+        assert_eq!(
+            normalize_utterance("  Lumo，打开 任务中心！"),
+            "打开任务中心"
+        );
         assert_eq!(normalize_utterance("你好Lumo，请帮我停止。"), "停止");
-        assert_eq!(normalize_utterance("Hey Lumo, OPEN Settings?"), "opensettings");
+        assert_eq!(
+            normalize_utterance("Hey Lumo, OPEN Settings?"),
+            "opensettings"
+        );
         // 全部是前导词时保留最后一段，避免归一化成空串
         assert_eq!(normalize_utterance("lumo"), "lumo");
     }
@@ -514,9 +580,18 @@ mod tests {
 
     #[test]
     fn builtin_control_commands_match() {
-        assert_eq!(match_quick_intent("停止任务", &[]), Some(QuickIntent::StopAll));
-        assert_eq!(match_quick_intent("lumo别做了", &[]), Some(QuickIntent::StopAll));
-        assert_eq!(match_quick_intent("静音", &[]), Some(QuickIntent::SetMuted(true)));
+        assert_eq!(
+            match_quick_intent("停止任务", &[]),
+            Some(QuickIntent::StopAll)
+        );
+        assert_eq!(
+            match_quick_intent("lumo别做了", &[]),
+            Some(QuickIntent::StopAll)
+        );
+        assert_eq!(
+            match_quick_intent("静音", &[]),
+            Some(QuickIntent::SetMuted(true))
+        );
         assert_eq!(
             match_quick_intent("取消静音", &[]),
             Some(QuickIntent::SetMuted(false))
@@ -525,7 +600,10 @@ mod tests {
             match_quick_intent("开始听写", &[]),
             Some(QuickIntent::StartListening)
         );
-        assert_eq!(match_quick_intent("当前状态", &[]), Some(QuickIntent::Status));
+        assert_eq!(
+            match_quick_intent("当前状态", &[]),
+            Some(QuickIntent::Status)
+        );
     }
 
     #[test]
@@ -560,7 +638,10 @@ mod tests {
             enabled: false,
             ..custom("停止", "open_view", "runs")
         }];
-        assert_eq!(match_quick_intent("停止", &disabled), Some(QuickIntent::StopAll));
+        assert_eq!(
+            match_quick_intent("停止", &disabled),
+            Some(QuickIntent::StopAll)
+        );
         let flow = vec![custom("开工", "run_flow", "晨间日报")];
         assert_eq!(
             match_quick_intent("Lumo，开工！", &flow),
@@ -582,7 +663,11 @@ mod tests {
         let flows = vec![
             flow("/f/daily.yaml", Some("晨间日报"), "daily.yaml"),
             flow("/f/invoice.yaml", Some("发票归档"), "invoice.yaml"),
-            flow("/f/invoice-eu.yaml", Some("发票归档-欧盟"), "invoice-eu.yaml"),
+            flow(
+                "/f/invoice-eu.yaml",
+                Some("发票归档-欧盟"),
+                "invoice-eu.yaml",
+            ),
             flow("/f/noname.yaml", None, "backup-db.yaml"),
         ];
         assert_eq!(
@@ -600,7 +685,9 @@ mod tests {
                 name: "发票归档".into()
             }
         );
-        assert!(matches!(resolve_flow("发票", &flows), FlowResolution::Ambiguous(names) if names.len() == 2));
+        assert!(
+            matches!(resolve_flow("发票", &flows), FlowResolution::Ambiguous(names) if names.len() == 2)
+        );
         assert_eq!(resolve_flow("不存在", &flows), FlowResolution::NotFound);
         // 无 name 的流程用文件名匹配
         assert_eq!(
@@ -635,7 +722,10 @@ mod tests {
         assert_eq!(match_quick_intent("打开日志", &[]), None);
         assert!(matches!(
             match_quick_intent("open settings", &[]),
-            Some(QuickIntent::OpenView { view: "settings", .. })
+            Some(QuickIntent::OpenView {
+                view: "settings",
+                ..
+            })
         ));
     }
 
@@ -669,7 +759,10 @@ mod tests {
             }
         );
         // 任一片段不命中 → 整句回落 agent
-        assert_eq!(match_quick_intents("打开任务中心然后写一份周报总结", &[]), None);
+        assert_eq!(
+            match_quick_intents("打开任务中心然后写一份周报总结", &[]),
+            None
+        );
         // 单指令等价于原路径
         assert_eq!(
             match_quick_intents("停止", &[]),
@@ -687,17 +780,20 @@ mod tests {
         assert!(validate_quick_commands(&[custom(" ", "stop", "")])
             .unwrap_err()
             .contains("phrase"));
-        assert!(
-            validate_quick_commands(&[custom("开工", "stop", ""), custom("开 工", "status", "")])
-                .unwrap_err()
-                .contains("duplicate")
-        );
+        assert!(validate_quick_commands(&[
+            custom("开工", "stop", ""),
+            custom("开 工", "status", "")
+        ])
+        .unwrap_err()
+        .contains("duplicate"));
         assert!(validate_quick_commands(&[custom("开工", "reboot", "")])
             .unwrap_err()
             .contains("unsupported"));
-        assert!(validate_quick_commands(&[custom("开工", "open_view", "nope")])
-            .unwrap_err()
-            .contains("not available"));
+        assert!(
+            validate_quick_commands(&[custom("开工", "open_view", "nope")])
+                .unwrap_err()
+                .contains("not available")
+        );
         assert!(validate_quick_commands(&[custom("开工", "run_flow", " ")])
             .unwrap_err()
             .contains("flow name"));

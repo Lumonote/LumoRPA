@@ -52,7 +52,10 @@ pub(crate) fn save_element_library_value(app: &AppHandle, library: &Value) -> Re
     std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-pub(crate) fn upsert_recorded_elements(app: &AppHandle, events: &[RawEvent]) -> Result<usize, String> {
+pub(crate) fn upsert_recorded_elements(
+    app: &AppHandle,
+    events: &[RawEvent],
+) -> Result<usize, String> {
     let mut library = load_element_library_value(app)?;
     normalize_element_library(&mut library);
     let Some(elements) = library.get_mut("elements").and_then(Value::as_array_mut) else {

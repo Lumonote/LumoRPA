@@ -9,8 +9,8 @@ use lumo_core::{
 };
 use lumo_dsl::{Flow, IoDecl, Step};
 use lumo_recorder::{
-    desktop::DesktopRecorder, events_to_yaml_patch, BrowserRecorder, NoopRecorder, RawEvent,
-    Recorder,
+    desktop::DesktopRecorder, events_to_yaml_patch, BrowserRecorder, MixedRecorder, NoopRecorder,
+    RawEvent, Recorder,
 };
 use lumo_skills::{register_flow_call_action, register_skill_actions, SkillRegistry};
 use lumo_storage::{FlowRunRow, Repo, StepRunRow};
@@ -38,13 +38,14 @@ mod dto;
 mod element_library;
 mod execution;
 mod features_data;
+mod flow_history;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
 mod paths;
 mod prompter;
-mod registry;
 mod recording;
+mod registry;
 mod run_progress;
 mod security_commands;
 mod skill_commands;
@@ -69,6 +70,8 @@ use agent_service::DesktopAgentService;
 use desktop_update_commands::{
     desktop_update_check, desktop_update_install, desktop_update_restart, desktop_update_status,
 };
+use dto::*;
+use element_library::*;
 use execution::{execute_flow, DebugOpts};
 use features_data::{feature_map_data, FeatureSection};
 use job_commands::{
@@ -80,12 +83,10 @@ use mcp_commands::{
     preview_mcp_import, set_mcp_server_enabled, set_mcp_tool_enabled, test_mcp_server,
 };
 use mcp_supervisor::McpSupervisorRuntime;
-use dto::*;
-use element_library::*;
 use paths::*;
+use prompter::{desktop_prompter, human_respond};
 use recording::*;
 use registry::*;
-use prompter::{desktop_prompter, human_respond};
 use security_commands::{
     security_biometric_challenge as security_biometric_challenge_at,
     security_export_audit as security_export_audit_at, security_list as security_list_at,
@@ -97,10 +98,11 @@ use skill_commands::{
 };
 use state::{CancelMap, DesktopState, PromptMap, RecorderSession};
 use voice_commands::{
-    handle_global_shortcut, setup_voice_daemon, setup_voice_host, voice_command_history,
-    voice_configure, voice_daemon_resume, voice_daemon_set_device, voice_daemon_set_enabled,
-    voice_daemon_set_muted, voice_daemon_status, voice_daemon_suspend, voice_devices,
-    voice_start_listening, voice_status, voice_stop, voice_tts_preview, VoiceRuntime,
+    handle_global_shortcut, setup_voice_daemon, setup_voice_host, toggle_voice_session,
+    voice_command_history, voice_configure, voice_daemon_resume, voice_daemon_set_device,
+    voice_daemon_set_enabled, voice_daemon_set_muted, voice_daemon_status, voice_daemon_suspend,
+    voice_devices, voice_start_listening, voice_status, voice_stop, voice_toggle,
+    voice_tts_preview, VoiceRuntime,
 };
 use voice_daemon::VoiceDaemon;
 use voice_model_commands::{
@@ -139,8 +141,6 @@ fn security_biometric_challenge(
 ) -> Result<lumo_agent::PermissionGrant, String> {
     security_biometric_challenge_at(&state.security, request, chrono::Utc::now())
 }
-
-
 
 // ─── Tauri commands ─────────────────────────────────────────────────────────
 
@@ -306,7 +306,6 @@ fn sanitize_flow_name(name: &str) -> String {
         .collect()
 }
 
-
 /// Save the recorder's last output as a complete flow under the recordings
 /// folder. Returns the new file path so the library can refresh + select it.
 #[tauri::command]
@@ -381,7 +380,63 @@ fn save_flow_source(app: AppHandle, path: String, source: String) -> Result<(), 
     // brand-new flows go through `save_flow_as`, which targets the user dir).
     let home = app_home(&app)?;
     let safe = resolve_write_within(&path, &home)?;
+    // 历史快照失败不阻塞保存：用户数据优先落盘。
+    let _ = flow_history::snapshot_before_save(
+        &home,
+        &safe,
+        &source,
+        chrono::Utc::now().timestamp_millis(),
+    );
     std::fs::write(&safe, source).map_err(|e| format!("write {}: {e}", safe.display()))
+}
+
+/// 单个流程历史快照的元数据（`flow_history_list`）。
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct FlowHistoryEntry {
+    saved_at_ms: i64,
+    bytes: u64,
+}
+
+#[tauri::command]
+fn flow_history_list(app: AppHandle, path: String) -> Result<Vec<FlowHistoryEntry>, String> {
+    let home = app_home(&app)?;
+    let safe = resolve_within(&path, &flow_read_roots(&app))?;
+    let entries = flow_history::list_entries(&flow_history::history_dir(&home, &safe))
+        .map_err(|e| e.to_string())?;
+    Ok(entries
+        .into_iter()
+        .map(|(saved_at_ms, file)| FlowHistoryEntry {
+            saved_at_ms,
+            bytes: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn flow_history_read(app: AppHandle, path: String, saved_at_ms: i64) -> Result<String, String> {
+    let home = app_home(&app)?;
+    let safe = resolve_within(&path, &flow_read_roots(&app))?;
+    let file = flow_history::history_dir(&home, &safe).join(format!("{saved_at_ms}.yaml"));
+    std::fs::read_to_string(&file).map_err(|e| format!("read history {}: {e}", file.display()))
+}
+
+#[tauri::command]
+fn flow_history_restore(app: AppHandle, path: String, saved_at_ms: i64) -> Result<String, String> {
+    let home = app_home(&app)?;
+    let safe = resolve_write_within(&path, &home)?;
+    let file = flow_history::history_dir(&home, &safe).join(format!("{saved_at_ms}.yaml"));
+    let restored = std::fs::read_to_string(&file)
+        .map_err(|e| format!("read history {}: {e}", file.display()))?;
+    // 回滚本身也是一次保存：当前磁盘内容先归档，因此回滚操作可再次回滚。
+    let _ = flow_history::snapshot_before_save(
+        &home,
+        &safe,
+        &restored,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    std::fs::write(&safe, &restored).map_err(|e| format!("write {}: {e}", safe.display()))?;
+    Ok(restored)
 }
 
 /// Snapshot of a flow's `spec.capabilities` block. Returned to the frontend so
@@ -1090,22 +1145,26 @@ async fn recorder_start(
 ) -> Result<RecorderStatus, String> {
     let target_str = target.unwrap_or_else(|| "browser".to_string());
 
+    // Check before starting the backend. Starting first used to leave a
+    // Chromium/desktop polling task alive when two UI clicks raced.
+    {
+        let slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.active.is_some() {
+            return Err("recorder already running — stop it first".into());
+        }
+    }
+
     // Live event channel: events stream out of the recorder and into a Tauri
     // emit forwarder so the WebView gets them via `listen()` in real time.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RawEvent>(256);
 
     let (recorder, backend): (Arc<dyn Recorder>, &'static str) = match target_str.as_str() {
         "browser" => (Arc::new(BrowserRecorder::new()), "BrowserRecorder (CDP)"),
-        // desktop & mixed both drive the cross-app DesktopRecorder (R-02):
-        // OS-accessibility polling that streams desktop.* events live to the
-        // WebView. A combined browser+desktop "mixed" recorder doesn't exist
-        // yet, so mixed currently captures the desktop lane only (the browser
-        // lane stays available via the dedicated "browser" target).
+        // Desktop uses the OS accessibility lane. Mixed owns both a headful
+        // Chromium session and the desktop poller, with events merged by
+        // timestamp when recording stops.
         "desktop" => (Arc::new(DesktopRecorder::new()), "DesktopRecorder (AX)"),
-        "mixed" => (
-            Arc::new(DesktopRecorder::new()),
-            "DesktopRecorder (AX, mixed→desktop)",
-        ),
+        "mixed" => (Arc::new(MixedRecorder::new()), "MixedRecorder (CDP + AX)"),
         _ => (Arc::new(NoopRecorder::new()), "NoopRecorder (heartbeat)"),
     };
 
@@ -1119,22 +1178,31 @@ async fn recorder_start(
         }
     });
 
-    let mut slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.active.is_some() {
-        // Race window guard. Tear down what we just started.
-        forwarder.abort();
-        // We don't have a handle to stop() the recorder cleanly here without
-        // moving Arc — leave it as a leaked task; user will see the error and retry.
+    let mut forwarder = Some(forwarder);
+    let race = {
+        let mut slot = state.recorder.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.active.is_some() {
+            true
+        } else {
+            slot.active = Some(RecorderSession {
+                recorder: recorder.clone(),
+                started_at: chrono::Utc::now(),
+                target: target_str,
+                backend: backend.into(),
+                forwarder: forwarder.take(),
+            });
+            false
+        }
+    };
+    if race {
+        // A second caller won the race while the backend was starting. Tear
+        // down the just-created backend before reporting the conflict.
+        if let Some(forwarder) = forwarder {
+            forwarder.abort();
+        }
+        let _ = recorder.stop().await;
         return Err("recorder already running — stop it first".into());
     }
-    slot.active = Some(RecorderSession {
-        recorder,
-        started_at: chrono::Utc::now(),
-        target: target_str,
-        backend: backend.into(),
-        forwarder: Some(forwarder),
-    });
-    drop(slot);
     Ok(recorder_status(state))
 }
 
@@ -1174,6 +1242,26 @@ fn feature_map() -> Vec<FeatureSection> {
     feature_map_data()
 }
 
+// ─── 开机自启（登录自启动）───────────────────────────────────────────────────
+
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle<tauri::Wry>) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn autostart_set(app: tauri::AppHandle<tauri::Wry>, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autostart = app.autolaunch();
+    if enabled {
+        autostart.enable().map_err(|e| e.to_string())?;
+    } else {
+        autostart.disable().map_err(|e| e.to_string())?;
+    }
+    autostart.is_enabled().map_err(|e| e.to_string())
+}
+
 // ─── tauri::generate_handler & app entry ────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1192,6 +1280,10 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(DesktopState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1303,6 +1395,7 @@ pub fn run() {
             voice_configure,
             voice_start_listening,
             voice_stop,
+            voice_toggle,
             capsule_expand,
             voice_devices,
             voice_daemon_status,
@@ -1326,6 +1419,11 @@ pub fn run() {
             job_pause,
             job_resume,
             job_cancel,
+            autostart_status,
+            autostart_set,
+            flow_history_list,
+            flow_history_read,
+            flow_history_restore,
             voice_model_install,
             voice_model_remove,
             voice_model_list,
@@ -1341,6 +1439,13 @@ pub fn run() {
 fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
     let handle = app.handle().clone();
     let show = MenuItem::with_id(&handle, "tray_show", "显示 LumoRPA", true, None::<&str>)?;
+    let voice = MenuItem::with_id(
+        &handle,
+        "tray_voice",
+        "唤起 / 收起 Lumo 语音",
+        true,
+        None::<&str>,
+    )?;
     let runs = MenuItem::with_id(&handle, "tray_runs", "运行图表", true, None::<&str>)?;
     let models = MenuItem::with_id(&handle, "tray_models", "模型源", true, None::<&str>)?;
     let settings = MenuItem::with_id(&handle, "tray_settings", "设置", true, None::<&str>)?;
@@ -1349,7 +1454,7 @@ fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
     let sep = PredefinedMenuItem::separator(&handle)?;
     let menu = Menu::with_items(
         &handle,
-        &[&show, &runs, &models, &settings, &sep, &hide, &quit],
+        &[&show, &voice, &runs, &models, &settings, &sep, &hide, &quit],
     )?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?.to_owned();
 
@@ -1361,6 +1466,7 @@ fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "tray_show" => show_main_window(app),
+            "tray_voice" => toggle_voice_session(app),
             "tray_runs" => open_main_view(app, "runs"),
             "tray_models" => open_main_view(app, "models"),
             "tray_settings" => open_main_view(app, "settings"),
@@ -1409,8 +1515,6 @@ fn capsule_expand(app: AppHandle, expanded: bool) -> Result<(), String> {
     app.emit("lumo://open-view", "mission-control")
         .map_err(|error| error.to_string())
 }
-
-
 
 fn scan_flows_in(dir: &Path, source: &str) -> Vec<FlowSummary> {
     let mut out = Vec::new();
@@ -1537,9 +1641,6 @@ fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
     None
 }
 
-
-
-
 fn parse_inputs(raw: &str) -> Result<Value, String> {
     if raw.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
@@ -1551,10 +1652,6 @@ fn parse_inputs(raw: &str) -> Result<Value, String> {
         Err("inputs JSON must be an object".into())
     }
 }
-
-
-
-
 
 fn make_provider_status(path: &Path, cfg: &ProvidersConfig) -> ProviderStatus {
     ProviderStatus {
@@ -1605,10 +1702,3 @@ fn looks_like_env_var_name(value: &str) -> bool {
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
-
-
-
-
-
-
-

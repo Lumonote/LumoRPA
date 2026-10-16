@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 pub(crate) fn reveal_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {

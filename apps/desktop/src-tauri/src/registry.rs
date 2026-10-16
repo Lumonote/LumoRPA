@@ -41,7 +41,8 @@ pub(crate) fn skills_root(home: &Path) -> PathBuf {
 
 pub(crate) type RegistryCacheKey = (PathBuf, Option<PathBuf>);
 
-pub(crate) static REGISTRY_CACHE: OnceLock<Mutex<HashMap<RegistryCacheKey, CachedRegistry>>> = OnceLock::new();
+pub(crate) static REGISTRY_CACHE: OnceLock<Mutex<HashMap<RegistryCacheKey, CachedRegistry>>> =
+    OnceLock::new();
 
 /// P2-3：同一条 skills 加载错误只 toast 一次（tracing::warn 每次照记），防止
 /// 每个命令都重弹。

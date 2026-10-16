@@ -16,9 +16,7 @@ use lumo_voice::cloud_stt::{
     CloudAudioScope, CloudSttChunk, CloudSttConfig, CloudSttProvider, CloudSttRequest,
     CloudSttTransport, VaultCredentialRef, VoiceSecretResolver,
 };
-use lumo_voice::provider::{
-    AudioCapture, ProviderError, SttEvent, SttProvider, WakeWordProvider,
-};
+use lumo_voice::provider::{AudioCapture, ProviderError, SttEvent, SttProvider, WakeWordProvider};
 use lumo_voice::stt_router::{SttPreference, SttRouter, SttRouterConfig, VoicePrivacyPolicy};
 use lumo_voice::{cpal_capture::CpalAudioCapture, VoiceController, VoiceEvent, VoiceState};
 use serde::{Deserialize, Serialize};
@@ -752,6 +750,27 @@ fn open_shortcut_view(app: &AppHandle, view: &str) {
     let _ = app.emit("lumo://open-view", view);
 }
 
+/// 托盘菜单入口：不依赖主窗口是否打开，也能把语音胶囊叫回来。
+pub(super) fn toggle_voice_session(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DesktopState>();
+        let active = state
+            .voice
+            .lock()
+            .map(|runtime| runtime.controller.state().is_active())
+            .unwrap_or(false);
+        let result = if active {
+            stop_with_recall_hint(&app, &state)
+        } else {
+            start_host(&app, &state).await
+        };
+        if let Err(error) = result {
+            let _ = app.emit("lumo://voice-daemon-error", json!({ "error": error }));
+        }
+    });
+}
+
 fn arm_push_to_talk_guard(app: AppHandle) {
     let guard = CancellationToken::new();
     let generation = if let Ok(mut runtime) = app.state::<DesktopState>().voice.lock() {
@@ -903,9 +922,84 @@ pub(super) fn voice_stop(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<VoiceStatusDto, String> {
-    let status = stop_host(&app, &state)?;
-    cancel_active_agent_sessions(&app, &state)?;
+    stop_with_recall_hint(&app, &state)
+}
+
+/// 顶栏「语音」按钮 / 托盘菜单共用：在唤起与收起之间切换。
+#[tauri::command]
+pub(super) async fn voice_toggle(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<VoiceStatusDto, String> {
+    let active = {
+        let runtime = lock_runtime(&state.voice)?;
+        runtime.controller.state().is_active()
+    };
+    if active {
+        stop_with_recall_hint(&app, &state)
+    } else {
+        start_host(&app, &state).await
+    }
+}
+
+/// 鼠标发起的停止：胶囊会立刻消失，顺手告诉用户怎么把它叫回来。
+fn stop_with_recall_hint(
+    app: &AppHandle,
+    state: &DesktopState,
+) -> Result<VoiceStatusDto, String> {
+    let status = stop_host(app, state)?;
+    cancel_active_agent_sessions(app, state)?;
+    emit_capsule_recall_hint(app, &status.config.shortcut);
     Ok(status)
+}
+
+fn emit_capsule_recall_hint(app: &AppHandle, accelerator: &str) {
+    let _ = app.emit(
+        "lumo://toast",
+        json!({
+            "title": "Lumo 语音已收起",
+            "message": format!(
+                "按 {} 或点击顶栏「语音」重新唤起；快捷键可在 设置 → 桌面语音与隐私 修改",
+                humanize_accelerator(accelerator)
+            ),
+            "kind": "warn",
+        }),
+    );
+}
+
+/// 把 `CommandOrControl+Shift+Space` 变成人能读的键位；macOS 用符号，其它平台用英文。
+pub(super) fn humanize_accelerator(accelerator: &str) -> String {
+    humanize_accelerator_for(accelerator, cfg!(target_os = "macos"))
+}
+
+pub(super) fn humanize_accelerator_for(accelerator: &str, macos: bool) -> String {
+    let trimmed = accelerator.trim();
+    if trimmed.is_empty() {
+        return "（未设置快捷键）".into();
+    }
+    let parts: Vec<String> = trimmed
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| humanize_key(part, macos))
+        .collect();
+    parts.join(if macos { "" } else { "+" })
+}
+
+fn humanize_key(key: &str, macos: bool) -> String {
+    match (key.to_ascii_lowercase().as_str(), macos) {
+        ("commandorcontrol" | "cmdorctrl" | "command" | "cmd" | "super" | "meta", true) => "⌘",
+        ("commandorcontrol" | "cmdorctrl" | "control" | "ctrl", false) => "Ctrl",
+        ("command" | "cmd" | "super" | "meta", false) => "Win",
+        ("control" | "ctrl", true) => "⌃",
+        ("alt" | "option", true) => "⌥",
+        ("alt" | "option", false) => "Alt",
+        ("shift", true) => "⇧",
+        ("shift", false) => "Shift",
+        ("space", _) => "Space",
+        _ => return key.to_string(),
+    }
+    .to_string()
 }
 
 async fn start_host(app: &AppHandle, state: &DesktopState) -> Result<VoiceStatusDto, String> {
@@ -1325,21 +1419,230 @@ fn emit_voice_state(app: &AppHandle, runtime: &VoiceRuntime, reason: Option<Stri
     let _ = app.emit("lumo://voice-state", payload);
 }
 
+/// 悬浮胶囊的逻辑尺寸：常态 / 二次确认展开态。
+const CAPSULE_SIZE: (f64, f64) = (360.0, 64.0);
+const CAPSULE_CONFIRM_SIZE: (f64, f64) = (480.0, 220.0);
+/// 默认落位距屏幕底部的留白（Spotlight / Siri 式的贴底居中）。
+const CAPSULE_BOTTOM_MARGIN: f64 = 96.0;
+/// 记忆位置至少要有这么多像素露在某块屏幕内才继续沿用。
+const CAPSULE_MIN_VISIBLE: f64 = 48.0;
+
+/// 用户拖动后记住的胶囊落位（逻辑坐标，跨 DPI 稳定）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(super) struct CapsulePlacement {
+    pub(super) x: f64,
+    pub(super) y: f64,
+}
+
+/// 逻辑坐标下的显示器矩形，仅用于落位判定，方便脱离 Tauri 单测。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ScreenRect {
+    pub(super) x: f64,
+    pub(super) y: f64,
+    pub(super) width: f64,
+    pub(super) height: f64,
+}
+
 fn sync_capsule_window(app: &AppHandle, state: VoiceState) {
     let Some(window) = app.get_webview_window("voice-capsule") else {
         return;
     };
     let size = if state == VoiceState::Confirming {
-        tauri::LogicalSize::new(480.0, 220.0)
+        CAPSULE_CONFIRM_SIZE
     } else {
-        tauri::LogicalSize::new(360.0, 64.0)
+        CAPSULE_SIZE
     };
-    let _ = window.set_size(size);
+    let previous_height = logical_window_height(&window);
+    let visible = window.is_visible().unwrap_or(false);
+    let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
     if state.is_active() {
+        // 只在「从隐藏到显示」时落位，否则中途切到确认态会把用户拖动的位置弹回去。
+        if visible {
+            reflow_capsule_after_resize(&window, previous_height, size);
+        } else {
+            place_capsule_window(app, &window, size);
+        }
         let _ = window.show();
     } else {
+        remember_capsule_placement(app, &window);
         let _ = window.hide();
     }
+}
+
+fn logical_window_height(window: &tauri::WebviewWindow<Wry>) -> Option<f64> {
+    let (Ok(size), Ok(scale)) = (window.outer_size(), window.scale_factor()) else {
+        return None;
+    };
+    Some(size.to_logical::<f64>(scale).height)
+}
+
+fn logical_position(window: &tauri::WebviewWindow<Wry>) -> Option<CapsulePlacement> {
+    let (Ok(position), Ok(scale)) = (window.outer_position(), window.scale_factor()) else {
+        return None;
+    };
+    let logical = position.to_logical::<f64>(scale);
+    Some(CapsulePlacement {
+        x: logical.x,
+        y: logical.y,
+    })
+}
+
+/// 确认态会把胶囊变高。窗口以左上角为锚点，贴底摆放时会被顶出屏幕，
+/// 所以改成保持下边缘不动 —— 收回常态时正好回到原位，不会一轮轮往上漂。
+fn reflow_capsule_after_resize(
+    window: &tauri::WebviewWindow<Wry>,
+    previous_height: Option<f64>,
+    size: (f64, f64),
+) {
+    let (Some(previous_height), Some(current)) = (previous_height, logical_position(window)) else {
+        return;
+    };
+    let anchored = bottom_anchored_placement(current, previous_height, size.1);
+    let screens = capsule_screens(window);
+    let target = screens
+        .first()
+        .map(|screen| clamp_placement(anchored, *screen, size))
+        .unwrap_or(anchored);
+    if target != current {
+        let _ = window.set_position(tauri::LogicalPosition::new(target.x, target.y));
+    }
+}
+
+fn place_capsule_window(app: &AppHandle, window: &tauri::WebviewWindow<Wry>, size: (f64, f64)) {
+    let saved = app_home(app)
+        .ok()
+        .and_then(|home| load_capsule_placement(&capsule_placement_path(&home)));
+    let Some(placement) = resolve_capsule_placement(saved, &capsule_screens(window), size) else {
+        return;
+    };
+    let _ = window.set_position(tauri::LogicalPosition::new(placement.x, placement.y));
+}
+
+fn remember_capsule_placement(app: &AppHandle, window: &tauri::WebviewWindow<Wry>) {
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Some(placement) = logical_position(window) else {
+        return;
+    };
+    if let Ok(home) = app_home(app) {
+        let _ = save_capsule_placement(&capsule_placement_path(&home), placement);
+    }
+}
+
+/// 保持下边缘不动：贴底摆放的胶囊在确认态变高时不会被顶出屏幕，
+/// 收回常态时又正好回到原位，不会一轮轮往上漂。
+fn bottom_anchored_placement(
+    placement: CapsulePlacement,
+    previous_height: f64,
+    next_height: f64,
+) -> CapsulePlacement {
+    CapsulePlacement {
+        x: placement.x,
+        y: placement.y + previous_height - next_height,
+    }
+}
+
+fn clamp_placement(
+    placement: CapsulePlacement,
+    screen: ScreenRect,
+    size: (f64, f64),
+) -> CapsulePlacement {
+    let max_x = screen.x + (screen.width - size.0).max(0.0);
+    let max_y = screen.y + (screen.height - size.1).max(0.0);
+    CapsulePlacement {
+        x: placement.x.clamp(screen.x, max_x),
+        y: placement.y.clamp(screen.y, max_y),
+    }
+}
+
+/// 当前显示器优先，其余屏幕兜底，全部换算成逻辑坐标。
+fn capsule_screens(window: &tauri::WebviewWindow<Wry>) -> Vec<ScreenRect> {
+    let mut monitors = Vec::new();
+    for monitor in window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .into_iter()
+        .chain(window.primary_monitor().ok().flatten())
+        .chain(window.available_monitors().unwrap_or_default())
+    {
+        let scale = monitor.scale_factor();
+        let position = monitor.position().to_logical::<f64>(scale);
+        let size = monitor.size().to_logical::<f64>(scale);
+        let rect = ScreenRect {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        };
+        if !monitors.contains(&rect) {
+            monitors.push(rect);
+        }
+    }
+    monitors
+}
+
+fn capsule_placement_path(home: &std::path::Path) -> PathBuf {
+    home.join("capsule-window.json")
+}
+
+fn load_capsule_placement(path: &std::path::Path) -> Option<CapsulePlacement> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn save_capsule_placement(
+    path: &std::path::Path,
+    placement: CapsulePlacement,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&placement).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+/// 记忆位置可用就沿用，否则回到默认落位；没有任何屏幕信息时不动窗口。
+fn resolve_capsule_placement(
+    saved: Option<CapsulePlacement>,
+    screens: &[ScreenRect],
+    size: (f64, f64),
+) -> Option<CapsulePlacement> {
+    if let Some(placement) = saved {
+        if placement_is_visible(placement, screens, size) {
+            return Some(placement);
+        }
+    }
+    screens
+        .first()
+        .map(|screen| default_capsule_placement(*screen, size))
+}
+
+fn default_capsule_placement(screen: ScreenRect, size: (f64, f64)) -> CapsulePlacement {
+    CapsulePlacement {
+        x: screen.x + ((screen.width - size.0) / 2.0).max(0.0),
+        y: screen.y + (screen.height - size.1 - CAPSULE_BOTTOM_MARGIN).max(0.0),
+    }
+}
+
+/// 换过显示器 / 改过分辨率后，旧坐标可能整块落在屏幕外，这里要求至少露出一角。
+fn placement_is_visible(
+    placement: CapsulePlacement,
+    screens: &[ScreenRect],
+    size: (f64, f64),
+) -> bool {
+    screens.iter().any(|screen| {
+        let overlap_x =
+            (placement.x + size.0).min(screen.x + screen.width) - placement.x.max(screen.x);
+        let overlap_y =
+            (placement.y + size.1).min(screen.y + screen.height) - placement.y.max(screen.y);
+        overlap_x >= CAPSULE_MIN_VISIBLE.min(size.0) && overlap_y >= CAPSULE_MIN_VISIBLE.min(size.1)
+    })
 }
 
 // ─── 语音快捷指令执行（多指令快速通道，未命中才进 agent 规划） ─────────────
@@ -1478,9 +1781,14 @@ pub(super) fn handle_quick_commands(
             command.confirm
                 || (confirm_flow_run && matches!(command.intent, QuickIntent::RunFlow { .. }))
         });
-        let intents: Vec<QuickIntent> = commands.into_iter().map(|command| command.intent).collect();
+        let intents: Vec<QuickIntent> =
+            commands.into_iter().map(|command| command.intent).collect();
         if needs_confirm {
-            let labels = intents.iter().map(intent_label).collect::<Vec<_>>().join("、");
+            let labels = intents
+                .iter()
+                .map(intent_label)
+                .collect::<Vec<_>>()
+                .join("、");
             {
                 let state = app.state::<DesktopState>();
                 let guard = state.voice.lock();
@@ -1545,10 +1853,21 @@ async fn dispatch_quick_intent(
 ) {
     let label = intent_label(&intent);
     match intent {
-        QuickIntent::OpenView { view, label: view_label } => {
+        QuickIntent::OpenView {
+            view,
+            label: view_label,
+        } => {
             open_shortcut_view(app, view);
             let detail = format!("已打开{view_label}");
-            quick_feedback(app, utterance, &label, PersonaMoment::Success, &detail, speak, true);
+            quick_feedback(
+                app,
+                utterance,
+                &label,
+                PersonaMoment::Success,
+                &detail,
+                speak,
+                true,
+            );
         }
         QuickIntent::StopAll => {
             let state = app.state::<DesktopState>();
@@ -1562,7 +1881,15 @@ async fn dispatch_quick_intent(
                 "已停止当前语音交互".to_string()
             };
             // 用户明确喊停：不再开启续听窗口
-            quick_feedback(app, utterance, &label, PersonaMoment::Success, &detail, speak, false);
+            quick_feedback(
+                app,
+                utterance,
+                &label,
+                PersonaMoment::Success,
+                &detail,
+                speak,
+                false,
+            );
         }
         QuickIntent::SetMuted(muted) => match set_daemon_muted_internal(app, muted).await {
             Ok(()) => {
@@ -1571,7 +1898,15 @@ async fn dispatch_quick_intent(
                 } else {
                     "已恢复拾音，随时吩咐"
                 };
-                quick_feedback(app, utterance, &label, PersonaMoment::Success, detail, speak, !muted);
+                quick_feedback(
+                    app,
+                    utterance,
+                    &label,
+                    PersonaMoment::Success,
+                    detail,
+                    speak,
+                    !muted,
+                );
             }
             Err(error) => {
                 quick_feedback(
@@ -1605,7 +1940,15 @@ async fn dispatch_quick_intent(
         }
         QuickIntent::Status => {
             let detail = compose_status_report(app);
-            quick_feedback(app, utterance, &label, PersonaMoment::Status, &detail, speak, true);
+            quick_feedback(
+                app,
+                utterance,
+                &label,
+                PersonaMoment::Status,
+                &detail,
+                speak,
+                true,
+            );
         }
         QuickIntent::RunFlow { query } => {
             run_flow_by_voice(app, &query, utterance, speak, allow_dialogs).await;
@@ -1618,7 +1961,9 @@ pub(super) fn handle_dialog_reply(app: &AppHandle, dialog: VoiceDialog, reply: S
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         match dialog {
-            VoiceDialog::Confirm { intents, utterance, .. } => {
+            VoiceDialog::Confirm {
+                intents, utterance, ..
+            } => {
                 if is_affirmative_reply(&reply) {
                     execute_intents(&app, intents, &utterance).await;
                     return;
@@ -1726,7 +2071,11 @@ fn announce_dialog_question(app: &AppHandle, message: &str) {
         if !runtime.config.quiet_mode {
             runtime.tts_cancel = Some(cancel.clone());
         }
-        (tts_options(&runtime.config), runtime.config.quiet_mode, cancel)
+        (
+            tts_options(&runtime.config),
+            runtime.config.quiet_mode,
+            cancel,
+        )
     };
     let _ = app.emit(
         "lumo://voice-state",
@@ -1945,12 +2294,14 @@ pub(super) fn publish_transcript(app: &AppHandle, text: String, is_final: bool) 
     if is_final && !text.trim().is_empty() {
         let state = app.state::<DesktopState>();
         // 1) 进行中的语音对话（二次确认 / 参数收集）优先消费本句；过期则丢弃
-        let dialog = state.voice.lock().ok().and_then(|mut runtime| {
-            match runtime.dialog.take() {
+        let dialog = state
+            .voice
+            .lock()
+            .ok()
+            .and_then(|mut runtime| match runtime.dialog.take() {
                 Some(dialog) if dialog_deadline(&dialog) < Instant::now() => None,
                 other => other,
-            }
-        });
+            });
         if let Some(dialog) = dialog {
             handle_dialog_reply(app, dialog, text);
             return;
@@ -2597,5 +2948,98 @@ mod tests {
         assert!(start_runtime(&mut denied, None)
             .unwrap_err()
             .contains("denied"));
+    }
+
+    fn screen(x: f64, y: f64) -> ScreenRect {
+        ScreenRect {
+            x,
+            y,
+            width: 1440.0,
+            height: 900.0,
+        }
+    }
+
+    #[test]
+    fn capsule_defaults_to_bottom_center_of_the_active_screen() {
+        let placement = resolve_capsule_placement(None, &[screen(0.0, 0.0)], CAPSULE_SIZE).unwrap();
+        assert_eq!(placement.x, (1440.0 - CAPSULE_SIZE.0) / 2.0);
+        assert_eq!(placement.y, 900.0 - CAPSULE_SIZE.1 - CAPSULE_BOTTOM_MARGIN);
+    }
+
+    #[test]
+    fn capsule_keeps_the_position_the_user_dragged_it_to() {
+        let dragged = CapsulePlacement { x: 120.0, y: 64.0 };
+        let placement =
+            resolve_capsule_placement(Some(dragged), &[screen(0.0, 0.0)], CAPSULE_SIZE).unwrap();
+        assert_eq!(placement, dragged);
+    }
+
+    #[test]
+    fn capsule_falls_back_when_the_remembered_screen_is_gone() {
+        // 拖到副屏后拔掉副屏：旧坐标整块在屏幕外，必须回到主屏默认位。
+        let offscreen = CapsulePlacement { x: 2600.0, y: 400.0 };
+        let screens = [screen(0.0, 0.0)];
+        assert!(!placement_is_visible(offscreen, &screens, CAPSULE_SIZE));
+        let placement = resolve_capsule_placement(Some(offscreen), &screens, CAPSULE_SIZE).unwrap();
+        assert_eq!(placement, default_capsule_placement(screens[0], CAPSULE_SIZE));
+
+        // 副屏还在时同一坐标依然有效。
+        let with_second = [screen(0.0, 0.0), screen(1440.0, 0.0)];
+        assert!(placement_is_visible(offscreen, &with_second, CAPSULE_SIZE));
+    }
+
+    #[test]
+    fn capsule_placement_survives_a_save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = capsule_placement_path(dir.path());
+        assert_eq!(load_capsule_placement(&path), None);
+        let placement = CapsulePlacement { x: 12.5, y: 880.0 };
+        save_capsule_placement(&path, placement).unwrap();
+        assert_eq!(load_capsule_placement(&path), Some(placement));
+    }
+
+    #[test]
+    fn confirm_state_keeps_the_capsule_bottom_edge_in_place() {
+        let parked = default_capsule_placement(screen(0.0, 0.0), CAPSULE_SIZE);
+        // 变高：下边缘不动，所以整体上移，不会捅出屏幕底部。
+        let expanded =
+            bottom_anchored_placement(parked, CAPSULE_SIZE.1, CAPSULE_CONFIRM_SIZE.1);
+        assert_eq!(
+            expanded.y + CAPSULE_CONFIRM_SIZE.1,
+            parked.y + CAPSULE_SIZE.1
+        );
+        assert!(expanded.y + CAPSULE_CONFIRM_SIZE.1 <= 900.0);
+        // 收回常态：原样回到停放点，多轮确认也不会一点点往上漂。
+        assert_eq!(
+            bottom_anchored_placement(expanded, CAPSULE_CONFIRM_SIZE.1, CAPSULE_SIZE.1),
+            parked
+        );
+    }
+
+    #[test]
+    fn resized_capsule_is_pulled_back_inside_the_screen() {
+        let screen = screen(0.0, 0.0);
+        // 用户把胶囊拖到贴着屏幕右下角，展开后会越界。
+        let dragged = CapsulePlacement { x: 1400.0, y: 880.0 };
+        let clamped = clamp_placement(dragged, screen, CAPSULE_CONFIRM_SIZE);
+        assert_eq!(clamped.x, 1440.0 - CAPSULE_CONFIRM_SIZE.0);
+        assert_eq!(clamped.y, 900.0 - CAPSULE_CONFIRM_SIZE.1);
+        // 已经在屏幕里的位置不动。
+        let inside = CapsulePlacement { x: 200.0, y: 200.0 };
+        assert_eq!(clamp_placement(inside, screen, CAPSULE_SIZE), inside);
+    }
+
+    #[test]
+    fn accelerators_are_humanized_per_platform() {
+        assert_eq!(
+            humanize_accelerator_for("CommandOrControl+Shift+Space", true),
+            "⌘⇧Space"
+        );
+        assert_eq!(
+            humanize_accelerator_for("CommandOrControl+Shift+Space", false),
+            "Ctrl+Shift+Space"
+        );
+        assert_eq!(humanize_accelerator_for("Alt+L", true), "⌥L");
+        assert_eq!(humanize_accelerator_for("  ", true), "（未设置快捷键）");
     }
 }

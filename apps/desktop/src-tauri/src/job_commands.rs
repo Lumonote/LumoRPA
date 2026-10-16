@@ -1,6 +1,6 @@
 use super::{agent_service::AgentStartInput, open_repo, DesktopState};
 use chrono::{DateTime, Duration, Utc};
-use lumo_agent::{validate_dag, AgentJob, AgentPlan, JobSchedule, LoopStatus};
+use lumo_agent::{validate_dag, AgentJob, AgentPlan, JobSchedule, LoopStatus, MisfirePolicy};
 use lumo_core::CancelToken;
 use lumo_storage::{AgentJobRow, EnqueueJobResult, NewAgentJob, RecoveredJob, Repo};
 use serde::Deserialize;
@@ -13,6 +13,9 @@ type AppHandle = tauri::AppHandle<Wry>;
 const JOB_LEASE_SECONDS: i64 = 30;
 const JOB_HEARTBEAT_SECONDS: u64 = 10;
 const JOB_POLL_MILLIS: u64 = 500;
+/// A `misfire: skip` cron job whose fire time is older than this window jumps
+/// to the next occurrence instead of running late (host asleep / app closed).
+const JOB_MISFIRE_GRACE_SECONDS: i64 = 120;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,9 +172,14 @@ fn schedule_job(
     .map_err(|error| error.to_string())?;
     let (schedule_kind, schedule_spec) = match &job.schedule {
         JobSchedule::OneShot { run_at } => ("one_shot", serde_json::json!({ "runAt": run_at })),
-        JobSchedule::Cron { expression } => {
-            ("cron", serde_json::json!({ "expression": expression }))
-        }
+        JobSchedule::Cron {
+            expression,
+            timezone,
+            misfire,
+        } => (
+            "cron",
+            serde_json::json!({ "expression": expression, "timezone": timezone, "misfire": misfire }),
+        ),
     };
     let payload = serde_json::to_value(AgentStartInput {
         utterance: request.utterance,
@@ -266,6 +274,15 @@ async fn run_worker(app: AppHandle, repo: Repo, worker_id: String, root: Cancell
 }
 
 async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: AgentJobRow) {
+    let claimed_at = Utc::now();
+    if misfire_should_skip(&job, claimed_at) {
+        let next = next_run_at(&job, claimed_at).unwrap_or(None);
+        let _ = repo.complete_job(&job.id, worker_id, claimed_at, next);
+        if let Ok(Some(updated)) = repo.get_job(&job.id) {
+            let _ = app.emit("lumo://job-updated", updated);
+        }
+        return;
+    }
     let input = match serde_json::from_value::<AgentStartInput>(job.payload.clone()) {
         Ok(input) => input,
         Err(error) => {
@@ -357,7 +374,7 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
     }
 }
 
-fn next_run_at(job: &AgentJobRow, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
+fn schedule_from_row(job: &AgentJobRow) -> Result<Option<JobSchedule>, String> {
     if job.schedule_kind != "cron" {
         return Ok(None);
     }
@@ -366,10 +383,36 @@ fn next_run_at(job: &AgentJobRow, now: DateTime<Utc>) -> Result<Option<DateTime<
         .get("expression")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("job `{}` has an invalid cron schedule", job.id))?;
-    JobSchedule::cron(expression)
-        .map_err(|error| error.to_string())?
-        .next_after(now)
+    let timezone = job
+        .schedule_spec
+        .get("timezone")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let misfire = match job.schedule_spec.get("misfire") {
+        None | Some(serde_json::Value::Null) => MisfirePolicy::default(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| format!("job `{}` has an invalid misfire policy: {error}", job.id))?,
+    };
+    JobSchedule::cron_in(expression, timezone, misfire)
+        .map(Some)
         .map_err(|error| error.to_string())
+}
+
+fn next_run_at(job: &AgentJobRow, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
+    match schedule_from_row(job)? {
+        Some(schedule) => schedule.next_after(now).map_err(|error| error.to_string()),
+        None => Ok(None),
+    }
+}
+
+fn misfire_should_skip(job: &AgentJobRow, now: DateTime<Utc>) -> bool {
+    match schedule_from_row(job) {
+        Ok(Some(schedule)) => {
+            schedule.misfire() == MisfirePolicy::Skip
+                && now - job.available_at > Duration::seconds(JOB_MISFIRE_GRACE_SECONDS)
+        }
+        _ => false,
+    }
 }
 
 fn lock_jobs(jobs: &Mutex<JobRuntime>) -> Result<std::sync::MutexGuard<'_, JobRuntime>, String> {
@@ -387,6 +430,60 @@ mod tests {
 
     fn at(seconds: i64) -> chrono::DateTime<Utc> {
         Utc.timestamp_opt(1_760_000_000 + seconds, 0).unwrap()
+    }
+
+    fn cron_row(spec: serde_json::Value, available_at: chrono::DateTime<Utc>) -> AgentJobRow {
+        AgentJobRow {
+            id: "job-cron".into(),
+            idempotency_key: "job-cron".into(),
+            payload: json!({}),
+            schedule_kind: "cron".into(),
+            schedule_spec: spec,
+            state: "queued".into(),
+            priority: 5,
+            available_at,
+            attempts: 0,
+            max_attempts: 3,
+            worker_id: None,
+            lease_until: None,
+            heartbeat_at: None,
+            last_error: None,
+            cancelled_at: None,
+            created_at: available_at,
+            updated_at: available_at,
+        }
+    }
+
+    #[test]
+    fn misfire_skip_applies_only_to_stale_skip_jobs() {
+        let skip_spec = json!({ "expression": "0 */5 * * * *", "misfire": "skip" });
+        let fresh = cron_row(skip_spec.clone(), at(0));
+        assert!(!misfire_should_skip(&fresh, at(30)));
+        let stale = cron_row(skip_spec, at(0));
+        assert!(misfire_should_skip(&stale, at(600)));
+        let catch_up = cron_row(json!({ "expression": "0 */5 * * * *" }), at(0));
+        assert!(!misfire_should_skip(&catch_up, at(600)));
+        let mut one_shot = cron_row(json!({}), at(0));
+        one_shot.schedule_kind = "one_shot".into();
+        assert!(!misfire_should_skip(&one_shot, at(600)));
+    }
+
+    #[test]
+    fn next_run_at_honors_timezone_and_misfire_in_spec() {
+        let row = cron_row(
+            json!({ "expression": "0 0 9 * * *", "timezone": "Asia/Shanghai", "misfire": "skip" }),
+            at(0),
+        );
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            next_run_at(&row, now).unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap())
+        );
+        let legacy = cron_row(json!({ "expression": "0 0 9 * * *" }), at(0));
+        assert_eq!(
+            next_run_at(&legacy, now).unwrap(),
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap())
+        );
     }
 
     fn plan() -> AgentPlan {

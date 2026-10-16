@@ -77,7 +77,10 @@ pub(crate) fn sanitize_recording_step(
     Some(clean_value)
 }
 
-pub(crate) fn sanitize_recording_with(action: &str, raw: Option<&YamlValue>) -> Option<YamlMapping> {
+pub(crate) fn sanitize_recording_with(
+    action: &str,
+    raw: Option<&YamlValue>,
+) -> Option<YamlMapping> {
     let empty = YamlMapping::new();
     let with = raw.and_then(YamlValue::as_mapping).unwrap_or(&empty);
     match action {
@@ -275,7 +278,10 @@ pub(crate) fn copy_yaml_number(out: &mut YamlMapping, src: &YamlMapping, key: &s
     }
 }
 
-pub(crate) fn unique_recording_step_id(raw: String, seen: &mut std::collections::BTreeSet<String>) -> String {
+pub(crate) fn unique_recording_step_id(
+    raw: String,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> String {
     let mut clean: String = raw
         .chars()
         .map(|c| {

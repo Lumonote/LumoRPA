@@ -198,7 +198,8 @@ pub(super) fn active_agent_session_count(state: &DesktopState) -> usize {
 pub(super) fn cancel_active_agent_sessions(
     app: &AppHandle,
     state: &DesktopState,
-) -> Result<Vec<String>, String> {    let cancelled = {
+) -> Result<Vec<String>, String> {
+    let cancelled = {
         let mut runtime = lock_runtime(state)?;
         runtime
             .sessions

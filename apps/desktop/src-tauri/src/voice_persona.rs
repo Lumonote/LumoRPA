@@ -95,8 +95,14 @@ mod tests {
     #[test]
     fn default_persona_keeps_messages_verbatim() {
         let voice = persona(DEFAULT_PERSONA_ID);
-        assert_eq!(voice.render(PersonaMoment::Success, "任务执行完成"), "任务执行完成");
-        assert_eq!(voice.render(PersonaMoment::Failure, "任务执行失败"), "任务执行失败");
+        assert_eq!(
+            voice.render(PersonaMoment::Success, "任务执行完成"),
+            "任务执行完成"
+        );
+        assert_eq!(
+            voice.render(PersonaMoment::Failure, "任务执行失败"),
+            "任务执行失败"
+        );
         assert_eq!(voice.render(PersonaMoment::FollowUp, ""), "");
         assert!(voice.tts_voice.is_none());
     }

@@ -136,7 +136,10 @@ async fn oauth_start_callback_and_refresh_keep_plaintext_only_in_vault() {
     .unwrap();
     state.complete("github", &session.state).unwrap();
 
-    assert_eq!(stored.access_token_vault_ref, "mcp.oauth.github.access_token");
+    assert_eq!(
+        stored.access_token_vault_ref,
+        "mcp.oauth.github.access_token"
+    );
     assert_eq!(
         stored.refresh_token_vault_ref.as_deref(),
         Some("mcp.oauth.github.refresh_token")
@@ -195,7 +198,10 @@ async fn oauth_state_mismatch_never_writes_vault() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, SupervisorError::OAuth(OAuthError::StateMismatch)));
+    assert!(matches!(
+        error,
+        SupervisorError::OAuth(OAuthError::StateMismatch)
+    ));
     assert!(vault.0.lock().unwrap().is_empty());
 }
 
@@ -237,12 +243,7 @@ fn schema_drift_emits_pending_event_and_exact_approval_changes_visibility() {
         .pending_tool("github", "issues.list")
         .unwrap();
     supervisor
-        .approve(
-            "github",
-            "issues.list",
-            "1.0.0",
-            &pending.schema_hash,
-        )
+        .approve("github", "issues.list", "1.0.0", &pending.schema_hash)
         .unwrap();
     assert_eq!(supervisor.registry().visible_tools("github").len(), 1);
 
