@@ -11,8 +11,8 @@
 //! - `window.activate` —— 按 `id` 或 `title_contains` 把窗口提到前台。
 //! - `window.bounds`   —— 读窗口几何;可选 `set` 改位置/尺寸(平台能力见下表)。
 //!
-//! 选型:截屏/枚举用 xcap(一库覆盖三平台;**钉 =0.5.1**,0.6.0 起 edition 2024 需
-//! rustc ≥1.85 > 本仓 MSRV 1.83,见 Cargo.toml 注释)。激活/改几何 xcap 不提供,按
+//! 选型:截屏/枚举用 xcap(一库覆盖三平台;**钉 =0.5.1**,0.6.0 起 edition 2024;
+//! 本仓 MSRV 已提到 1.88,钉版属待评估升级,见 Cargo.toml 注释)。激活/改几何 xcap 不提供,按
 //! 平台落地 —— macOS 走 osascript/System Events(同 lumo-recorder 的 AX 先例,免
 //! objc 桥接);Windows 走 windows-sys 的 SetForegroundWindow/MoveWindow;Linux 仅
 //! X11 best-effort(外呼 `wmctrl`,Wayland 无全局窗口协议)。

@@ -132,12 +132,16 @@ jobs:
           command: check all
 
   msrv:
-    name: MSRV 1.83
+    name: MSRV 1.88
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust 1.83 (declared rust-version)
-        uses: dtolnay/rust-toolchain@1.83.0
+      # Tracks the workspace `rust-version`. Raised from 1.83 to the smallest
+      # floor the tree actually satisfies: clap_lex needs edition 2024 (Cargo
+      # >= 1.85), icu_* 2.2.0 needs 1.86, and suppaftp needs 1.88 for the
+      # FTP-injection fix. See the note in Cargo.toml. Keep in lockstep with it.
+      - name: Install Rust 1.88 (declared rust-version)
+        uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       # Same reasoning as coverage: `--exclude lumorpa-desktop` does not remove
       # the feature-unified rdev/x11 and cpal/alsa dependencies.

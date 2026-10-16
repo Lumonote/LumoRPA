@@ -19,7 +19,21 @@ default-members = ["crates/lumo-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83"
+# Raised 1.83 -> 1.88. The 1.83 floor was no longer truthful: the dependency
+# tree already required more, and two of the blockers are not avoidable by
+# pinning. Measured with `cargo +<v> check`, each of these is a hard floor:
+#   * 1.85 — clap_lex 1.1.0 ships an edition-2024 manifest, which Cargo < 1.85
+#     cannot even parse ("feature `edition2024` is required"), so the MSRV job
+#     died while downloading rather than compiling.
+#   * 1.86 — the icu_* 2.2.0 crates (normalization/data, via idna) declare
+#     rust-version 1.86.
+#   * 1.88 — suppaftp declares 1.88 on every release from 10.0.0 onward, and
+#     RUSTSEC-2026-0271 (FTP CRLF command injection) is only fixed in >= 10.0.2.
+#     Staying at 1.83 therefore meant shipping a known-exploitable FTP client.
+# 1.88 is the smallest floor that satisfies all three simultaneously — not an
+# arbitrary bump, and not a target we chose for its own sake. Revisit if any of
+# clap_lex, icu_*, or suppaftp relaxes its requirement.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/Lumonote/LumoRPA"
 homepage = "https://lumorpa.io"
@@ -93,26 +107,31 @@ comfy-table     = "7"
 # email MIME 解析:mail-parser(Stalwart,纯 Rust,无 C 依赖,信创/交叉友好)。
 # email.fetch 取回 BODY[] 原始字节后,用它解析 multipart 正文(text/html)与附件,
 # 默认特性为空,显式开 full_encoding(经 encoding_rs,本仓已有)覆盖 GBK/GB18030
-# 等中文字符集。注意:其传递依赖 hashify 自 0.2.7 起 edition 2024(需 rustc
-# ≥1.85 > 本仓 MSRV 1.83),Cargo.lock 已钉 hashify =0.2.6(edition 2021);
-# 不要对 hashify 盲目 cargo update。
+# 等中文字符集。注意:其传递依赖 hashify 自 0.2.7 起 edition 2024。该钉版起初
+# 是为守 MSRV 1.83 而设;MSRV 已提到 1.88(见 workspace.package),edition 2024
+# 不再是障碍,但 Cargo.lock 仍钉 hashify =0.2.6 —— 解开它需要单独验证,
+# 不属本次改动范围,故暂不盲目 cargo update。
 mail-parser     = { version = "0.11", features = ["full_encoding"] }
 
-# MSRV 1.83 钉版(只动 Cargo.lock,同 hashify 先例):以下传递依赖的新版已转
-# edition 2024(需 rustc ≥1.85 > 本仓 1.83),已钉住末个 edition 2021 版本,
-# 不要盲目 cargo update ——
+# MSRV 钉版(只动 Cargo.lock,同 hashify 先例):以下传递依赖的新版已转
+# edition 2024,当初为守 MSRV 1.83 而钉住末个 edition 2021 版本。MSRV 现已
+# 提到 1.88,edition 2024 不再是硬障碍 —— 这些钉版因此是"待清理"而非"必需",
+# 但逐个解开需各自验证,故保留并不要在无关改动中盲目 cargo update ——
 #   psm =0.1.26(lettre→chumsky→stacker;0.1.30 起 build-dep ar_archive_writer 0.5)
 #   base64ct =1.6.0 / home =0.5.11 / idna_adapter =1.2.1(各自新版起 edition 2024)
 #   proc-macro-crate =3.2.0(xcap→zbus 宏所需;3.3+ 经 toml_edit 0.25 拉 edition 2024 树)
 # 注:apps/desktop/src-tauri(tauri 2.11)子树经 toml 1.x 强拉 edition 2024 的
 # indexmap 2.14→hashbrown 0.17,无法钉回 —— 该 GUI 成员本就不受信创 MSRV 约束;
-# 核心 crates 子图(含 lumo-actions --features desktop)保持 rustc 1.83 可编译。
+# 核心 crates 子图(含 lumo-actions --features desktop)现已随 MSRV 1.88 全面
+# 支持 edition 2024,交叉编译仍按 aarch64/loongarch64 目标验证。
 
 # xml.* 指令族:quick-xml 流式解析/转义(纯 Rust,无 C 依赖,信创红线)。
-# 0.37 已是本仓传递依赖(Cargo.lock 0.37.5),不引入新版本树;edition 2021,
-# MSRV 远低于本仓 1.83。quick-xml 只替换五个预定义实体与数字字符引用,自定义/
-# 外部实体与 DTD 一律不展开 —— XXE 在解析层面不可能发生。
-quick-xml       = "0.37"
+# 0.37 -> 0.41:0.37 受 RUSTSEC-2026-0194 / RUSTSEC-2026-0195 影响
+# (重复属性名检查是二次运行时间、NsReader 的命名空间声明分配无上界,两者都可被
+# 构造输入放大成 DoS)。修复线是 0.41.0,取之,MSRV 1.79 ≤ 本仓 1.88。
+# 只替换五个预定义实体与数字字符引用,自定义/外部实体与 DTD 一律不展开
+# —— XXE 在解析层面不可能发生,这一点不随版本变化。
+quick-xml       = "0.41"
 
 # http / browser / excel
 # reqwest 的 socks 特性:http.* 的 proxy 支持 socks5://(0.12.23+ 由 reqwest
@@ -123,6 +142,16 @@ reqwest         = { version = "0.12", default-features = false, features = ["rus
 axum            = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 tower-http      = { version = "0.6", default-features = false, features = ["trace"] }
 chromiumoxide   = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+# calamine 0.26 经 quick-xml 0.31 间接吃 RUSTSEC-2026-0194/0195(见 deny.toml
+# 的精确抑制条目)。升级路径已被上游锁死,此处保持 0.26:
+#   * calamine 0.36.x 才用 quick-xml ^0.41(唯一能修这两条的版本),但它同时
+#     硬依赖 zip ^8.6,而 zip 8.x 全系列已被 yank(8.0.0~8.6.0),crates.io 上
+#     仅剩 9.0.3 / 9.0.4 —— cargo update 直接报 failed to select a version for
+#     the requirement `zip = "^8.6"`。
+#   * calamine 0.31~0.35 分别停在 quick-xml ^0.38 / ^0.39,均低于 0.41 修复线,
+#     且 minor 不兼容,无法在 lock 里强抬。
+# 结论:这是上游版本组合造成的死结,不是本仓可单方面解决的。约束记录在此,
+# 待 calamine 发布改用 zip 9 的版本后重估。
 calamine        = "0.26"
 rust_xlsxwriter = "0.79"
 umya-spreadsheet = { version = "2.3.3", default-features = false }

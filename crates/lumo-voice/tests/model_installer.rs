@@ -139,10 +139,35 @@ fn manifest(bytes: &[u8], unpacked_bytes: u64) -> VoiceModelManifest {
 }
 
 #[test]
-fn sha256_matches_standard_test_vector() {
+fn sha256_matches_standard_test_vectors() {
+    // 标准向量(FIPS 180-4 附录 B + 百万字符用例),参考值由系统
+    // `shasum -a 256` 独立产生,与本实现无共享代码。
+    //
+    // 这里逐个覆盖 rather than 只测 "abc":finalize 里对输出做的是
+    // `as_chunks_mut::<4>()` + 状态字大端回写,compress 里对输入块做的是
+    // `as_chunks::<4>()` 分组 —— 两者都只在"完整块"上正确。多块用例
+    // (448-bit 的两块、以及 1_000_000 字节的多块累积)才真正压到 update
+    // 的缓冲与跨块拼接,单块 "abc" 碰不到。
+    // 空输入 —— 只走填充路径,无数据块。
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    // "abc" —— 单块,填充后仍在一块内。
     assert_eq!(
         sha256_hex(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    // 448-bit 消息 —— 填充跨界到第二块。
+    assert_eq!(
+        sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+    // 1_000_000 个 'a' —— 多块累积,验证 update 的 64 字节缓冲跨调用拼接。
+    let million_a = vec![b'a'; 1_000_000];
+    assert_eq!(
+        sha256_hex(&million_a),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
     );
 }
 

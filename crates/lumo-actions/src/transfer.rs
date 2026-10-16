@@ -386,30 +386,44 @@ async fn download_via(
     remote_path: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, StepError> {
+    // suppaftp 12 起 `retr_as_stream` 返回 `TransferStream`(实现 AsyncRead),
+    // 旧的 `finalize_retr_stream` 已移除,改由 `TransferStream::finish()` 收尾。
+    // `finish` 取所有权(consumes self),所以读取循环借 `&mut stream` 跑,循环结束后
+    // 再 move 进去 finish —— 用显式作用域让借用先结束,避免与 move 冲突。
     let mut stream = ftp
         .retr_as_stream(remote_path)
         .await
         .map_err(|e| StepError::msg(format!("ftp.download retr {remote_path}: {e}")))?;
+
     // 读入内存并 max_bytes 兜底(FTP 无 Content-Length,只能边读边卡)。
-    use tokio::io::AsyncReadExt;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|e| StepError::msg(format!("ftp.download read: {e}")))?;
-        if n == 0 {
-            break;
+    let buf = {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let n = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|e| StepError::msg(format!("ftp.download read: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() as u64 > max_bytes {
+                // 提前返回前收尾数据连接:直接 drop 会留下半开的传输,服务端不会
+                // 发 226,同一会话的后续 FTP 命令会读到错位的回复行。
+                // finish 的结果改变不了"超限"这个结论,故只尽力收尾。
+                let _ = stream.finish().await;
+                return Err(StepError::msg(format!(
+                    "ftp.download: response exceeds max_bytes {max_bytes}"
+                )));
+            }
         }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() as u64 > max_bytes {
-            return Err(StepError::msg(format!(
-                "ftp.download: response exceeds max_bytes {max_bytes}"
-            )));
-        }
-    }
-    ftp.finalize_retr_stream(stream)
+        buf
+    };
+
+    stream
+        .finish()
         .await
         .map_err(|e| StepError::msg(format!("ftp.download finalize: {e}")))?;
     Ok(buf)

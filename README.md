@@ -6,7 +6,7 @@
 
   <p>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue?logo=apache&logoColor=white" alt="License: Apache-2.0"></a>
-    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.83%2B-000000?logo=rust&logoColor=white" alt="Rust 1.83+"></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.88%2B-000000?logo=rust&logoColor=white" alt="Rust 1.88+"></a>
     <a href="https://v2.tauri.app/"><img src="https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=black" alt="Tauri 2"></a>
     <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node-22-339933?logo=nodedotjs&logoColor=white" alt="Node 22"></a>
     <a href="./.github/workflows/ci.yml"><img src="https://github.com/Lumonote/LumoRPA/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -49,7 +49,7 @@ LumoRPA 把自动化流程当成**可版本控制的源码**而不是二进制�
 
 ### 1. 从源码构建
 
-环境要求：Rust stable（MSRV 1.83，见 `rust-toolchain.toml`），以及浏览器动作所需的 Chromium 兼容浏览器。
+环境要求：Rust stable（MSRV 1.88，见 `rust-toolchain.toml`），以及浏览器动作所需的 Chromium 兼容浏览器。
 
 ```bash
 cargo build --workspace
@@ -173,7 +173,7 @@ CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）分层把守：
 | `fmt-clippy` | `cargo fmt --check` 与 `clippy -D warnings` |
 | `coverage` | `cargo llvm-cov` 行覆盖门槛（浏览器 / 视觉 / 录制器不计入分母） |
 | `cargo-deny` | 供应链：advisories（含 yank）、licenses、sources、bans |
-| `msrv` | 在声明的 MSRV 1.83 上 `cargo check` |
+| `msrv` | 在声明的 MSRV 1.88 上 `cargo check` |
 | `cross-check` | aarch64 硬门禁；loongarch64 best-effort |
 
 > 先在本地把受影响模块的测试与静态检查跑绿再提 PR。CI 单次全量约需数分钟，本地能复现的失败不要留给 CI。

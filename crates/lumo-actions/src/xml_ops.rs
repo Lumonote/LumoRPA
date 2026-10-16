@@ -27,7 +27,7 @@
 //! ## XPath 选型
 //!
 //! `xml.xpath` 用 sxd-document + sxd-xpath:纯 Rust(无 C 依赖,信创红线),
-//! 完整 XPath 1.0(轴/谓词/函数库),edition 2018 在 rustc 1.83(本仓 MSRV)
+//! 完整 XPath 1.0(轴/谓词/函数库),edition 2018 在本仓 MSRV 1.88 上
 //! 可编译。两 crate 自 2020 年起 API 冻结但实现完整稳定,远优于自实现路径子集
 //! (降级方案:`/a/b[2]/@id` 简化语法,仅在 sxd 不可用时启用)。注意 sxd 的
 //! XPath 求值对带命名空间的文档需要显式传 `namespaces` 前缀映射,否则可用
@@ -138,13 +138,41 @@ fn parse_xml(xml: &str) -> Result<Value, String> {
                 close_frame(frame, &mut stack, &mut root)?;
             }
             Event::Text(t) => {
-                let text = t
-                    .unescape()
+                // quick-xml 0.41 把「解码」「实体解析」两件事拆开了:xml10_content
+                // 只做编码解码与 XML 1.0 换行规范化,实体改为独立的 GeneralRef
+                // 事件(见下一条分支)。这里仍调一次 unescape 作为兜底:0.41 的
+                // Text 事件本身已不含裸实体,重复 unescape 对不含 & 的文本是
+                // 恒等变换,代价可忽略,却能兼容 reader 配置变化后实体重新内联
+                // 的情况 —— 宁可多一步,也不要静默把 &amp; 原样写进输出。
+                let decoded = t
+                    .xml10_content()
+                    .map_err(|e| format!("invalid text encoding: {e}"))?;
+                let text = quick_xml::escape::unescape(&decoded)
                     .map_err(|e| format!("invalid entity/escape: {e}"))?;
                 if let Some(top) = stack.last_mut() {
                     top.text.push_str(&text);
                 } else if !text.trim().is_empty() {
                     return Err("text content outside of root element".into());
+                }
+            }
+            Event::GeneralRef(r) => {
+                // 0.41 起 `&...;` 单独成事件,内容是**去掉 & 与 ; 的内层**(如
+                // `amp`、`#65`),不是可直接输出的文本 —— 必须还原。
+                // 做法:把内层拼回 `&...;` 交给库的 unescape 统一处理,这样
+                // 预定义实体与字符引用共用同一条已验证路径,不必在本模块
+                // 自己实现一遍数字引用解析。
+                // 自定义实体不会被展开(unescape 只认预定义实体与数字引用),
+                // 与模块头注「不展开 DTD/外部实体」的承诺一致:未知实体在此
+                // 报错,而不是被静默丢弃。
+                let name = r
+                    .xml10_content()
+                    .map_err(|e| format!("invalid entity name encoding: {e}"))?;
+                let raw = format!("&{name};");
+                let resolved = quick_xml::escape::unescape(&raw)
+                    .map_err(|e| format!("invalid entity/escape: {e}"))?;
+                match stack.last_mut() {
+                    Some(top) => top.text.push_str(&resolved),
+                    None => return Err("entity reference outside of root element".into()),
                 }
             }
             Event::CData(t) => {
@@ -184,8 +212,10 @@ fn open_frame(e: &quick_xml::events::BytesStart<'_>) -> Result<Frame, String> {
         let attr = attr.map_err(|e| format!("bad attribute in <{name}>: {e}"))?;
         let key = std::str::from_utf8(attr.key.as_ref())
             .map_err(|e| format!("invalid UTF-8 in attribute name: {e}"))?;
+        // normalized_value 是 0.41 里 unescape_value 的替代(后者已 deprecated):
+        // 同样做属性值规范化 + 预定义实体解析,且不受 encoding 特性影响。
         let val = attr
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map_err(|e| format!("bad attribute value in <{name}>: {e}"))?;
         // 属性名以 `@` 前缀进同一个 map;XML 名字不可能以 @ 开头,故与子元素键不冲突。
         map.insert(format!("@{key}"), Value::String(val.into_owned()));

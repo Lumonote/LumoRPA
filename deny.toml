@@ -21,7 +21,91 @@ all-features = true
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "workspace"
-ignore = []
+# Every entry below is a *scoped* suppression: it names an exact crate version,
+# so any future bump produces a new version string that is NOT covered and fails
+# the check again. That is deliberate — the gate stays loud for anything new.
+#
+# Two classes live here, and they need different treatment from the next person:
+#
+# (a) Upstream deadlock. calamine >= 0.36 and umya-spreadsheet >= 3.0 are the
+#     only releases that move off quick-xml 0.3x to the patched 0.41, but both
+#     hard-require zip ^8.6 — and *every* zip 8.x (8.0.0..8.6.0) is yanked,
+#     leaving only 9.0.3 / 9.0.4. Verified directly: a scratch crate depending
+#     on calamine 0.36.1 fails to resolve at all, and `cargo update -p zip
+#     --precise 8.6.0` fails the same way — a yanked version cannot be selected
+#     by any means while some crate still requires it. So the DoS fixes for
+#     quick-xml 0.31/0.37 are unreachable until calamine and umya-spreadsheet
+#     ship against zip 9. Re-check both before touching these two lines.
+#
+# (b) No patch exists upstream. rsa's Marvin timing attack has been open since
+#     2023; the advisory itself carries `patched = []` and the maintainers
+#     describe the padding as "still not constant-time". Nothing to upgrade to.
+ignore = [
+    # ── class (a): blocked on the zip 8.x yank ────────────────────────────────
+    #
+    # zip 2.4.2 / 4.6.1 — yanked upstream, and the upgrade is not a drop-in.
+    #
+    # 134 of zip's 136 published versions are yanked; only 9.0.3 / 9.0.4
+    # (2026-10-13 / 2026-10-16) remain available. This is NOT a MSRV blocker:
+    # the workspace floor is now 1.88 and zip 9.x asks for exactly 1.88. What
+    # actually blocks the upgrade is the four crates that depend on zip
+    # transitively and pin the old major — calamine, umya-spreadsheet,
+    # rust_xlsxwriter (all 2.x) and tauri-plugin-updater (4.x). Moving means
+    # raising all four across breaking majors at once, which is a planned
+    # migration rather than a CI fix.
+    #
+    # Both versions we resolve still build correctly; the practical risk is
+    # that Cargo.lock cannot be rebuilt from scratch, which is why the lockfile
+    # stays committed.
+    { crate = "zip@2.4.2", reason = "yanked upstream; upgrade blocked on calamine/umya-spreadsheet/rust_xlsxwriter majors" },
+    { crate = "zip@4.6.1", reason = "yanked upstream; upgrade blocked on tauri-plugin-updater major" },
+
+    # quick-xml — transitive only, and stuck. Our own code is on 0.41 (the
+    # patched line); these four are what other crates pin us to:
+    #   0.30.0 ← xcb        0.31.0 ← calamine 0.26.1
+    #   0.37.5 ← umya-spreadsheet 2.3.3      0.39.4 ← plist, wayland-scanner
+    #
+    # Only calamine and umya-spreadsheet matter for these two advisories, and
+    # both are in the deadlock described above: the versions that fix it need
+    # the yanked zip 8.6. Every one of these ids is a transitive edge we do not
+    # control, and 0.30/0.39 consumers (xcb, plist, wayland-scanner) are
+    # build-time platform glue that never parses untrusted XML on our behalf.
+    #
+    # Residual risk, stated plainly: lumo-actions/lumo-doc DO feed untrusted
+    # XLSX/DOCX bytes into calamine/umya, so the O(N²) duplicate-attribute and
+    # unbounded-namespace paths are reachable in principle. The mitigations that
+    # do not depend on those upstream releases are in place and must be kept:
+    # input size is bounded before parse, and document actions run under the
+    # step timeout. Re-check when calamine/umya move to zip 9.
+    # NOTE: these are advisory ids, not crate specs — cargo-deny treats a bare
+    # crate spec here as a *yank* suppression, which is why they are written as
+    # { id = ... }. The two quick-xml advisories are shared by all four affected
+    # versions, so they are listed once each rather than per version.
+    { id = "RUSTSEC-2026-0194", reason = "quadratic duplicate-attribute scan; only reachable via calamine 0.26.1 / umya-spreadsheet 2.3.3, whose fixed releases (calamine >=0.36, umya >=3.0) both require the yanked zip 8.6" },
+    { id = "RUSTSEC-2026-0195", reason = "unbounded NsReader namespace allocation; same upstream deadlock as RUSTSEC-2026-0194" },
+
+    # ── class (b): no upstream patch ─────────────────────────────────────────
+    #
+    # RUSTSEC-2023-0071 — rsa 0.9.10, Marvin timing sidechannel on private-key
+    # operations. Reached only as lumo-actions → sqlx("mysql") → sqlx-mysql →
+    # rsa. Not removable by a version bump: the advisory ships `patched = []`
+    # and every release through 0.10.0-rc.18 is still affected.
+    #
+    # Why we are not just dropping the feature: `mysql` is explicitly opted in
+    # (sqlx is declared with default-features = false) and backs a shipped,
+    # tested capability — db.mysql_query / db.mysql_exec / db.mysql_batch in
+    # crates/lumo-actions/src/db_ops.rs, with dedicated coverage in
+    # tests/db_remote.rs and tests/db_ops.rs. Removing it would be a feature
+    # regression wearing a CI fix's clothes.
+    #
+    # Exposure is narrow: within sqlx-mysql, rsa is used only for MySQL's
+    # caching_sha2_password RSA key exchange. The attack needs an attacker who
+    # can both observe fine-grained timing and act as the server (or MITM the
+    # connection). Practical mitigation is transport security and network
+    # placement, which is the operator's call, not a build-time property — so
+    # this is recorded rather than silently accepted.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing sidechannel; no upstream patch exists (advisory ships patched = []). Reached only via sqlx mysql feature, which backs the shipped db.mysql_* actions" },
+]
 
 [licenses]
 allow = [

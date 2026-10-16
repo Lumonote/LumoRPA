@@ -194,13 +194,21 @@ impl Default for TextState {
     }
 }
 
+/// 单页内容流解压上限 —— 解压炸弹防护,与 images.rs 的 MAX_IMAGE_BYTES 同一思路。
+/// 一页正常内容流远小于此(文本+矢量算子通常几十 KB 量级),64 MiB 对合法 PDF 宽裕。
+const MAX_PAGE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+
 /// 走一页的内容流,产出文本片段与框线候选。
 pub fn walk_page(
     doc: &Document,
     page_id: (u32, u16),
     fonts: &BTreeMap<Vec<u8>, &Dictionary>,
 ) -> Result<PageContent, lopdf::Error> {
-    let data = doc.get_page_content(page_id)?;
+    // lopdf 0.42 起 get_page_content 不再返回 Result(失败流回退为原始字节),
+    // 直接返回 Vec<u8>,原来的 `?` 因此失去意义。这里改用 0.45 提供的
+    // get_page_content_with_limit:它保留同样的宽松回退,但给解压总量设上界 ——
+    // 我们解析的是不可信 PDF,无界解压正是要防的那类输入。
+    let data = doc.get_page_content_with_limit(page_id, MAX_PAGE_CONTENT_BYTES)?;
     let content = Content::decode(&data)?;
 
     // 每个字体的编码与宽度表只解一次

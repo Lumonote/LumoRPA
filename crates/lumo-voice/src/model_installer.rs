@@ -471,8 +471,12 @@ impl Sha256 {
         let block = self.block;
         self.compress(&block);
         let mut output = [0_u8; 32];
-        for (chunk, value) in output.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&value.to_be_bytes());
+        // `as_chunks_mut::<4>()` 给出 `&mut [u8; 4]` 元素,长度在类型上已知 ——
+        // clippy 1.99 的 chunks_exact_to_as_chunks 直接给出这一形,且比
+        // chunks_exact_mut + copy_from_slice 少一次长度断言。第 0 元是完整块、
+        // 第 1 元是余数;32 字节 4 等分无余数,故忽略第 1 元。
+        for (chunk, value) in output.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *chunk = value.to_be_bytes();
         }
         output
     }
@@ -491,8 +495,12 @@ impl Sha256 {
             0xc67178f2,
         ];
         let mut words = [0_u32; 64];
-        for (index, chunk) in block.chunks_exact(4).enumerate() {
-            words[index] = u32::from_be_bytes(chunk.try_into().unwrap());
+        // 同上:`as_chunks::<4>()` 让元素类型就是 `&[u8; 4]`,于是
+        // `u32::from_be_bytes` 直接吃数组,不再需要 try_into().unwrap()
+        // —— 那个 unwrap 原本由 64 字节块恰好被 4 整除来保证,现在由类型保证。
+        // 块长 64 是编译期常量,余数必然为空。
+        for (index, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+            words[index] = u32::from_be_bytes(*chunk);
         }
         for index in 16..64 {
             let s0 = words[index - 15].rotate_right(7)

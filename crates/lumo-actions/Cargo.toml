@@ -54,11 +54,16 @@ zip = { version = "2.2", default-features = false, features = ["deflate", "aes-c
 encoding_rs = "0.8"
 
 # F-3 email 动作:SMTP(lettre)+ IMAP(async-imap)。统一走 rustls + ring,避开
-# openssl/native-tls 的 C 依赖,满足信创/跨平台交叉编译。lettre 0.11.22 起 MSRV
-# 升到 1.85 > 本仓 1.83,锁定 0.11.19。其传递依赖 psm(经 chumsky→stacker)自
-# 0.1.30 起 build-dep ar_archive_writer 0.5(edition 2024,需 rustc ≥1.85),
-# Cargo.lock 已钉 psm =0.1.26;不要对 psm 盲目 cargo update(同 hashify 先例)。
-lettre = { version = "=0.11.19", default-features = false, features = [
+# openssl/native-tls 的 C 依赖,满足信创/跨平台交叉编译。
+# 钉版 =0.11.19 已解开:该版受 RUSTSEC-2026-0141 影响(boring-tls 集成里
+# hostname 校验被反了的布尔值静默关闭)。本仓并未启用 boring-tls(只开
+# rustls/ring,TLS 后端见下列 features),所以它不是可利用路径 —— 但 cargo-deny
+# 的 [graph] all-features = true 会按"该版本存在该缺陷"判定,且留着钉版等于把
+# 一棵已知有缺陷的树长期留在 lock 里。0.11.23 修掉该问题,MSRV 1.85 ≤ 本仓 1.88。
+# 其传递依赖 psm(经 chumsky→stacker)自 0.1.30 起 build-dep ar_archive_writer 0.5
+# (edition 2024);Cargo.lock 仍钉 psm =0.1.26,不要在无关改动中盲目 cargo
+# update(同 hashify 先例)。
+lettre = { version = "0.11.23", default-features = false, features = [
     "builder",
     "smtp-transport",
     "pool",
@@ -75,15 +80,26 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 rustls-native-certs = "0.8"
 futures-util = "0.3"
 
-# F-4 PDF 动作:纯 Rust lopdf(MIT)读写一体,无 C 依赖。lopdf 0.40 需 rustc 1.85
-# > 本仓 1.83,锁 0.36。
-lopdf = { version = "0.36", default-features = false }
+# F-4 PDF 动作:纯 Rust lopdf(MIT)读写一体,无 C 依赖。
+# 0.36 -> 0.45:0.36 受 RUSTSEC-2026-0187 影响(load_mem 对嵌套数组/字典无界递归,
+# 约 21KB 的构造 PDF 就能把栈打爆成 SIGABRT —— 不是 panic,捕获不住,任何解析
+# 不可信 PDF 的进程都可被远程打死)。修复落在 0.42.0;这里取 0.45.0(MSRV 1.88,
+# 与本仓 rust-version 正好一致),而不是贴着 0.42 的底线,理由是少留一次后续
+# 升级债。API 侧的适配见 pdf_ops.rs。
+lopdf = { version = "0.45", default-features = false }
 
 # F-6 远程传输:FTP 走 suppaftp(tokio + tokio-rustls-ring,纯 Rust);S3 兼容存储
 # 不引第三方 SDK(rust-s3/aws-creds 经 attohttpc 强拉 aws-lc-sys 这个 C 依赖,破坏
 # aarch64 信创交叉编译),改用 workspace 既有 reqwest(rustls/ring)自签 AWS SigV4
 # (复用本 crate 的 hmac/sha2),零新增重依赖,见 transfer/sigv4.rs。
-suppaftp = { version = "8", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
+# 版本 8 -> 12:8.0.3 受 RUSTSEC-2026-0271(FTP CRLF 命令注入,影响 login/cwd/retr/
+# put_file 等所有接受字符串参数的方法)影响,修复出现在 >= 10.0.2;10.0.2 起的每个
+# 版本都声明 rust-version 1.88,故本仓 MSRV 相应从 1.83 提到 1.88(见根 Cargo.toml)。
+# 12.0.0 另有破坏性改动:finalize_retr_stream 被移除,retr_as_stream 返回
+# TransferStream 并改用其 .finish()(见 transfer.rs 的 download_via)。
+# 仍走 tokio + tokio-rustls-ring:纯 Rust、ring 后端,不引 native-tls/openssl,
+# 保持 aarch64 信创交叉编译无 C-TLS 依赖。
+suppaftp = { version = "12", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
 
 # 批次B docx.* 动作:.docx 即 zip(OOXML),复用本 crate 既有的纯 Rust `zip`
 # 解出 word/document.xml,按 <w:t> 文本抽取 / {{占位符}}套打回写 —— 不引
@@ -106,9 +122,10 @@ imageproc = { version = "0.25", default-features = false }
 rdev = { version = "0.5", optional = true }
 # 指令集缺口 P0:原生截屏 + 窗口枚举/几何(desktop.screenshot / window.*)。xcap 一库
 # 覆盖 macOS(CoreGraphics)/ Windows(GDI)/ Linux(X11 + Wayland portal)三平台。
-# 钉 =0.5.1:xcap 自 0.6.0 起改 edition 2024(需 rustc ≥1.85 > 本仓 MSRV 1.83),
-# 0.5.1 是最后的 edition 2021 版 —— 不要盲目 cargo update(同 mail-parser/hashify
-# 钉版先例)。Linux 侧传递 pipewire/xcb 等 C 依赖,与 rdev 同理只活在默认关闭的
+# 钉 =0.5.1:xcap 自 0.6.0 起改 edition 2024,0.5.1 是最后的 edition 2021 版。
+# 当初为守 MSRV 1.83 而钉;MSRV 现为 1.88,edition 2024 已不再是障碍,但升级
+# 0.6+ 需验证 API 变更,故保留钉版 —— 不要盲目 cargo update(同 mail-parser/
+# hashify 钉版先例)。Linux 侧传递 pipewire/xcb 等 C 依赖,与 rdev 同理只活在默认关闭的
 # desktop feature 内,不触信创纯 Rust 红线。
 xcap = { version = "=0.5.1", optional = true }
 umya-spreadsheet = { workspace = true }
@@ -117,7 +134,7 @@ umya-spreadsheet = { workspace = true }
 # - xml.parse / xml.build 用 quick-xml 流式解析与转义(版本注释见 workspace Cargo.toml,
 #   不解析 DTD/外部实体,XXE 不可能)。
 # - xml.xpath 用 sxd-document + sxd-xpath(XPath 1.0,纯 Rust,依赖仅 peresil/typed-arena,
-#   无 C 依赖;edition 2018,在 rustc 1.83 可编译——两 crate 自 2020 起 API 冻结但功能完整,
+#   无 C 依赖;edition 2018,在本仓 MSRV 1.88 上可编译——两 crate 自 2020 起 API 冻结但功能完整,
 #   谓词/轴/函数库齐全,远优于自实现路径子集)。若未来维护性恶化,降级方案是自实现
 #   `/a/b[2]/@id` 简化子集,见 xml_ops.rs 头注。
 quick-xml.workspace = true

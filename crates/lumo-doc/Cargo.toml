@@ -17,8 +17,10 @@ description = "Structured document parsing (DocIR) for LumoRPA: DOCX / XLSX / PD
 # * calamine —— XLSX 读取(与 excel.* 族同源,避免两套语义)。
 [dependencies]
 calamine.workspace = true
-# PDF:纯 Rust lopdf(MIT),与 lumo-actions 的 pdf.* 族同源,版本注释见其 Cargo.toml。
-lopdf = { version = "0.36", default-features = false }
+# PDF:纯 Rust lopdf(MIT),与 lumo-actions 的 pdf.* 族同源。版本必须与其一致 ——
+# 两个成员各写一次版本号,若不一致会解析出两棵 lopdf(0.36 那份仍带
+# RUSTSEC-2026-0187),advisory 照样红。详细理由见 crates/lumo-actions/Cargo.toml。
+lopdf = { version = "0.45", default-features = false }
 quick-xml.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

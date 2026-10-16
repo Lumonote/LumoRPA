@@ -18,7 +18,7 @@
 
 use crate::error::DocError;
 use crate::ir::*;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::Reader;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -236,29 +236,53 @@ fn parse_core_props(xml: &str) -> Result<DocMeta, DocError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut meta = DocMeta::default();
+    // 当前元素的**名字**与**累积文本**分开记。
+    //
+    // 为什么要有 buffer:`a&amp;b` 在 quick-xml 0.41 里不是一个 Text 事件,而是
+    // Text("a") / GeneralRef(amp) / Text("b") 三个。若每个事件直接写进 meta,
+    // 就得分清「这是本字段的第一段(覆盖)」还是「后续段(追加)」,否则要么把
+    // 前段冲掉,要么把同名元素的两份内容粘在一起。把拼接推迟到 End 一次性提交,
+    // 这个分类问题就不存在了:一个元素 = 一次赋值,语义与 XML 结构一一对应。
+    //
+    // field 也在此刻才重置 —— 元素外的游离文本(如根节点前后的缩进)因为
+    // trim_text 已被剔除,即便出现也只会落在 field == None 上,不会误写。
     let mut field: Option<String> = None;
+    let mut buffer = String::new();
     loop {
         match reader
             .read_event()
             .map_err(|e| DocError::malformed(CORE_PROPS, e.to_string()))?
         {
             Event::Start(e) => {
-                field = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned())
+                field = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned());
+                buffer.clear();
             }
-            Event::Text(e) => {
-                let value = e
-                    .unescape()
-                    .map_err(|err| DocError::malformed(CORE_PROPS, err.to_string()))?
-                    .into_owned();
+            Event::Text(ref e) => {
+                // 0.41 起 xml10_content 只做解码/换行规范化,实体解析需显式
+                // unescape;漏掉会把 &amp; 原样写进元数据。
+                let decoded = e
+                    .xml10_content()
+                    .map_err(|err| DocError::malformed(CORE_PROPS, err.to_string()))?;
+                let value = quick_xml::escape::unescape(&decoded)
+                    .map_err(|err| DocError::malformed(CORE_PROPS, err.to_string()))?;
+                buffer.push_str(&value);
+            }
+            Event::GeneralRef(ref r) => {
+                // 0.41 起 &...; 是独立事件,落到下面的 `_` 兜底里会被**静默丢弃**
+                // —— 那等于把 dc:title 里的 &amp; 吃掉,是无声的数据损坏。
+                buffer.push_str(&resolve_reference(r, CORE_PROPS)?);
+            }
+            Event::End(_) => {
                 match field.as_deref() {
-                    Some("dc:title") => meta.title = Some(value),
-                    Some("dc:creator") => meta.author = Some(value),
-                    Some("dcterms:created") => meta.created = Some(value),
-                    Some("dcterms:modified") => meta.modified = Some(value),
+                    Some("dc:title") => meta.title = Some(std::mem::take(&mut buffer)),
+                    Some("dc:creator") => meta.author = Some(std::mem::take(&mut buffer)),
+                    Some("dcterms:created") => meta.created = Some(std::mem::take(&mut buffer)),
+                    Some("dcterms:modified") => meta.modified = Some(std::mem::take(&mut buffer)),
                     _ => {}
                 }
+                field = None;
+                buffer.clear();
             }
-            Event::End(_) => field = None,
             Event::Eof => break,
             _ => {}
         }
@@ -266,11 +290,26 @@ fn parse_core_props(xml: &str) -> Result<DocMeta, DocError> {
     Ok(meta)
 }
 
+/// 把 `&...;` 事件的内层拼回完整形式后交给 quick-xml 解析。
+///
+/// 字符引用(`#65`)、五个预定义实体由库解析;未知的自定义实体报错而非静默
+/// 丢弃 —— 与模块头注「不展开 DTD/外部实体」一致:不展开,但也不假装它不存在。
+fn resolve_reference(r: &BytesRef<'_>, part: &str) -> Result<String, DocError> {
+    let name = r
+        .xml10_content()
+        .map_err(|e| DocError::malformed(part, e.to_string()))?;
+    let raw = format!("&{name};");
+    quick_xml::escape::unescape(&raw)
+        .map(|v| v.into_owned())
+        .map_err(|e| DocError::malformed(part, e.to_string()))
+}
+
 fn attr(e: &BytesStart, name: &str) -> Option<String> {
     e.try_get_attribute(name)
         .ok()
         .flatten()
-        .and_then(|a| a.unescape_value().ok())
+        // unescape_value 在 0.41 已 deprecated,normalized_value 是其替代。
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
         .map(|v| v.into_owned())
 }
 
@@ -380,10 +419,23 @@ impl<'a> BodyParser<'a> {
                     if self.in_deleted_run || self.in_field_code {
                         continue;
                     }
-                    let text = e
-                        .unescape()
+                    // 同 core.xml:先解码后 unescape,两步才等价于 0.37 的 unescape()。
+                    let decoded = e
+                        .xml10_content()
+                        .map_err(|err| DocError::malformed(DOCUMENT, err.to_string()))?;
+                    let text = quick_xml::escape::unescape(&decoded)
                         .map_err(|err| DocError::malformed(DOCUMENT, err.to_string()))?;
                     self.para_text.push_str(&text);
+                }
+                Event::GeneralRef(r) => {
+                    // 与上同理:不显式处理就会被 `_` 兜底静默丢弃,正文里的
+                    // `&amp;`、`&lt;` 会凭空消失。删除运行/域代码内同样跳过,
+                    // 与 Text 分支保持一致的取舍。
+                    if self.in_deleted_run || self.in_field_code {
+                        continue;
+                    }
+                    let resolved = resolve_reference(&r, DOCUMENT)?;
+                    self.para_text.push_str(&resolved);
                 }
                 Event::End(e) => self.on_close(e.name().as_ref()),
                 Event::Eof => break,
