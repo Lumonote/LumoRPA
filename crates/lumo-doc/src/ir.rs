@@ -38,10 +38,7 @@ impl Source {
 
     /// 是否来自 OCR(与文本层/版面推断相区分)。
     pub fn is_ocr(self) -> bool {
-        matches!(
-            self,
-            Source::OcrNative | Source::OcrRemote | Source::OcrVlm
-        )
+        matches!(self, Source::OcrNative | Source::OcrRemote | Source::OcrVlm)
     }
 }
 

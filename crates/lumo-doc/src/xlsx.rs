@@ -60,7 +60,9 @@ fn parse_with(
         let (rows, cols) = range.get_size();
         if rows.saturating_mul(cols) > MAX_CELLS_PER_SHEET {
             return Err(DocError::LimitExceeded {
-                message: format!("sheet `{name}` has {rows}x{cols} cells, exceeding {MAX_CELLS_PER_SHEET}"),
+                message: format!(
+                    "sheet `{name}` has {rows}x{cols} cells, exceeding {MAX_CELLS_PER_SHEET}"
+                ),
             });
         }
 

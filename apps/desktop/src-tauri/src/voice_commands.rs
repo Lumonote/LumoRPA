@@ -943,10 +943,7 @@ pub(super) async fn voice_toggle(
 }
 
 /// 鼠标发起的停止：胶囊会立刻消失，顺手告诉用户怎么把它叫回来。
-fn stop_with_recall_hint(
-    app: &AppHandle,
-    state: &DesktopState,
-) -> Result<VoiceStatusDto, String> {
+fn stop_with_recall_hint(app: &AppHandle, state: &DesktopState) -> Result<VoiceStatusDto, String> {
     let status = stop_host(app, state)?;
     cancel_active_agent_sessions(app, state)?;
     emit_capsule_recall_hint(app, &status.config.shortcut);
@@ -2977,11 +2974,17 @@ mod tests {
     #[test]
     fn capsule_falls_back_when_the_remembered_screen_is_gone() {
         // 拖到副屏后拔掉副屏：旧坐标整块在屏幕外，必须回到主屏默认位。
-        let offscreen = CapsulePlacement { x: 2600.0, y: 400.0 };
+        let offscreen = CapsulePlacement {
+            x: 2600.0,
+            y: 400.0,
+        };
         let screens = [screen(0.0, 0.0)];
         assert!(!placement_is_visible(offscreen, &screens, CAPSULE_SIZE));
         let placement = resolve_capsule_placement(Some(offscreen), &screens, CAPSULE_SIZE).unwrap();
-        assert_eq!(placement, default_capsule_placement(screens[0], CAPSULE_SIZE));
+        assert_eq!(
+            placement,
+            default_capsule_placement(screens[0], CAPSULE_SIZE)
+        );
 
         // 副屏还在时同一坐标依然有效。
         let with_second = [screen(0.0, 0.0), screen(1440.0, 0.0)];
@@ -3002,8 +3005,7 @@ mod tests {
     fn confirm_state_keeps_the_capsule_bottom_edge_in_place() {
         let parked = default_capsule_placement(screen(0.0, 0.0), CAPSULE_SIZE);
         // 变高：下边缘不动，所以整体上移，不会捅出屏幕底部。
-        let expanded =
-            bottom_anchored_placement(parked, CAPSULE_SIZE.1, CAPSULE_CONFIRM_SIZE.1);
+        let expanded = bottom_anchored_placement(parked, CAPSULE_SIZE.1, CAPSULE_CONFIRM_SIZE.1);
         assert_eq!(
             expanded.y + CAPSULE_CONFIRM_SIZE.1,
             parked.y + CAPSULE_SIZE.1
@@ -3020,7 +3022,10 @@ mod tests {
     fn resized_capsule_is_pulled_back_inside_the_screen() {
         let screen = screen(0.0, 0.0);
         // 用户把胶囊拖到贴着屏幕右下角，展开后会越界。
-        let dragged = CapsulePlacement { x: 1400.0, y: 880.0 };
+        let dragged = CapsulePlacement {
+            x: 1400.0,
+            y: 880.0,
+        };
         let clamped = clamp_placement(dragged, screen, CAPSULE_CONFIRM_SIZE);
         assert_eq!(clamped.x, 1440.0 - CAPSULE_CONFIRM_SIZE.0);
         assert_eq!(clamped.y, 900.0 - CAPSULE_CONFIRM_SIZE.1);

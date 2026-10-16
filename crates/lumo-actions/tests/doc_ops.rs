@@ -79,7 +79,9 @@ async fn parse_returns_docir_inline_with_counts() {
 #[tokio::test]
 async fn limit_truncates_and_reports_it() {
     let dir = TempDir::new().unwrap();
-    let body = (0..10).map(|i| para(&format!("段落{i}"))).collect::<String>();
+    let body = (0..10)
+        .map(|i| para(&format!("段落{i}")))
+        .collect::<String>();
     let path = write_docx(&dir, "many.docx", &body);
 
     let out = run_with(
@@ -138,7 +140,10 @@ async fn file_output_needs_fs_write_and_keeps_the_result_small() {
     .unwrap();
 
     // step result 里不该再有整份 DocIR —— 大文档正是靠这条避免撑爆上下文
-    assert!(out.get("blocks").is_none(), "file 模式不该内联 blocks: {out}");
+    assert!(
+        out.get("blocks").is_none(),
+        "file 模式不该内联 blocks: {out}"
+    );
     assert_eq!(out["counts"]["blocks"], 1);
     assert!(out_path.exists());
     let written: serde_json::Value =

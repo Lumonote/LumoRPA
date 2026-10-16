@@ -94,7 +94,10 @@ async fn remote_engine_round_trips_through_a_real_endpoint() {
     // 请求体应带 base64 图像与语言列表
     let body = received.recv().unwrap();
     let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(sent["image"].as_str().unwrap().len() > 4, "图像应 base64 编码后发送");
+    assert!(
+        sent["image"].as_str().unwrap().len() > 4,
+        "图像应 base64 编码后发送"
+    );
     assert!(sent["lang"].is_array());
 }
 
@@ -139,7 +142,10 @@ async fn remote_engine_still_honours_the_network_capability() {
 
 #[tokio::test]
 async fn remote_errors_are_surfaced_not_swallowed() {
-    let (url, _rx) = spawn_ocr_server("500 Internal Server Error", r#"{"error":"model overloaded"}"#);
+    let (url, _rx) = spawn_ocr_server(
+        "500 Internal Server Error",
+        r#"{"error":"model overloaded"}"#,
+    );
     let dir = TempDir::new().unwrap();
     let err = run_with(
         "doc.ocr",
@@ -208,7 +214,14 @@ async fn doc_parse_reports_when_a_scan_needs_ocr_but_no_engine_is_available() {
                 Operation::new("q", vec![]),
                 Operation::new(
                     "cm",
-                    vec![595.into(), 0.into(), 0.into(), 842.into(), 0.into(), 0.into()],
+                    vec![
+                        595.into(),
+                        0.into(),
+                        0.into(),
+                        842.into(),
+                        0.into(),
+                        0.into(),
+                    ],
                 ),
                 Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
                 Operation::new("Q", vec![]),

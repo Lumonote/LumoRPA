@@ -178,7 +178,10 @@ mod tests {
     fn legacy_ole2_is_detected_as_unknown_not_misparsed() {
         // .doc/.xls 的 CFB 头。必须落到 Unknown 分支给出转换建议,
         // 而不是被当成别的格式硬解出垃圾。
-        assert_eq!(sniff(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1]), Format::Unknown);
+        assert_eq!(
+            sniff(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1]),
+            Format::Unknown
+        );
     }
 
     #[test]
@@ -193,15 +196,23 @@ mod tests {
         assert!(err.to_string().contains("image.ocr"), "got: {err}");
 
         // 老二进制格式要给出转换建议,而不是硬解出垃圾
-        let err = parse_bytes(&[0xD0, 0xCF, 0x11, 0xE0], "/tmp/a.doc", &ParseOptions::default())
-            .unwrap_err();
+        let err = parse_bytes(
+            &[0xD0, 0xCF, 0x11, 0xE0],
+            "/tmp/a.doc",
+            &ParseOptions::default(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("LibreOffice"), "got: {err}");
     }
 
     #[test]
     fn a_malformed_pdf_fails_loudly_instead_of_returning_an_empty_document() {
-        let err = parse_bytes(b"%PDF-1.7\nnot really a pdf", "/tmp/a.pdf", &ParseOptions::default())
-            .unwrap_err();
+        let err = parse_bytes(
+            b"%PDF-1.7\nnot really a pdf",
+            "/tmp/a.pdf",
+            &ParseOptions::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, DocError::Container { .. } | DocError::Malformed { .. }),
             "got: {err:?}"

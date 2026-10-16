@@ -68,8 +68,14 @@ fn headings_come_from_outline_level_and_style_names() {
         .filter(|b| b.block_type == BlockType::Heading)
         .collect();
     assert_eq!(headings.len(), 2, "blocks={:?}", doc.blocks);
-    assert_eq!((headings[0].text.as_str(), headings[0].level), ("第一章", Some(1)));
-    assert_eq!((headings[1].text.as_str(), headings[1].level), ("第一节", Some(2)));
+    assert_eq!(
+        (headings[0].text.as_str(), headings[0].level),
+        ("第一章", Some(1))
+    );
+    assert_eq!(
+        (headings[1].text.as_str(), headings[1].level),
+        ("第一节", Some(2))
+    );
     // outline 应能直接导航
     assert_eq!(doc.outline.len(), 2);
 }
@@ -141,7 +147,10 @@ fn grid_span_and_vertical_merge_become_cell_spans() {
     assert_eq!(header.text, "合并表头");
 
     let merged = table.cell_at(1, 0).unwrap();
-    assert_eq!(merged.row_span, 2, "vMerge restart+continue 应累加成 row_span");
+    assert_eq!(
+        merged.row_span, 2,
+        "vMerge restart+continue 应累加成 row_span"
+    );
     assert_eq!(merged.text, "纵向合并");
 
     // 延续格不单独产出,否则下游会重复计数
@@ -176,7 +185,10 @@ fn tracked_deletions_are_dropped_with_a_warning() {
     let doc = parse(&[("word/document.xml", &document(&body))]);
     let text = doc.plain_text();
     assert!(text.contains("保留"));
-    assert!(!text.contains("被删除"), "删除线内容不该出现在正文里: {text}");
+    assert!(
+        !text.contains("被删除"),
+        "删除线内容不该出现在正文里: {text}"
+    );
     assert!(
         doc.diagnostics.warnings.iter().any(|w| w.contains("修订")),
         "丢弃内容必须留痕: {:?}",

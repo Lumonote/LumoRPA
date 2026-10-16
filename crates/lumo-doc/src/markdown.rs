@@ -92,10 +92,7 @@ pub fn table_to_markdown(table: &Table) -> String {
     };
 
     out.push_str(&format!("| {} |\n", header.join(" | ")));
-    out.push_str(&format!(
-        "| {} |\n",
-        vec!["---"; table.cols].join(" | ")
-    ));
+    out.push_str(&format!("| {} |\n", vec!["---"; table.cols].join(" | ")));
     for row in grid.iter().skip(body_start) {
         out.push_str(&format!("| {} |\n", row.join(" | ")));
     }

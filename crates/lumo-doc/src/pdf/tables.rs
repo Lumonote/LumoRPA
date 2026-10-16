@@ -132,10 +132,20 @@ mod tests {
     use super::*;
 
     fn h(y: f64, x0: f64, x1: f64) -> RuleLine {
-        RuleLine { x0, y0: y, x1, y1: y }
+        RuleLine {
+            x0,
+            y0: y,
+            x1,
+            y1: y,
+        }
     }
     fn v(x: f64, y0: f64, y1: f64) -> RuleLine {
-        RuleLine { x0: x, y0, x1: x, y1 }
+        RuleLine {
+            x0: x,
+            y0,
+            x1: x,
+            y1,
+        }
     }
     fn text(t: &str, x: f64, y: f64) -> Fragment {
         Fragment {
@@ -189,7 +199,11 @@ mod tests {
     #[test]
     fn too_few_lines_is_not_a_table() {
         // 两条横线一条竖线只是分隔符,不该被当成表格
-        let rules = vec![h(700.0, 50.0, 250.0), h(680.0, 50.0, 250.0), v(50.0, 680.0, 700.0)];
+        let rules = vec![
+            h(700.0, 50.0, 250.0),
+            h(680.0, 50.0, 250.0),
+            v(50.0, 680.0, 700.0),
+        ];
         let mut seq = 0;
         assert!(detect(&rules, &[], 0, 842.0, &mut seq).is_empty());
     }

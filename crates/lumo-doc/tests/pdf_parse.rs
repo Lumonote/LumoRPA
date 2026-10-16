@@ -172,7 +172,10 @@ fn ruled_grid_is_recovered_as_a_table() {
         .filter(|b| b.block_type == BlockType::Paragraph)
         .map(|b| b.text.clone())
         .collect();
-    assert!(!paragraph_text.contains("Server"), "表内容重复成段: {paragraph_text}");
+    assert!(
+        !paragraph_text.contains("Server"),
+        "表内容重复成段: {paragraph_text}"
+    );
 
     // 表格要有占位块维持阅读顺序
     let placeholder = doc
@@ -253,7 +256,14 @@ fn a_full_page_image_without_text_is_reported_as_ocr_able() {
         Operation::new("q", vec![]),
         Operation::new(
             "cm",
-            vec![595.into(), 0.into(), 0.into(), 842.into(), 0.into(), 0.into()],
+            vec![
+                595.into(),
+                0.into(),
+                0.into(),
+                842.into(),
+                0.into(),
+                0.into(),
+            ],
         ),
         Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
         Operation::new("Q", vec![]),

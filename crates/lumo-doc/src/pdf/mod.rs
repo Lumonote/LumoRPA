@@ -198,7 +198,10 @@ pub fn parse(
         .map(|work| (work.lines.clone(), work.height))
         .collect();
     let running_heads = layout::running_head_texts(&all_lines);
-    let flat: Vec<layout::Line> = all_lines.iter().flat_map(|(lines, _)| lines.clone()).collect();
+    let flat: Vec<layout::Line> = all_lines
+        .iter()
+        .flat_map(|(lines, _)| lines.clone())
+        .collect();
     let body = layout::body_font_size(&flat);
 
     let mut order = 0usize;
@@ -289,10 +292,7 @@ fn page_geometry(pdf: &PdfDocument, page_id: (u32, u16)) -> (f64, f64, i32) {
                 rotation = value as i32;
             }
         }
-        current = dict
-            .get(b"Parent")
-            .ok()
-            .and_then(|o| o.as_reference().ok());
+        current = dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
     }
     // 缺省 A4(595.3 × 841.9pt)
     let (width, height) = media_box.unwrap_or((595.3, 841.9));
@@ -308,7 +308,12 @@ fn object_as_f64(object: &lopdf::Object) -> Option<f64> {
 }
 
 fn read_info(pdf: &PdfDocument, meta: &mut DocMeta) {
-    let Some(info_id) = pdf.trailer.get(b"Info").ok().and_then(|o| o.as_reference().ok()) else {
+    let Some(info_id) = pdf
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+    else {
         return;
     };
     let Ok(dict) = pdf.get_dictionary(info_id) else {

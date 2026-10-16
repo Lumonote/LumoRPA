@@ -43,7 +43,12 @@ impl OcrPageResult {
 /// OCR 的准确率不可能高过文档自带的文本层。
 pub fn apply_ocr(doc: &mut Document, results: &[OcrPageResult], coverage_threshold: f64) -> usize {
     let mut written = 0;
-    let mut order = doc.blocks.iter().map(|b| b.reading_order + 1).max().unwrap_or(0);
+    let mut order = doc
+        .blocks
+        .iter()
+        .map(|b| b.reading_order + 1)
+        .max()
+        .unwrap_or(0);
     let mut seq = doc.blocks.len();
 
     for result in results {
@@ -139,7 +144,11 @@ mod tests {
     #[test]
     fn ocr_blocks_declare_their_real_source_and_confidence() {
         let mut doc = doc_with_pages(&[0.0]);
-        let written = apply_ocr(&mut doc, &[result(0, "扫描出来的文字", Source::OcrNative)], 0.05);
+        let written = apply_ocr(
+            &mut doc,
+            &[result(0, "扫描出来的文字", Source::OcrNative)],
+            0.05,
+        );
         assert_eq!(written, 1);
         let block = &doc.blocks[0];
         assert_eq!(block.source, Source::OcrNative);
@@ -154,7 +163,11 @@ mod tests {
     fn pages_that_already_have_text_are_never_overwritten() {
         // OCR 准确率不可能高过文本层 —— 有文本的页必须原样保留
         let mut doc = doc_with_pages(&[0.99]);
-        let written = apply_ocr(&mut doc, &[result(0, "OCR 猜的内容", Source::OcrNative)], 0.05);
+        let written = apply_ocr(
+            &mut doc,
+            &[result(0, "OCR 猜的内容", Source::OcrNative)],
+            0.05,
+        );
         assert_eq!(written, 0);
         assert!(doc.blocks.is_empty());
         assert!(doc
@@ -194,7 +207,13 @@ mod tests {
     #[test]
     fn ocr_blocks_continue_the_existing_reading_order() {
         let mut doc = doc_with_pages(&[0.0]);
-        doc.blocks.push(Block::text_layer("b1", BlockType::Heading, 0, 7, "已有标题"));
+        doc.blocks.push(Block::text_layer(
+            "b1",
+            BlockType::Heading,
+            0,
+            7,
+            "已有标题",
+        ));
         apply_ocr(&mut doc, &[result(0, "补充内容", Source::OcrNative)], 0.05);
         let ocr_block = doc.blocks.last().unwrap();
         assert_eq!(ocr_block.reading_order, 8, "阅读顺序应接在已有块之后");

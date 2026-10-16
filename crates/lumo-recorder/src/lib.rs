@@ -585,7 +585,9 @@ impl Recorder for BrowserRecorder {
         }
         // Inject the recorder script on every new document (handles SPA + navigations).
         if let Err(error) = page
-            .execute(AddScriptToEvaluateOnNewDocumentParams::new(recorder_injected_script()))
+            .execute(AddScriptToEvaluateOnNewDocumentParams::new(
+                recorder_injected_script(),
+            ))
             .await
         {
             cleanup_start_failure(browser, tasks, connected).await;

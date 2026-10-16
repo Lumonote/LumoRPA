@@ -28,7 +28,10 @@ pub struct Line {
 
 /// 把片段按基线聚成行,行内按 x 排序后拼接。
 pub fn cluster_lines(fragments: &[Fragment]) -> Vec<Line> {
-    let mut sorted: Vec<&Fragment> = fragments.iter().filter(|f| !f.text.trim().is_empty()).collect();
+    let mut sorted: Vec<&Fragment> = fragments
+        .iter()
+        .filter(|f| !f.text.trim().is_empty())
+        .collect();
     // y 降序(页面自上而下),同 y 按 x 升序
     sorted.sort_by(|a, b| {
         b.y.partial_cmp(&a.y)
@@ -137,7 +140,9 @@ pub fn running_head_texts(pages: &[(Vec<Line>, f64)]) -> std::collections::HashS
                 continue;
             }
             if line.text.chars().count() <= 40 {
-                *counts.entry(normalize_running_head(&line.text)).or_default() += 1;
+                *counts
+                    .entry(normalize_running_head(&line.text))
+                    .or_default() += 1;
             }
         }
     }
@@ -202,7 +207,12 @@ pub fn lines_to_blocks(
                 *order,
                 text.trim(),
             );
-            block.bbox = Some(BBox::new(x0, page_height - y_top, x1, page_height - y_bottom));
+            block.bbox = Some(BBox::new(
+                x0,
+                page_height - y_top,
+                x1,
+                page_height - y_bottom,
+            ));
             blocks.push(block);
             *order += 1;
         }
@@ -269,8 +279,8 @@ pub fn lines_to_blocks(
             .checked_sub(1)
             .map(|i| (lines[i].y - line.y).abs())
             .unwrap_or(0.0);
-        let starts_new_paragraph = pending.is_none()
-            || (median_gap > 0.0 && gap_to_prev > median_gap * PARAGRAPH_BREAK);
+        let starts_new_paragraph =
+            pending.is_none() || (median_gap > 0.0 && gap_to_prev > median_gap * PARAGRAPH_BREAK);
 
         if starts_new_paragraph {
             flush(&mut pending, &mut blocks, &mut order, block_seq);
@@ -327,7 +337,10 @@ mod tests {
     #[test]
     fn wide_gaps_within_a_line_become_a_space() {
         // 表格式排版:「总计」与数字之间有大空隙,不补空格会粘成一个词
-        let lines = cluster_lines(&[frag("总计", 10.0, 700.0, 12.0), frag("100", 200.0, 700.0, 12.0)]);
+        let lines = cluster_lines(&[
+            frag("总计", 10.0, 700.0, 12.0),
+            frag("100", 200.0, 700.0, 12.0),
+        ]);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].text.contains(' '), "got: {}", lines[0].text);
     }
@@ -373,13 +386,30 @@ mod tests {
         let page = |footer: &str| {
             (
                 vec![
-                    Line { text: "正文内容".into(), x0: 0.0, x1: 1.0, y: 700.0, font_size: 10.0 },
-                    Line { text: footer.into(), x0: 0.0, x1: 1.0, y: 40.0, font_size: 9.0 },
+                    Line {
+                        text: "正文内容".into(),
+                        x0: 0.0,
+                        x1: 1.0,
+                        y: 700.0,
+                        font_size: 10.0,
+                    },
+                    Line {
+                        text: footer.into(),
+                        x0: 0.0,
+                        x1: 1.0,
+                        y: 40.0,
+                        font_size: 9.0,
+                    },
                 ],
                 H,
             )
         };
-        let pages = vec![page("第 1 页"), page("第 2 页"), page("第 3 页"), page("第 4 页")];
+        let pages = vec![
+            page("第 1 页"),
+            page("第 2 页"),
+            page("第 3 页"),
+            page("第 4 页"),
+        ];
         let heads = running_head_texts(&pages);
         // 页码归一化后跨页重复 → 识别为页脚
         assert!(heads.contains(&normalize_running_head("第 5 页")));
@@ -404,13 +434,34 @@ mod tests {
     #[test]
     fn headings_are_marked_as_layout_inference_not_ground_truth() {
         let lines = vec![
-            Line { text: "大标题".into(), x0: 0.0, x1: 100.0, y: 700.0, font_size: 20.0 },
-            Line { text: "正文".into(), x0: 0.0, x1: 100.0, y: 680.0, font_size: 10.0 },
-            Line { text: "正文2".into(), x0: 0.0, x1: 100.0, y: 668.0, font_size: 10.0 },
+            Line {
+                text: "大标题".into(),
+                x0: 0.0,
+                x1: 100.0,
+                y: 700.0,
+                font_size: 20.0,
+            },
+            Line {
+                text: "正文".into(),
+                x0: 0.0,
+                x1: 100.0,
+                y: 680.0,
+                font_size: 10.0,
+            },
+            Line {
+                text: "正文2".into(),
+                x0: 0.0,
+                x1: 100.0,
+                y: 668.0,
+                font_size: 10.0,
+            },
         ];
         let mut seq = 0;
         let blocks = lines_to_blocks(&lines, 0, 842.0, 10.0, &Default::default(), 0, &mut seq);
-        let heading = blocks.iter().find(|b| b.block_type == BlockType::Heading).unwrap();
+        let heading = blocks
+            .iter()
+            .find(|b| b.block_type == BlockType::Heading)
+            .unwrap();
         assert_eq!(heading.source, Source::Layout);
         assert!(heading.confidence < 1.0, "启发式结论不能标成满置信");
         assert!(heading.bbox.is_some());

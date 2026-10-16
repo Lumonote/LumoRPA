@@ -390,8 +390,11 @@ pub fn walk_page(
             }
             // 描边/填充才让路径“生效”;仅构造不绘制的路径(如裁剪)不算框线
             "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
-                out.lines
-                    .extend(pending_segments.drain(..).filter(|l| l.is_horizontal() || l.is_vertical()));
+                out.lines.extend(
+                    pending_segments
+                        .drain(..)
+                        .filter(|l| l.is_horizontal() || l.is_vertical()),
+                );
                 current_point = None;
             }
             "n" => {

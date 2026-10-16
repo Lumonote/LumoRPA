@@ -47,8 +47,8 @@ pub fn parse(
     source: SourceInfo,
     collect_images: bool,
 ) -> Result<ParsedDocx, DocError> {
-    let mut zip =
-        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| DocError::container("docx", e.to_string()))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| DocError::container("docx", e.to_string()))?;
 
     let mut total: u64 = 0;
     for index in 0..zip.len() {
@@ -62,8 +62,8 @@ pub fn parse(
         });
     }
 
-    let document_xml =
-        read_text(&mut zip, DOCUMENT)?.ok_or_else(|| DocError::malformed(DOCUMENT, "missing part"))?;
+    let document_xml = read_text(&mut zip, DOCUMENT)?
+        .ok_or_else(|| DocError::malformed(DOCUMENT, "missing part"))?;
     let styles = match read_text(&mut zip, STYLES)? {
         Some(xml) => parse_styles(&xml)?,
         None => HashMap::new(),
@@ -179,7 +179,9 @@ fn parse_styles(xml: &str) -> Result<HashMap<String, u8>, DocError> {
             .read_event()
             .map_err(|e| DocError::malformed(STYLES, e.to_string()))?
         {
-            Event::Start(e) if e.name().as_ref() == b"w:style" => current_id = attr(&e, "w:styleId"),
+            Event::Start(e) if e.name().as_ref() == b"w:style" => {
+                current_id = attr(&e, "w:styleId")
+            }
             Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"w:name" => {
                 if let (Some(id), Some(name)) = (current_id.as_ref(), attr(&e, "w:val")) {
                     if let Some(level) = heading_level_from_name(&name) {
@@ -203,7 +205,10 @@ fn heading_level_from_name(name: &str) -> Option<u8> {
         Some(rest) => rest.to_string(),
         None => trimmed.strip_prefix("标题")?.to_string(),
     };
-    rest.trim().parse::<u8>().ok().filter(|n| (1..=9).contains(n))
+    rest.trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|n| (1..=9).contains(n))
 }
 
 fn parse_rels(xml: &str) -> Result<HashMap<String, String>, DocError> {
@@ -237,7 +242,9 @@ fn parse_core_props(xml: &str) -> Result<DocMeta, DocError> {
             .read_event()
             .map_err(|e| DocError::malformed(CORE_PROPS, e.to_string()))?
         {
-            Event::Start(e) => field = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned()),
+            Event::Start(e) => {
+                field = Some(String::from_utf8_lossy(e.name().as_ref()).into_owned())
+            }
             Event::Text(e) => {
                 let value = e
                     .unescape()
@@ -459,9 +466,14 @@ impl<'a> BodyParser<'a> {
             }
             b"w:instrText" => self.in_field_code = true,
             b"a:blip" => {
-                if let Some(target) = attr(e, "r:embed").and_then(|id| self.rels.get(&id).cloned()) {
+                if let Some(target) = attr(e, "r:embed").and_then(|id| self.rels.get(&id).cloned())
+                {
                     let id = format!("i{}", self.images.len() + 1);
-                    let format = target.rsplit('.').next().unwrap_or("bin").to_ascii_lowercase();
+                    let format = target
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("bin")
+                        .to_ascii_lowercase();
                     self.images.push(Image {
                         id: id.clone(),
                         page: 0,

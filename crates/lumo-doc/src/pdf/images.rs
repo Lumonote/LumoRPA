@@ -80,8 +80,16 @@ pub fn extract_page_images(
 
         let name_string = String::from_utf8_lossy(name).into_owned();
         let filters = filter_names(dict);
-        let width = dict.get(b"Width").and_then(|o| o.as_i64()).ok().map(|v| v as u32);
-        let height = dict.get(b"Height").and_then(|o| o.as_i64()).ok().map(|v| v as u32);
+        let width = dict
+            .get(b"Width")
+            .and_then(|o| o.as_i64())
+            .ok()
+            .map(|v| v as u32);
+        let height = dict
+            .get(b"Height")
+            .and_then(|o| o.as_i64())
+            .ok()
+            .map(|v| v as u32);
 
         // 只有 JPEG 能原样取出;其余编码需要解码器,当前不支持
         let format = match filters.last().map(|f| f.as_str()) {
