@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use lumo_core::CancelToken;
@@ -16,11 +20,22 @@ use crate::{
 #[serde(tag = "decision", rename_all = "camelCase")]
 pub enum LoopDecision {
     Complete,
-    Retry { node_id: String },
-    Replace { node_id: String, capability_id: String },
-    Replan { reason: String },
-    AskUser { question: String },
-    Fail { reason: String },
+    Retry {
+        node_id: String,
+    },
+    Replace {
+        node_id: String,
+        capability_id: String,
+    },
+    Replan {
+        reason: String,
+    },
+    AskUser {
+        question: String,
+    },
+    Fail {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +68,14 @@ impl LoopReport {
         decisions: Vec<LoopDecision>,
         error: impl Into<Option<String>>,
     ) -> Self {
-        Self { run_id, status, outputs, attempts, decisions, error: error.into() }
+        Self {
+            run_id,
+            status,
+            outputs,
+            attempts,
+            decisions,
+            error: error.into(),
+        }
     }
 }
 
@@ -86,7 +108,12 @@ impl LoopEngine {
         profile: AgentProfile,
         adapters: AdapterRegistry,
     ) -> Self {
-        Self { catalog, profile, adapters, events: None }
+        Self {
+            catalog,
+            profile,
+            adapters,
+            events: None,
+        }
     }
 
     pub fn with_event_publisher(mut self, events: Arc<dyn AgentEventPublisher>) -> Self {
@@ -109,7 +136,9 @@ impl LoopEngine {
                     LoopStatus::Failed,
                     BTreeMap::new(),
                     BTreeMap::new(),
-                    vec![LoopDecision::Fail { reason: error.to_string() }],
+                    vec![LoopDecision::Fail {
+                        reason: error.to_string(),
+                    }],
                     Some(error.to_string()),
                 );
             }
@@ -141,7 +170,8 @@ impl LoopEngine {
         let max_parallel = self.profile.max_parallel.clamp(1, 4) as usize;
         let mut running = JoinSet::new();
 
-        self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunStarted)).await;
+        self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunStarted))
+            .await;
         for node in nodes.values() {
             self.emit(
                 AgentEventDraft::new(&run_id, AgentEventKind::NodeQueued)
@@ -154,7 +184,8 @@ impl LoopEngine {
         loop {
             if cancel.is_cancelled() {
                 running.abort_all();
-                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCancelled)).await;
+                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCancelled))
+                    .await;
                 return LoopReport::terminal(
                     run_id,
                     LoopStatus::Cancelled,
@@ -166,7 +197,8 @@ impl LoopEngine {
             }
             if completed.len() == nodes.len() {
                 decisions.push(LoopDecision::Complete);
-                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCompleted)).await;
+                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCompleted))
+                    .await;
                 return LoopReport::terminal(
                     run_id,
                     LoopStatus::Completed,
@@ -178,12 +210,15 @@ impl LoopEngine {
             }
 
             while running.len() < max_parallel {
-                let ready = pending.iter().find(|id| {
-                    nodes[*id]
-                        .depends_on
-                        .iter()
-                        .all(|dependency| completed.contains(dependency))
-                }).cloned();
+                let ready = pending
+                    .iter()
+                    .find(|id| {
+                        nodes[*id]
+                            .depends_on
+                            .iter()
+                            .all(|dependency| completed.contains(dependency))
+                    })
+                    .cloned();
                 let Some(node_id) = ready else { break };
                 if let Err(error) = budget.lock().await.reserve_step() {
                     running.abort_all();
@@ -233,7 +268,9 @@ impl LoopEngine {
                         adapter.invoke(request, context),
                     )
                     .await
-                    .map_err(|_| InvocationError::Timeout { duration_ms: node.timeout_ms })
+                    .map_err(|_| InvocationError::Timeout {
+                        duration_ms: node.timeout_ms,
+                    })
                     .and_then(|result| result);
                     (node, attempt_number, result)
                 });
@@ -276,7 +313,9 @@ impl LoopEngine {
                         BudgetExceeded::Runtime { limit_ms: 0 },
                     );
                 }
-            }) else { continue };
+            }) else {
+                continue;
+            };
             let (node, attempt, result) = match joined {
                 Ok(result) => result,
                 Err(error) => {
@@ -317,7 +356,9 @@ impl LoopEngine {
                     running.abort_all();
                 }
                 Err(error) if attempt <= node.retry_limit => {
-                    decisions.push(LoopDecision::Retry { node_id: node.id.clone() });
+                    decisions.push(LoopDecision::Retry {
+                        node_id: node.id.clone(),
+                    });
                     pending.insert(node.id.clone());
                     self.emit(
                         AgentEventDraft::new(&run_id, AgentEventKind::NodeFailed)
@@ -328,14 +369,17 @@ impl LoopEngine {
                 }
                 Err(error) => {
                     running.abort_all();
-                    decisions.push(LoopDecision::Fail { reason: error.to_string() });
+                    decisions.push(LoopDecision::Fail {
+                        reason: error.to_string(),
+                    });
                     self.emit(
                         AgentEventDraft::new(&run_id, AgentEventKind::NodeFailed)
                             .node_id(&node.id)
                             .payload(json!({"attempt": attempt, "error": error.to_string()})),
                     )
                     .await;
-                    self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunFailed)).await;
+                    self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunFailed))
+                        .await;
                     return LoopReport::terminal(
                         run_id,
                         LoopStatus::Failed,
@@ -363,7 +407,9 @@ fn budget_report(
     mut decisions: Vec<LoopDecision>,
     error: BudgetExceeded,
 ) -> LoopReport {
-    decisions.push(LoopDecision::Fail { reason: error.to_string() });
+    decisions.push(LoopDecision::Fail {
+        reason: error.to_string(),
+    });
     LoopReport::terminal(
         run_id,
         LoopStatus::BudgetExceeded,

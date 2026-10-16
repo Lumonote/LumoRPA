@@ -34,8 +34,8 @@ pub fn evaluate_improvement(
     baseline: &EvaluationMetrics,
     candidate: &EvaluationMetrics,
 ) -> EvaluationReport {
-    let quality_delta = i64::from(candidate.quality_score_milli)
-        - i64::from(baseline.quality_score_milli);
+    let quality_delta =
+        i64::from(candidate.quality_score_milli) - i64::from(baseline.quality_score_milli);
     let success_delta = success_rate_milli(candidate) - success_rate_milli(baseline);
     let latency_delta = signed_delta(candidate.latency_ms, baseline.latency_ms);
     let cost_delta = signed_delta(candidate.cost_usd_micro, baseline.cost_usd_micro);

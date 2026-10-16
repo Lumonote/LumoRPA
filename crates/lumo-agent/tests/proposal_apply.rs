@@ -1,5 +1,5 @@
 use lumo_agent::{
-    ApprovalRecord, ApplyError, ImprovementProposal, ImprovementTarget, VersionedArtifact,
+    ApplyError, ApprovalRecord, ImprovementProposal, ImprovementTarget, VersionedArtifact,
 };
 use serde_json::json;
 
@@ -45,9 +45,7 @@ fn apply_requires_matching_proposal_hash_base_and_approver() {
             ..approval.clone()
         },
     ] {
-        assert!(artifact
-            .apply(&proposal, &bad, "alice")
-            .is_err());
+        assert!(artifact.apply(&proposal, &bad, "alice").is_err());
         assert_eq!(artifact.active_content(), &json!({"text": "old prompt"}));
     }
 }
@@ -61,7 +59,10 @@ fn apply_creates_new_version_and_rollback_restores_previous_active_version() {
 
     let applied = artifact.apply(&proposal, &approval, "alice").unwrap();
     assert_ne!(applied.version_hash, old_hash);
-    assert_eq!(applied.previous_version_hash.as_deref(), Some(old_hash.as_str()));
+    assert_eq!(
+        applied.previous_version_hash.as_deref(),
+        Some(old_hash.as_str())
+    );
     assert_eq!(artifact.active_content(), &json!({"text": "new prompt"}));
 
     let restored = artifact.rollback(&applied.version_hash).unwrap();

@@ -1,6 +1,4 @@
-use lumo_agent::{
-    ControlPlaneField, ContentEnvelope, ContentOrigin, TrustError, TrustGuard,
-};
+use lumo_agent::{ContentEnvelope, ContentOrigin, ControlPlaneField, TrustError, TrustGuard};
 
 #[test]
 fn external_content_is_origin_tagged_escaped_and_quoted_as_data() {

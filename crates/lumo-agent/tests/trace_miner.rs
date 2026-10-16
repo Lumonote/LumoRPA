@@ -1,6 +1,4 @@
-use lumo_agent::{
-    ContentOrigin, ImprovementTarget, ProposalBuilder, TraceMiner, TraceRecord,
-};
+use lumo_agent::{ContentOrigin, ImprovementTarget, ProposalBuilder, TraceMiner, TraceRecord};
 use serde_json::json;
 
 #[test]

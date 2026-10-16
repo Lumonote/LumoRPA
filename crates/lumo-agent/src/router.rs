@@ -41,7 +41,11 @@ impl Router {
         profile: AgentProfile,
         planner: Arc<dyn PlannerBackend>,
     ) -> Self {
-        Self { catalog, profile, planner }
+        Self {
+            catalog,
+            profile,
+            planner,
+        }
     }
 
     pub async fn route(&self, utterance: &str) -> Result<RouteOutcome, String> {
@@ -59,7 +63,12 @@ impl Router {
             return Ok(RouteOutcome::Plan(single_node_plan(utterance, &exact[0])));
         }
         if exact.len() > 1 {
-            return Ok(clarify(exact.iter().map(|capability| capability.id.clone()).collect()));
+            return Ok(clarify(
+                exact
+                    .iter()
+                    .map(|capability| capability.id.clone())
+                    .collect(),
+            ));
         }
 
         let mut ranked = self
@@ -80,15 +89,27 @@ impl Router {
         });
 
         if let Some(top) = ranked.first() {
-            let gap = top.score - ranked.get(1).map(|candidate| candidate.score).unwrap_or(0.0);
+            let gap = top.score
+                - ranked
+                    .get(1)
+                    .map(|candidate| candidate.score)
+                    .unwrap_or(0.0);
             if top.score >= 0.75 && gap >= 0.15 {
                 if let Some(capability) = self.catalog.get(&top.capability_id) {
                     return Ok(RouteOutcome::Plan(single_node_plan(utterance, &capability)));
                 }
             }
-            if top.score >= 0.5 && ranked.get(1).is_some_and(|next| top.score - next.score < 0.15) {
+            if top.score >= 0.5
+                && ranked
+                    .get(1)
+                    .is_some_and(|next| top.score - next.score < 0.15)
+            {
                 return Ok(clarify(
-                    ranked.iter().take(2).map(|candidate| candidate.capability_id.clone()).collect(),
+                    ranked
+                        .iter()
+                        .take(2)
+                        .map(|candidate| candidate.capability_id.clone())
+                        .collect(),
                 ));
             }
         }
@@ -143,7 +164,9 @@ fn control_intent(utterance: &str) -> Option<SystemControlIntent> {
         "pause" | "暂停" => Some(SystemControlIntent::Pause),
         "resume" | "continue" | "继续" => Some(SystemControlIntent::Resume),
         "stop speaking" | "别说了" => Some(SystemControlIntent::StopSpeaking),
-        "open mission control" | "打开任务中心" => Some(SystemControlIntent::OpenMissionControl),
+        "open mission control" | "打开任务中心" => {
+            Some(SystemControlIntent::OpenMissionControl)
+        }
         _ => None,
     }
 }

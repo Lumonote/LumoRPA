@@ -60,7 +60,9 @@ impl InvocationAdapter for SkillAdapter {
             }
         };
         if !report.success {
-            return Err(InvocationError::Failed("skill completed unsuccessfully".into()));
+            return Err(InvocationError::Failed(
+                "skill completed unsuccessfully".into(),
+            ));
         }
         Ok(InvocationResult::new(
             report.outputs.unwrap_or_default(),

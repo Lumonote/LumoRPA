@@ -10,6 +10,7 @@ description = "Unified capability descriptors for the LumoRPA agent platform"
 async-trait.workspace = true
 chrono.workspace = true
 cron.workspace = true
+chrono-tz.workspace = true
 lumo-actions.workspace = true
 lumo-core.workspace = true
 lumo-dsl.workspace = true

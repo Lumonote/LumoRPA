@@ -18,11 +18,7 @@ pub struct AgentPlan {
 }
 
 impl AgentPlan {
-    pub fn new(
-        id: impl Into<String>,
-        objective: impl Into<String>,
-        nodes: Vec<PlanNode>,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, objective: impl Into<String>, nodes: Vec<PlanNode>) -> Self {
         Self {
             id: id.into(),
             objective: objective.into(),

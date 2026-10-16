@@ -11,7 +11,9 @@ use serde_json::json;
 fn capability(id: &str, alias: &str) -> CapabilityDescriptor {
     let mut descriptor = CapabilityDescriptor {
         id: id.into(),
-        source: CapabilitySource::Flow { path: format!("/{id}") },
+        source: CapabilitySource::Flow {
+            path: format!("/{id}"),
+        },
         name: id.into(),
         description: format!("perform {alias}"),
         input_schema: json!({"type": "object"}),
@@ -37,7 +39,10 @@ impl PlannerBackend for FakePlanner {
         utterance: &str,
         candidates: Vec<RankedCandidate>,
     ) -> Result<AgentPlan, String> {
-        self.seen.lock().unwrap().extend(candidates.iter().map(|c| c.capability_id.clone()));
+        self.seen
+            .lock()
+            .unwrap()
+            .extend(candidates.iter().map(|c| c.capability_id.clone()));
         let id = candidates.first().unwrap().capability_id.clone();
         Ok(AgentPlan::new(
             "ai-plan",
@@ -64,28 +69,47 @@ fn router(capabilities: Vec<CapabilityDescriptor>, planner: Arc<FakePlanner>) ->
 
 #[tokio::test]
 async fn control_precedes_alias_and_exact_alias_precedes_ai() {
-    let planner = Arc::new(FakePlanner { seen: Mutex::new(vec![]) });
+    let planner = Arc::new(FakePlanner {
+        seen: Mutex::new(vec![]),
+    });
     let control_router = router(vec![capability("cancel-flow", "cancel")], planner.clone());
-    assert_eq!(control_router.route("cancel").await.unwrap(), RouteOutcome::Control(SystemControlIntent::Cancel));
+    assert_eq!(
+        control_router.route("cancel").await.unwrap(),
+        RouteOutcome::Control(SystemControlIntent::Cancel)
+    );
 
     let alias_router = router(vec![capability("orders", "查订单")], planner.clone());
-    assert!(matches!(alias_router.route("查订单").await.unwrap(), RouteOutcome::Plan(_)));
+    assert!(matches!(
+        alias_router.route("查订单").await.unwrap(),
+        RouteOutcome::Plan(_)
+    ));
     assert!(planner.seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn ambiguous_alias_clarifies_and_ai_only_sees_filtered_candidates() {
-    let planner = Arc::new(FakePlanner { seen: Mutex::new(vec![]) });
+    let planner = Arc::new(FakePlanner {
+        seen: Mutex::new(vec![]),
+    });
     let ambiguous_router = router(
         vec![capability("a", "运行"), capability("b", "运行")],
         planner.clone(),
     );
-    assert!(matches!(ambiguous_router.route("运行").await.unwrap(), RouteOutcome::Clarify { .. }));
+    assert!(matches!(
+        ambiguous_router.route("运行").await.unwrap(),
+        RouteOutcome::Clarify { .. }
+    ));
 
     let mut disabled = capability("hidden", "secret");
     disabled.enabled = false;
     disabled.refresh_version_hash();
-    let ai_router = router(vec![capability("visible", "orders"), disabled], planner.clone());
-    assert!(matches!(ai_router.route("something unrelated").await.unwrap(), RouteOutcome::Plan(_)));
+    let ai_router = router(
+        vec![capability("visible", "orders"), disabled],
+        planner.clone(),
+    );
+    assert!(matches!(
+        ai_router.route("something unrelated").await.unwrap(),
+        RouteOutcome::Plan(_)
+    ));
     assert_eq!(*planner.seen.lock().unwrap(), vec!["visible"]);
 }

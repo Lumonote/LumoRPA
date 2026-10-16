@@ -65,7 +65,8 @@ impl ImprovementProposal {
         validate_patch(&patch)?;
         let id = id.into();
         let base_version_hash = base_version_hash.into();
-        if id.trim().is_empty() || base_version_hash.trim().is_empty() || source_run_ids.is_empty() {
+        if id.trim().is_empty() || base_version_hash.trim().is_empty() || source_run_ids.is_empty()
+        {
             return Err(ImprovementError::InvalidProposal(
                 "id, source runs and base version are required".into(),
             ));

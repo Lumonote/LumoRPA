@@ -1,6 +1,6 @@
 use lumo_agent::{
-    validate_dag, AgentBudget, AgentEventDraft, AgentEventKind, EventSequence, PlanError,
-    AgentPlan, PlanNode, RiskLevel,
+    validate_dag, AgentBudget, AgentEventDraft, AgentEventKind, AgentPlan, EventSequence,
+    PlanError, PlanNode, RiskLevel,
 };
 use serde_json::json;
 
@@ -19,7 +19,11 @@ fn node(id: &str, depends_on: &[&str]) -> PlanNode {
 
 #[test]
 fn rejects_cycles_and_unknown_dependencies() {
-    let cyclic = AgentPlan::new("plan-1", "cycle", vec![node("a", &["b"]), node("b", &["a"])]);
+    let cyclic = AgentPlan::new(
+        "plan-1",
+        "cycle",
+        vec![node("a", &["b"]), node("b", &["a"])],
+    );
     assert!(matches!(validate_dag(&cyclic), Err(PlanError::Cycle(_))));
 
     let missing = AgentPlan::new("plan-2", "missing", vec![node("a", &["ghost"])]);
@@ -50,5 +54,12 @@ fn hard_budget_exhaustion_never_overcommits() {
     budget.charge_usage(60, 20).unwrap();
     assert_eq!(budget.charge_usage(41, 0).unwrap_err().limit(), "tokens");
     assert_eq!(budget.charge_usage(0, 31).unwrap_err().limit(), "cost");
-    assert_eq!((budget.steps_used(), budget.tokens_used(), budget.cost_used_usd_micro()), (2, 60, 20));
+    assert_eq!(
+        (
+            budget.steps_used(),
+            budget.tokens_used(),
+            budget.cost_used_usd_micro()
+        ),
+        (2, 60, 20)
+    );
 }

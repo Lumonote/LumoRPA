@@ -13,7 +13,10 @@ fn only_explicit_improvement_targets_are_allowed() {
         "skill_patch",
     ];
     for kind in allowed {
-        assert!(ImprovementTarget::from_kind(kind, "target-1").is_ok(), "{kind}");
+        assert!(
+            ImprovementTarget::from_kind(kind, "target-1").is_ok(),
+            "{kind}"
+        );
     }
 
     for forbidden in [
@@ -52,7 +55,10 @@ fn proposal_rejects_control_plane_patch_keys() {
             "base-v1",
             ContentOrigin::Model,
         );
-        assert!(matches!(result, Err(ImprovementError::ForbiddenPatchKey(_))));
+        assert!(matches!(
+            result,
+            Err(ImprovementError::ForbiddenPatchKey(_))
+        ));
     }
 }
 

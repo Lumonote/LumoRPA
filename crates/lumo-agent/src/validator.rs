@@ -28,15 +28,16 @@ impl<'a> PlanValidator<'a> {
         validate_dag(&plan)?;
         let mut approval_required = BTreeSet::new();
         for node in &plan.nodes {
-            let capability = self
-                .catalog
-                .get(&node.capability_id)
-                .ok_or_else(|| PlanValidationError::UnknownCapability(node.capability_id.clone()))?;
+            let capability = self.catalog.get(&node.capability_id).ok_or_else(|| {
+                PlanValidationError::UnknownCapability(node.capability_id.clone())
+            })?;
             if !capability.enabled
                 || (!self.profile.visible_capabilities.is_empty()
                     && !self.profile.visible_capabilities.contains(&capability.id))
             {
-                return Err(PlanValidationError::InvisibleCapability(capability.id.clone()));
+                return Err(PlanValidationError::InvisibleCapability(
+                    capability.id.clone(),
+                ));
             }
             validate_json_schema(&capability.input_schema, &node.arguments).map_err(|reason| {
                 PlanValidationError::InvalidArguments {

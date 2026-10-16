@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 use lumo_agent::{
-    crash_recovery_disposition, AgentJob, AgentPlan, JobSchedule, JobState, PlanNode,
-    RecoveryDisposition, RecoveryNode, RiskLevel,
+    crash_recovery_disposition, AgentJob, AgentPlan, JobSchedule, JobState, MisfirePolicy,
+    PlanNode, RecoveryDisposition, RecoveryNode, RiskLevel,
 };
 use serde_json::json;
 
@@ -69,6 +69,61 @@ fn invalid_cron_and_empty_idempotency_keys_are_rejected() {
     assert!(JobSchedule::cron("not cron").is_err());
     let now = Utc.with_ymd_and_hms(2026, 7, 11, 12, 0, 0).unwrap();
     assert!(AgentJob::new("job-1", "  ", plan(), JobSchedule::one_shot(now), now).is_err());
+}
+
+#[test]
+fn cron_next_after_honors_timezone() {
+    // 2026-01-01 00:00 UTC == 08:00 Asia/Shanghai — the next local 09:00 is
+    // one hour away, while the next UTC 09:00 is nine hours away.
+    let after = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let local = JobSchedule::cron_in(
+        "0 0 9 * * *",
+        Some("Asia/Shanghai".into()),
+        MisfirePolicy::CatchUpOnce,
+    )
+    .unwrap();
+    assert_eq!(
+        local.next_after(after).unwrap(),
+        Some(Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap())
+    );
+    let utc = JobSchedule::cron("0 0 9 * * *").unwrap();
+    assert_eq!(
+        utc.next_after(after).unwrap(),
+        Some(Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap())
+    );
+}
+
+#[test]
+fn cron_in_rejects_unknown_timezone() {
+    assert!(JobSchedule::cron_in(
+        "0 */5 * * * *",
+        Some("Mars/Olympus".into()),
+        MisfirePolicy::Skip
+    )
+    .is_err());
+}
+
+#[test]
+fn legacy_cron_json_defaults_timezone_and_misfire() {
+    let schedule: JobSchedule =
+        serde_json::from_value(json!({ "kind": "cron", "expression": "0 */5 * * * *" })).unwrap();
+    assert_eq!(schedule.misfire(), MisfirePolicy::CatchUpOnce);
+    match schedule {
+        JobSchedule::Cron { timezone, .. } => assert!(timezone.is_none()),
+        other => panic!("expected cron schedule, got {other:?}"),
+    }
+}
+
+#[test]
+fn misfire_policy_uses_stable_wire_names() {
+    assert_eq!(
+        serde_json::to_value(MisfirePolicy::Skip).unwrap(),
+        json!("skip")
+    );
+    assert_eq!(
+        serde_json::from_value::<MisfirePolicy>(json!("catch_up_once")).unwrap(),
+        MisfirePolicy::CatchUpOnce
+    );
 }
 
 #[test]

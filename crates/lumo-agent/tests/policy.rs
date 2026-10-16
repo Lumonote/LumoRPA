@@ -40,8 +40,14 @@ fn l0_and_l1_follow_profile_rules() {
     let l1 = capability("local-read", RiskLevel::L1);
     let mut safe = profile(&[l0.clone(), l1.clone()]);
 
-    assert_eq!(evaluate_node(&node("a", "read", RiskLevel::L0), &l0, &safe), PolicyDecision::Allow);
-    assert_eq!(evaluate_node(&node("b", "local-read", RiskLevel::L1), &l1, &safe), PolicyDecision::Allow);
+    assert_eq!(
+        evaluate_node(&node("a", "read", RiskLevel::L0), &l0, &safe),
+        PolicyDecision::Allow
+    );
+    assert_eq!(
+        evaluate_node(&node("b", "local-read", RiskLevel::L1), &l1, &safe),
+        PolicyDecision::Allow
+    );
 
     safe.permission_rules.push(PermissionRule {
         capability_pattern: "local-*".into(),
@@ -90,7 +96,11 @@ fn risk_cannot_be_understated_or_lowered_during_replan() {
     let mut approved = BTreeSet::new();
     approved.insert("a".into());
     let snapshot = ApprovalSnapshot::capture(&old, &[dangerous], approved);
-    let new = AgentPlan::new("p2", "delete", vec![node("a", "replacement", RiskLevel::L1)]);
+    let new = AgentPlan::new(
+        "p2",
+        "delete",
+        vec![node("a", "replacement", RiskLevel::L1)],
+    );
 
     assert!(matches!(
         validate_replan(&old, &new, &snapshot),

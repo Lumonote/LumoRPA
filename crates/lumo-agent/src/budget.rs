@@ -44,11 +44,7 @@ impl AgentBudget {
         Ok(())
     }
 
-    pub fn charge_usage(
-        &mut self,
-        tokens: u64,
-        cost_usd_micro: u64,
-    ) -> Result<(), BudgetExceeded> {
+    pub fn charge_usage(&mut self, tokens: u64, cost_usd_micro: u64) -> Result<(), BudgetExceeded> {
         self.check_runtime()?;
         let next_tokens = self.tokens_used.saturating_add(tokens);
         if next_tokens > self.max_tokens {

@@ -73,9 +73,8 @@ impl TraceMiner {
             aggregate.runs += 1;
             aggregate.successes += u32::from(record.success);
             aggregate.retries = aggregate.retries.saturating_add(record.retry_count);
-            aggregate.total_latency_ms = aggregate
-                .total_latency_ms
-                .saturating_add(record.latency_ms);
+            aggregate.total_latency_ms =
+                aggregate.total_latency_ms.saturating_add(record.latency_ms);
             aggregate.total_cost_usd_micro = aggregate
                 .total_cost_usd_micro
                 .saturating_add(record.cost_usd_micro);
@@ -84,7 +83,10 @@ impl TraceMiner {
                 aggregate.manual_corrections.push(redact_text(correction));
             }
             if let Some(replacement) = &record.replacement_capability {
-                *aggregate.replacements.entry(replacement.clone()).or_default() += 1;
+                *aggregate
+                    .replacements
+                    .entry(replacement.clone())
+                    .or_default() += 1;
             }
         }
         summary.source_run_ids.sort();

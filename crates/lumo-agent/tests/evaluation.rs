@@ -51,14 +51,7 @@ fn evaluation_reports_quality_success_latency_cost_and_permission_deltas() {
 #[test]
 fn permission_expansion_or_metric_regression_fails_evaluation() {
     let baseline = metrics(700, 8, 10, 500, 50, &["orders:read"]);
-    let candidate = metrics(
-        650,
-        7,
-        10,
-        700,
-        90,
-        &["orders:read", "vault:read"],
-    );
+    let candidate = metrics(650, 7, 10, 700, 90, &["orders:read", "vault:read"]);
     let report = evaluate_improvement(&proposal(), &baseline, &candidate);
 
     assert!(!report.passed);
@@ -66,5 +59,8 @@ fn permission_expansion_or_metric_regression_fails_evaluation() {
         report.permission_delta.added,
         BTreeSet::from(["vault:read".into()])
     );
-    assert!(report.failures.iter().any(|failure| failure.contains("permission")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure.contains("permission")));
 }

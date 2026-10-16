@@ -112,14 +112,25 @@ async fn serial_dependencies_and_outputs_are_deterministic() {
         fail_first: false,
     });
     let engine = engine(&["z", "a"], adapter.clone());
-    let plan = AgentPlan::new("run-1", "serial", vec![node("z", &[], 0, 100), node("a", &["z"], 0, 100)]);
+    let plan = AgentPlan::new(
+        "run-1",
+        "serial",
+        vec![node("z", &[], 0, 100), node("a", &["z"], 0, 100)],
+    );
     let report = engine
-        .execute(plan, AgentBudget::new(10, 10_000, 100, 100), CancelToken::new())
+        .execute(
+            plan,
+            AgentBudget::new(10, 10_000, 100, 100),
+            CancelToken::new(),
+        )
         .await;
 
     assert_eq!(report.status, LoopStatus::Completed);
     assert_eq!(*adapter.starts.lock().unwrap(), vec!["z", "a"]);
-    assert_eq!(report.outputs.keys().cloned().collect::<Vec<_>>(), vec!["a", "z"]);
+    assert_eq!(
+        report.outputs.keys().cloned().collect::<Vec<_>>(),
+        vec!["a", "z"]
+    );
 }
 
 #[tokio::test]
@@ -139,7 +150,11 @@ async fn parallelism_is_hard_capped_at_four() {
         ids.iter().map(|id| node(id, &[], 0, 200)).collect(),
     );
     let report = engine
-        .execute(plan, AgentBudget::new(10, 10_000, 100, 100), CancelToken::new())
+        .execute(
+            plan,
+            AgentBudget::new(10, 10_000, 100, 100),
+            CancelToken::new(),
+        )
         .await;
 
     assert_eq!(report.status, LoopStatus::Completed);
@@ -208,7 +223,11 @@ async fn budget_exhaustion_stops_before_an_unreserved_transition() {
     });
     let report = engine(&["a", "b"], adapter.clone())
         .execute(
-            AgentPlan::new("budget", "budget", vec![node("a", &[], 0, 100), node("b", &["a"], 0, 100)]),
+            AgentPlan::new(
+                "budget",
+                "budget",
+                vec![node("a", &[], 0, 100), node("b", &["a"], 0, 100)],
+            ),
             AgentBudget::new(1, 10_000, 100, 100),
             CancelToken::new(),
         )

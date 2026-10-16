@@ -58,7 +58,9 @@ impl InvocationAdapter for FlowAdapter {
             }
         };
         if !report.success {
-            return Err(InvocationError::Failed("flow completed unsuccessfully".into()));
+            return Err(InvocationError::Failed(
+                "flow completed unsuccessfully".into(),
+            ));
         }
         Ok(InvocationResult::new(
             report.outputs.unwrap_or_default(),

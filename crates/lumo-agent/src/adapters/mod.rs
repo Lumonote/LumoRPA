@@ -129,7 +129,9 @@ impl AdapterRegistry {
     }
 
     pub fn get(&self, source: &CapabilitySource) -> Option<Arc<dyn InvocationAdapter>> {
-        self.adapters.get(&CapabilityKind::from_source(source)).cloned()
+        self.adapters
+            .get(&CapabilityKind::from_source(source))
+            .cloned()
     }
 }
 

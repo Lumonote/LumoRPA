@@ -102,7 +102,10 @@ pub fn evaluate_node(
     let rule = profile.permission_rules.iter().rev().find(|rule| {
         node.risk <= rule.max_risk && pattern_matches(&rule.capability_pattern, &capability.id)
     });
-    if matches!(rule.map(|rule| rule.decision), Some(PermissionDecision::Deny)) {
+    if matches!(
+        rule.map(|rule| rule.decision),
+        Some(PermissionDecision::Deny)
+    ) {
         return PolicyDecision::Deny {
             reason: "denied by agent profile permission rule".into(),
         };
@@ -118,8 +121,10 @@ pub fn evaluate_node(
             reason: "L2 capabilities require confirmation".into(),
         },
         RiskLevel::L0 | RiskLevel::L1 => {
-            if matches!(rule.map(|rule| rule.decision), Some(PermissionDecision::Ask))
-                || node.risk > profile.max_auto_risk
+            if matches!(
+                rule.map(|rule| rule.decision),
+                Some(PermissionDecision::Ask)
+            ) || node.risk > profile.max_auto_risk
             {
                 PolicyDecision::RequireApproval {
                     strength: ApprovalStrength::Standard,

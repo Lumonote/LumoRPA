@@ -37,11 +37,38 @@ impl JobState {
     }
 }
 
+/// What to do when a cron job's fire time was missed (host asleep or the app
+/// closed): run once immediately on recovery (default), or skip ahead to the
+/// next occurrence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MisfirePolicy {
+    #[default]
+    CatchUpOnce,
+    Skip,
+}
+
+impl MisfirePolicy {
+    pub fn is_catch_up_once(&self) -> bool {
+        matches!(self, Self::CatchUpOnce)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobSchedule {
-    OneShot { run_at: DateTime<Utc> },
-    Cron { expression: String },
+    OneShot {
+        run_at: DateTime<Utc>,
+    },
+    Cron {
+        expression: String,
+        /// IANA timezone the expression is evaluated in; `None` keeps the
+        /// legacy UTC behavior for rows persisted before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "MisfirePolicy::is_catch_up_once")]
+        misfire: MisfirePolicy,
+    },
 }
 
 impl JobSchedule {
@@ -50,19 +77,57 @@ impl JobSchedule {
     }
 
     pub fn cron(expression: impl Into<String>) -> Result<Self, JobError> {
+        Self::cron_in(expression, None, MisfirePolicy::default())
+    }
+
+    pub fn cron_in(
+        expression: impl Into<String>,
+        timezone: Option<String>,
+        misfire: MisfirePolicy,
+    ) -> Result<Self, JobError> {
         let expression = expression.into();
         Schedule::from_str(&expression)
             .map_err(|error| JobError::InvalidCron(error.to_string()))?;
-        Ok(Self::Cron { expression })
+        if let Some(name) = &timezone {
+            name.parse::<chrono_tz::Tz>()
+                .map_err(|_| JobError::InvalidTimezone(name.clone()))?;
+        }
+        Ok(Self::Cron {
+            expression,
+            timezone,
+            misfire,
+        })
+    }
+
+    pub fn misfire(&self) -> MisfirePolicy {
+        match self {
+            Self::OneShot { .. } => MisfirePolicy::CatchUpOnce,
+            Self::Cron { misfire, .. } => *misfire,
+        }
     }
 
     pub fn next_after(&self, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, JobError> {
         match self {
             Self::OneShot { run_at } => Ok((*run_at > after).then_some(*run_at)),
-            Self::Cron { expression } => {
+            Self::Cron {
+                expression,
+                timezone,
+                ..
+            } => {
                 let schedule = Schedule::from_str(expression)
                     .map_err(|error| JobError::InvalidCron(error.to_string()))?;
-                Ok(schedule.after(&after).next())
+                match timezone {
+                    Some(name) => {
+                        let tz: chrono_tz::Tz = name
+                            .parse()
+                            .map_err(|_| JobError::InvalidTimezone(name.clone()))?;
+                        Ok(schedule
+                            .after(&after.with_timezone(&tz))
+                            .next()
+                            .map(|next| next.with_timezone(&Utc)))
+                    }
+                    None => Ok(schedule.after(&after).next()),
+                }
             }
         }
     }
@@ -166,4 +231,6 @@ pub enum JobError {
     EmptyIdempotencyKey,
     #[error("invalid cron expression: {0}")]
     InvalidCron(String),
+    #[error("unknown IANA timezone: {0}")]
+    InvalidTimezone(String),
 }
