@@ -51,6 +51,16 @@ pub const RETRY_ON_KINDS: &[&str] = &[
 /// lumo-core 侧有同步测试(`vm.rs` 的 `backoff_whitelist_matches_compute_backoff`)。
 pub const RETRY_BACKOFF_KINDS: &[&str] = &["fixed", "exponential"];
 
+/// `on_error.mode` 的合法取值。
+///
+/// * `interrupt` —— 终止流程,也是缺省值(与既有行为一致);
+/// * `continue`  —— 忽略错误继续执行;
+/// * `retry`     —— 重试此步骤。
+///
+/// 与 `retry.on` 同理:运行期对未知 mode 会静默按 interrupt 处理(最安全的
+/// 降级方向),但「拼错 = 行为被改掉且无提示」必须避免,所以在 validate 期报错。
+pub const ON_ERROR_MODES: &[&str] = &["interrupt", "continue", "retry"];
+
 #[derive(Debug, Error)]
 pub enum ValidationError {
     #[error("flow `{flow}` step id collision: `{id}`")]
@@ -104,6 +114,19 @@ pub enum ValidationError {
         value: String,
         known: String,
     },
+
+    #[error("flow `{flow}` step `{id}` on_error.mode `{value}` is invalid (allowed: {known})")]
+    UnknownOnErrorMode {
+        flow: String,
+        id: String,
+        value: String,
+        known: String,
+    },
+
+    #[error(
+        "flow `{flow}` step `{id}` sets on_error.retry_count but on_error.mode is `continue` (retry_count only applies to mode `retry`)"
+    )]
+    OnErrorRetryCountWithoutRetryMode { flow: String, id: String },
 
     #[error("flow `{flow}` step `{id}` retry.backoff `{value}` is invalid (allowed: {known})")]
     UnknownRetryBackoff {
@@ -283,6 +306,26 @@ fn walk(
                     id: s.id.clone(),
                     value: retry.backoff.clone(),
                     known: RETRY_BACKOFF_KINDS.join(", "),
+                });
+            }
+        }
+        // on_error.mode 值域校验。运行期对未知 mode 静默按 interrupt
+        // 处理(最安全的降级),但拼错必须让用户看见。
+        if let Some(oe) = &s.on_error {
+            if !ON_ERROR_MODES.contains(&oe.mode.as_str()) {
+                return Err(ValidationError::UnknownOnErrorMode {
+                    flow: flow.into(),
+                    id: s.id.clone(),
+                    value: oe.mode.clone(),
+                    known: ON_ERROR_MODES.join(", "),
+                });
+            }
+            // continue 与 retry 是互斥的两种处置,continue 下没有重试语义。
+            // 配了 retry_count 说明作者理解有偏差,报出来而不是吞掉。
+            if oe.mode == "continue" && oe.retry_count > 0 {
+                return Err(ValidationError::OnErrorRetryCountWithoutRetryMode {
+                    flow: flow.into(),
+                    id: s.id.clone(),
                 });
             }
         }

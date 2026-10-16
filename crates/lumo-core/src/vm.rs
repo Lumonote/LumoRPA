@@ -751,6 +751,9 @@ async fn execute_step(
     ctx.set_current_resource(step.resource.as_deref());
 
     let mut attempt: u32 = 1;
+    // on_error=retry 的**独立**计数。与上面 retry 的策略配额分开记,否则两层
+    // 重试会互相吃掉对方的预算,retry_count 的语义就不准了。
+    let mut oe_retries: u32 = 0;
     loop {
         let try_input = action_input.clone();
         let started_at = Utc::now();
@@ -1031,12 +1034,107 @@ async fn execute_step(
                         attempt: attempt as i64,
                         input_hash: &input_hash,
                         output: None,
-                        error: Some(error_msg),
+                        // clone:下面的 on_error 分支还要用同一个 error_msg
+                        // (既写日志又落库),不能把它 move 进这次 persist。
+                        error: Some(error_msg.clone()),
                         started_at,
                         finished_at,
                     },
                 )
                 .await;
+                // 重试耗尽后的**失败终局处置**。
+                //
+                // mode: interrupt(缺省) —— 原样抛错,与历史行为逐字节一致;
+                //       continue          —— 记下错误继续往下跑;
+                //       retry             —— 再按 on_error.retry_count 试一轮。
+                //
+                // `output` 给出后绑到步骤输出变量,让下游 `{{ steps.x }}` 拿到
+                // 确定值而不是未定义。
+                if let Some(oe) = step.on_error.as_ref() {
+                    if oe.continues() {
+                        // retry 模式:还有配额就再试一次。这里用固定间隔而不是
+                        // 退避曲线 —— 这一层处理的是「再给它一次机会」,退避交给
+                        // 上面的 retry 策略,两层职责不重叠。
+                        if oe.mode == "retry" && oe_retries < oe.retry_count {
+                            oe_retries += 1;
+                            let delay = oe.retry_interval_ms;
+                            if delay > 0 {
+                                let cancel = ctx.cancel_token();
+                                let sleep =
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay));
+                                tokio::pin!(sleep);
+                                let cancelled = tokio::select! {
+                                    biased;
+                                    _ = wait_cancel(&cancel) => true,
+                                    _ = &mut sleep => false,
+                                };
+                                if cancelled {
+                                    return Err(ExecError::Cancelled);
+                                }
+                            }
+                            tracing::warn!(
+                                "step `{}`: on_error=retry attempt {}/{} after: {}",
+                                step.id,
+                                oe_retries,
+                                oe.retry_count,
+                                error_msg
+                            );
+                            continue;
+                        }
+                        // retry 配额用尽 —— 说明重试也没救回来,按失败处理。
+                        // 这里**不能**降级成 continue:那会让 `retry` 悄悄变成
+                        // `continue`,`retry_count: 0` 更是等于直接忽略错误,
+                        // 与作者写下的意图相反(而且是最危险的那种相反)。
+                        if oe.mode == "retry" {
+                            tracing::warn!(
+                                "step `{}`: on_error=retry exhausted {} retries, failing: {}",
+                                step.id,
+                                oe.retry_count,
+                                error_msg
+                            );
+                            return Err(ExecError::Step {
+                                step: step.id.clone(),
+                                source: e,
+                            });
+                        }
+                        // continue:把错误降级为告警并继续。
+                        tracing::warn!(
+                            "step `{}` failed but on_error={} → continuing: {}",
+                            step.id,
+                            oe.mode,
+                            error_msg
+                        );
+                        // 失败时把「输出兜底值」交给下游。未配则给 null,让
+                        // `{{ steps.x }}` 仍是**已定义**的 null,而不是未定义。
+                        let fallback = match &oe.output {
+                            Some(raw) => render_value_inline(ctx, raw)?,
+                            None => Value::Null,
+                        };
+                        ctx.record_step_output(&step.id, &fallback);
+                        if let Some(bind) = &step.bind {
+                            ctx.set_var(bind, fallback.clone());
+                        }
+                        persist_step(
+                            ctx,
+                            StepPersist {
+                                step_id: &step.id,
+                                path: &path,
+                                parent_path: parent_path.as_deref(),
+                                depth,
+                                idx,
+                                state: "failed_ignored",
+                                attempt: attempt as i64,
+                                input_hash: &input_hash,
+                                output: Some(&fallback),
+                                error: Some(error_msg),
+                                started_at,
+                                finished_at: Utc::now(),
+                            },
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
                 return Err(ExecError::Step {
                     step: step.id.clone(),
                     source: e,
@@ -1264,6 +1362,32 @@ async fn run_for_each(
             "control.for_each `max_concurrency` must be >= 1"
         )));
     }
+    // 批次 E：迭代限流与失败熔断。rate_per_sec 约束相邻迭代（并行模式为相邻
+    // 批次）启动的最小间隔；max_failures 把「单项失败即终止」放宽为累计阈值。
+    let rate_per_sec = match rendered.get("rate_per_sec") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let rate = value.as_f64().unwrap_or(0.0);
+            if rate <= 0.0 {
+                return Err(ExecError::Other(anyhow::anyhow!(
+                    "control.for_each `rate_per_sec` must be > 0"
+                )));
+            }
+            Some(rate)
+        }
+    };
+    let rate_gap = rate_per_sec.map(|rate| std::time::Duration::from_secs_f64(1.0 / rate));
+    let max_failures = match rendered.get("max_failures") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(limit) if limit >= 1 => Some(limit),
+            _ => {
+                return Err(ExecError::Other(anyhow::anyhow!(
+                    "control.for_each `max_failures` must be >= 1"
+                )))
+            }
+        },
+    };
 
     let body = step.do_.as_ref().ok_or_else(|| {
         ExecError::Other(anyhow::anyhow!("control.for_each requires `do:` block"))
@@ -1281,9 +1405,13 @@ async fn run_for_each(
     };
 
     let mut iters = 0u64;
+    let mut failures = 0u64;
     let mut result = Ok(());
     if !parallel {
         for (idx, item) in arr.iter().enumerate() {
+            if idx > 0 {
+                pace(ctx, rate_gap).await;
+            }
             ctx.push_binding(&bind, item.clone());
             // Also expose as `row` so flow authors can use the more readable
             // `{{ row.field }}` even when the binding name is `item`.
@@ -1303,6 +1431,20 @@ async fn run_for_each(
                     iters += 1;
                     continue;
                 }
+                Err(e) if max_failures.is_some() && !is_control_signal(e) => {
+                    failures += 1;
+                    let limit = max_failures.unwrap_or(u64::MAX);
+                    if failures >= limit {
+                        let last = e.to_string();
+                        result = Err(ExecError::Other(anyhow::anyhow!(
+                            "control.for_each `{}` 熔断：{failures} 项失败达到 max_failures={limit}；最后错误: {last}",
+                            step.id
+                        )));
+                        break;
+                    }
+                    result = Ok(());
+                    continue;
+                }
                 Err(_) => break,
                 Ok(()) => {}
             }
@@ -1311,6 +1453,9 @@ async fn run_for_each(
     } else {
         let mut offset = 0usize;
         while offset < arr.len() {
+            if offset > 0 {
+                pace(ctx, rate_gap).await;
+            }
             let end = (offset + max_concurrency).min(arr.len());
             let mut iteration_state: Vec<(StepCtx, usize)> = arr[offset..end]
                 .iter()
@@ -1347,9 +1492,22 @@ async fn run_for_each(
                         break;
                     }
                     Err(error) => {
-                        result = Err(error);
-                        stop = true;
-                        break;
+                        if max_failures.is_some() && !is_control_signal(&error) {
+                            failures += 1;
+                            let limit = max_failures.unwrap_or(u64::MAX);
+                            if failures >= limit {
+                                result = Err(ExecError::Other(anyhow::anyhow!(
+                                    "control.for_each `{}` 熔断：{failures} 项失败达到 max_failures={limit}；最后错误: {error}",
+                                    step.id
+                                )));
+                                stop = true;
+                                break;
+                            }
+                        } else {
+                            result = Err(error);
+                            stop = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1366,7 +1524,7 @@ async fn run_for_each(
     if matches!(&result, Err(e) if is_control_signal(e)) {
         return result;
     }
-    let output = serde_json::json!({ "iterations": iters });
+    let output = serde_json::json!({ "iterations": iters, "failures": failures });
     ctx.record_step_output(&step.id, &output);
     let finished_at = Utc::now();
     persist_step(
@@ -1388,6 +1546,21 @@ async fn run_for_each(
     )
     .await;
     result
+}
+
+/// 批次 E：`rate_per_sec` 的限流等待。分片睡眠，取消发生时尽快返回——下一次
+/// 步骤执行前的取消检查会正式收场，这里只保证不在长等待里干挂。
+async fn pace(ctx: &StepCtx, gap: Option<std::time::Duration>) {
+    let Some(gap) = gap else { return };
+    let mut remaining = gap;
+    while !remaining.is_zero() {
+        if ctx.is_cancelled() {
+            return;
+        }
+        let slice = remaining.min(std::time::Duration::from_millis(200));
+        tokio::time::sleep(slice).await;
+        remaining -= slice;
+    }
 }
 
 async fn run_while(

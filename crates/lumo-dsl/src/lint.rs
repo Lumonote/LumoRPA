@@ -84,7 +84,71 @@ pub fn lint_flow(flow: &Flow, known_actions: &[&str]) -> Vec<LintIssue> {
         &mut issues,
     );
 
+    // 批次 H（ai.high_risk）：AI 步骤输出直接模板进高危动作 → 提醒加人工闸门。
+    lint_ai_to_high_risk(&flow.spec.steps, &mut issues);
+
     issues
+}
+
+/// 输出被 AI 生成/改写的步骤直接驱动这些动作时，值得一次人工确认。
+const AI_HIGH_RISK_ACTIONS: &[&str] = &[
+    "system.shell",
+    "system.process_kill",
+    "system.app_start",
+    "file.delete",
+    "file.write",
+    "email.send",
+    "db.sqlite_exec",
+    "db.sqlite_batch",
+    "db.postgres_exec",
+    "db.postgres_batch",
+    "db.mysql_exec",
+    "db.mysql_batch",
+];
+
+fn lint_ai_to_high_risk(steps: &[Step], issues: &mut Vec<LintIssue>) {
+    fn collect_ai(steps: &[Step], out: &mut BTreeSet<String>) {
+        for s in steps {
+            // ai.chat 的输出、以及挂了 ai hook（可改写输出）的步骤都算 AI 源。
+            if s.action == "ai.chat" || s.ai.is_some() {
+                out.insert(s.id.clone());
+            }
+            for child in s.children() {
+                collect_ai(child, out);
+            }
+        }
+    }
+    fn scan(steps: &[Step], ai_ids: &BTreeSet<String>, issues: &mut Vec<LintIssue>) {
+        for s in steps {
+            if AI_HIGH_RISK_ACTIONS.contains(&s.action.as_str()) {
+                let with_text = serde_yaml::to_string(&s.with).unwrap_or_default();
+                for r in scan_refs(&with_text) {
+                    let Some(id) = &r.next else { continue };
+                    if r.root == "steps" && ai_ids.contains(id) {
+                        issues.push(LintIssue::at(
+                            LintSeverity::Warn,
+                            "ai.high_risk",
+                            Some(&s.id),
+                            format!(
+                                "高危动作 `{}` 的参数引用了 AI 步骤 `{id}` 的输出（{}）—— 建议先经 human.approve / human.confirm 审核，或用 dry_run 演练",
+                                s.action, r.raw
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+            for child in s.children() {
+                scan(child, ai_ids, issues);
+            }
+        }
+    }
+    let mut ai_ids = BTreeSet::new();
+    collect_ai(steps, &mut ai_ids);
+    if ai_ids.is_empty() {
+        return;
+    }
+    scan(steps, &ai_ids, issues);
 }
 
 fn collect_step_ids(steps: &[Step], out: &mut BTreeSet<String>) {
@@ -205,6 +269,32 @@ fn walk(
                     "retry.dead",
                     Some(&s.id),
                     "retry.on is set but retry.times is 0 — the policy will never fire".into(),
+                ));
+            }
+        }
+
+        // Failure handling that swallows an error into a bound variable.
+        //
+        // `on_error.mode: continue` deliberately lets the flow walk past a
+        // failure. That is a reasonable choice for an optional step, but not
+        // when the step also *binds* its output: downstream steps then consume
+        // a fallback value (or null) while looking exactly like they consumed a
+        // real result. The flow runs to completion and produces wrong data
+        // instead of stopping at the failure — the hard-to-debug outcome.
+        //
+        // Only worth a warning because it is sometimes intentional, so the
+        // message states the hazard rather than prescribing a fix.
+        if let Some(oe) = &s.on_error {
+            if oe.mode == "continue" && s.bind.is_some() && oe.output.is_none() {
+                out.push(LintIssue::at(
+                    LintSeverity::Warn,
+                    "on_error.silent_bind",
+                    Some(&s.id),
+                    format!(
+                        "step `{}` ignores failures but binds `{}` — on failure the binding is null, and downstream steps cannot tell that apart from a real result (set `on_error.output` for a distinguishable value)",
+                        s.id,
+                        s.bind.as_deref().unwrap_or_default()
+                    ),
                 ));
             }
         }
@@ -599,6 +689,94 @@ spec:
 "#;
         let r = lint(y);
         assert!(has(&r, "retry.dead"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn warns_when_ignored_failure_is_bound_to_a_variable() {
+        // The flow completes and the binding is null, so downstream steps
+        // cannot tell a swallowed failure apart from a real empty result.
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: a
+      action: control.log
+      with: { message: "x" }
+      bind: result
+      on_error: { mode: continue }
+"#;
+        let r = lint(y);
+        assert!(has(&r, "on_error.silent_bind"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn no_silent_bind_warning_when_a_fallback_value_is_declared() {
+        // An explicit fallback makes the degraded path distinguishable, which
+        // is exactly what the rule asks for.
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: a
+      action: control.log
+      with: { message: "x" }
+      bind: result
+      on_error: { mode: continue, output: "degraded" }
+"#;
+        let r = lint(y);
+        assert!(!has(&r, "on_error.silent_bind"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn no_silent_bind_warning_for_plain_fail_fast_steps() {
+        // `interrupt` never swallows anything, so binding is safe.
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  steps:
+    - id: a
+      action: control.log
+      with: { message: "x" }
+      bind: result
+      on_error: { mode: interrupt }
+"#;
+        let r = lint(y);
+        assert!(!has(&r, "on_error.silent_bind"), "issues: {r:?}");
+    }
+
+    #[test]
+    fn warns_when_ai_output_feeds_high_risk_action() {
+        let y = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: t, version: 0.1.0 }
+spec:
+  capabilities:
+    llm: ["*"]
+  steps:
+    - id: brain
+      action: ai.chat
+      with: { prompt: "生成清理命令" }
+    - id: danger
+      action: system.shell
+      with: { command: "{{ steps.brain.output }}" }
+    - id: safe
+      action: control.log
+      with: { message: "{{ steps.brain.output }}" }
+"#;
+        let r = lint(y);
+        assert!(has(&r, "ai.high_risk"), "issues: {r:?}");
+        assert_eq!(
+            r.iter().filter(|i| i.code == "ai.high_risk").count(),
+            1,
+            "只有高危动作应告警，control.log 不算: {r:?}"
+        );
     }
 
     #[test]

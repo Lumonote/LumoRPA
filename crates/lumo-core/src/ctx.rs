@@ -272,7 +272,8 @@ impl DebugController {
     }
 
     /// Latch the sticky pause at `path` (first writer wins).
-    fn mark_paused(&self, path: &str) {        self.paused.store(true, Ordering::SeqCst);
+    fn mark_paused(&self, path: &str) {
+        self.paused.store(true, Ordering::SeqCst);
         let mut at = self.paused_at.lock();
         if at.is_none() {
             *at = Some(path.to_string());

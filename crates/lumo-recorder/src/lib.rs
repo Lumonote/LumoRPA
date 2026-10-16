@@ -31,6 +31,63 @@
 pub mod desktop;
 pub mod selector_score;
 
+/// A recorder that captures browser and desktop activity at the same time.
+///
+/// The two lanes intentionally keep their own buffers and share only the live
+/// event channel. This means a browser startup failure can be rolled back
+/// without leaving the desktop poller running, while `stop` can still return a
+/// single timestamp-ordered event stream for the YAML converter.
+pub struct MixedRecorder {
+    browser: BrowserRecorder,
+    desktop: desktop::DesktopRecorder,
+}
+
+impl Default for MixedRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MixedRecorder {
+    pub fn new() -> Self {
+        Self {
+            browser: BrowserRecorder::new(),
+            desktop: desktop::DesktopRecorder::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Recorder for MixedRecorder {
+    async fn start(&self, live: Option<RawEventSender>) -> anyhow::Result<()> {
+        self.browser.start(live.clone()).await?;
+        if let Err(error) = self.desktop.start(live).await {
+            // Do not leak a launched Chromium process when the second lane
+            // fails (for example, an accessibility backend startup error).
+            let _ = self.browser.stop().await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<Vec<RawEvent>> {
+        // Always stop both lanes, even when one teardown reports an error.
+        // Returning the first error preserves the Recorder contract while
+        // still preventing the other lane from running in the background.
+        let browser = self.browser.stop().await;
+        let desktop = self.desktop.stop().await;
+        match (browser, desktop) {
+            (Ok(mut browser), Ok(desktop)) => {
+                browser.extend(desktop);
+                browser.sort_by_key(|event| event.at_ms);
+                Ok(browser)
+            }
+            (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+}
+
 use async_trait::async_trait;
 use chromiumoxide::cdp::browser_protocol::page::{
     AddScriptToEvaluateOnNewDocumentParams, EventFrameNavigated,
@@ -425,11 +482,26 @@ async fn teardown_session(mut session: BrowserSession) {
     } else {
         // Launch mode: graceful CDP `Browser.close`, fall back to `kill`, then
         // `wait` to reap the child so it can't linger as a zombie.
-        if browser.close().await.is_err() {
-            let _ = browser.kill().await;
+        let close = tokio::time::timeout(Duration::from_secs(2), browser.close()).await;
+        if !matches!(close, Ok(Ok(_))) {
+            let _ = tokio::time::timeout(Duration::from_secs(2), browser.kill()).await;
         }
-        let _ = browser.wait().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), browser.wait()).await;
     }
+}
+
+async fn cleanup_start_failure(mut browser: Browser, tasks: Vec<JoinHandle<()>>, connected: bool) {
+    for task in tasks {
+        task.abort();
+    }
+    if connected {
+        return;
+    }
+    let close = tokio::time::timeout(Duration::from_secs(2), browser.close()).await;
+    if !matches!(close, Ok(Ok(_))) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), browser.kill()).await;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), browser.wait()).await;
 }
 
 impl Drop for BrowserRecorder {
@@ -498,21 +570,27 @@ impl Recorder for BrowserRecorder {
         }));
 
         // Open a starter page so the user immediately sees the recorder is alive.
-        let page = browser
-            .new_page("about:blank")
-            .await
-            .map_err(|e| anyhow::anyhow!("new_page: {e}"))?;
+        let page = match browser.new_page("about:blank").await {
+            Ok(page) => page,
+            Err(error) => {
+                cleanup_start_failure(browser, tasks, connected).await;
+                return Err(anyhow::anyhow!("new_page: {error}"));
+            }
+        };
 
         // CDP binding: window.__lumoRpaEvent becomes a callable in every frame.
-        page.execute(AddBindingParams::new(BINDING_NAME))
-            .await
-            .map_err(|e| anyhow::anyhow!("addBinding: {e}"))?;
+        if let Err(error) = page.execute(AddBindingParams::new(BINDING_NAME)).await {
+            cleanup_start_failure(browser, tasks, connected).await;
+            return Err(anyhow::anyhow!("addBinding: {error}"));
+        }
         // Inject the recorder script on every new document (handles SPA + navigations).
-        page.execute(AddScriptToEvaluateOnNewDocumentParams::new(
-            recorder_injected_script(),
-        ))
-        .await
-        .map_err(|e| anyhow::anyhow!("addScriptToEvaluateOnNewDocument: {e}"))?;
+        if let Err(error) = page
+            .execute(AddScriptToEvaluateOnNewDocumentParams::new(recorder_injected_script()))
+            .await
+        {
+            cleanup_start_failure(browser, tasks, connected).await;
+            return Err(anyhow::anyhow!("addScriptToEvaluateOnNewDocument: {error}"));
+        }
         // Also eval into the current about:blank so the user can drive immediately.
         let _ = page.evaluate(recorder_injected_script()).await;
 
@@ -878,6 +956,10 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
                 step.insert("action".into(), "browser.open".into());
                 let mut with = serde_yaml::Mapping::new();
                 with.insert("url".into(), url.into());
+                // A recorder session is visible by definition. Preserve that
+                // expectation for the one-click "record -> run" path; users
+                // can switch the generated step to headless when scheduling.
+                with.insert("headless".into(), false.into());
                 step.insert("with".into(), with.into());
                 steps.push(step.into());
                 last_url = Some(url.to_string());

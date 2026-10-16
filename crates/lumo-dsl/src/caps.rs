@@ -117,6 +117,9 @@ pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("browser.print_pdf", &[FsWrite], &[]),
     entry("browser.screenshot", &[FsWrite], &[]),
     entry("browser.upload", &[FsRead], &[]),
+    // clipboard.set_file:把**路径文本**放进剪贴板(不是原生文件剪贴),但读取源
+    // 文件路径前先做 fs.read 门禁;返回值里显式标注 mode: "path_text"。
+    entry("clipboard.set_file", &[FsRead], &[]),
     entry("csv.read", &[FsRead], &[]),
     entry("csv.write", &[FsWrite], &[]),
     entry("db.mysql_batch", &[Network], &[]),
@@ -138,6 +141,34 @@ pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("desktop.screenshot", &[FsWrite, Desktop("screen")], &[]),
     entry("desktop.scroll", &[Desktop("mouse")], &[]),
     entry("desktop.type", &[Desktop("keyboard")], &[]),
+    // ---- 兼容族:dir.* 目录操作 ----
+    // 与 file.* 同族同门禁:读类只需 FsRead,写类只需 FsWrite,
+    // copy/move/rename 因同时读写两侧而要求 FsRead + FsWrite。
+    // dir.selected_dirs_or_files / dir.open 是**宿主交互**(不是文件系统),
+    // 无 capability 门禁 —— 二者在 lumo-actions 的 NO_CAP_ACTIONS 白名单里。
+    entry("dir.copy", &[FsRead, FsWrite], &[]),
+    entry("dir.empty", &[FsRead], &[]),
+    entry("dir.find_files", &[FsRead], &[]),
+    entry("dir.find_subdirs", &[FsRead], &[]),
+    entry("dir.get_special_dir", &[FsRead], &[]),
+    entry("dir.if_exist", &[FsRead], &[]),
+    entry("dir.makedir", &[FsWrite], &[]),
+    entry("dir.move", &[FsRead, FsWrite], &[]),
+    entry("dir.remove", &[FsWrite], &[]),
+    entry("dir.rename", &[FsRead, FsWrite], &[]),
+    // doc.ocr:源图恒需 fs.read。远程/云引擎的 network、llm 门禁在运行期由
+    // 引擎自身把关(还叠加 `ocr.allow_cloud`)——静态表无法从 `with` 判断走的
+    // 是哪档引擎,写成条件项会误拒纯本地 OCR 的合法 flow。
+    entry("doc.ocr", &[FsRead], &[]),
+    // doc.parse:源文件恒需 fs.read;落盘图片/JSON 只在给出 images.dir /
+    // out_path 时才写,故列为条件门禁。
+    entry(
+        "doc.parse",
+        &[FsRead],
+        &[("images", FsWrite), ("out_path", FsWrite)],
+    ),
+    // doc.to_markdown:传上游 DocIR 时是纯数据变换;给 path 才读盘。
+    entry("doc.to_markdown", &[], &[("path", FsRead)]),
     entry("docx.read_text", &[FsRead], &[]),
     entry("docx.replace_placeholders", &[FsRead, FsWrite], &[]),
     entry(

@@ -150,6 +150,9 @@ pub struct Step {
     pub with: serde_yaml::Value,
     #[serde(default)]
     pub retry: Option<RetrySpec>,
+    /// 失败终局处置(终止/忽略/重试)。缺省 ⇒ 终止,与历史行为一致。
+    #[serde(default)]
+    pub on_error: Option<OnErrorSpec>,
     #[serde(default)]
     pub when: Option<String>,
     #[serde(default)]
@@ -219,6 +222,54 @@ pub struct RetrySpec {
 
 fn default_retry_times() -> u32 {
     0
+}
+/// 步骤级**失败终局处置**。挂在单个 `Step` 上,决定这条步骤失败之后流程怎么走。
+///
+/// 三种模式,对应三种朴素但都真实存在的诉求:
+///
+/// * `interrupt`(缺省)—— 出错即终止整个流程。这是最安全、也是历史行为;
+/// * `continue`  —— 记下错误继续往下跑。适合「这一步可有可无」的步骤,
+///   比如尽力而为的清理、可选的埋点,失败不该拖垮主链路;
+/// * `retry`     —— 再试几次。适合抖动型失败(网络、文件被占用、UI 未就绪),
+///   这类失败重试一次的收益远大于把流程整个重跑一遍。
+///
+/// 另有 `output`:失败时给该步骤的输出兜一个默认值。没有它的话,`continue`
+/// 之后下游 `{{ steps.x }}` 会引用到一个未定义值 —— 流程带着未定义往下跑,
+/// 报错点会漂移到很远的地方,比直接失败更难排查。给出兜底值就让失败**局域化**。
+///
+/// 与 `retry` 字段的分工:`retry` 是**重试策略**(次数/退避/错误种类过滤),
+/// 本结构是**失败终局处置**。两者可叠加:先按 `retry` 重试,策略用尽后按
+/// `on_error.mode` 决定终止、继续,还是再用 `retry_count` 试一轮。
+/// 缺省(`None`)⇒ `interrupt`,与历史行为逐字节一致,老流程零影响。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnErrorSpec {
+    /// `interrupt` (默认) | `continue` | `retry`。
+    #[serde(default = "default_on_error_mode")]
+    pub mode: String,
+    /// `retry` 模式的额外重试次数。
+    #[serde(default)]
+    pub retry_count: u32,
+    /// `retry` 模式的重试间隔(毫秒)。
+    #[serde(default = "default_on_error_interval")]
+    pub retry_interval_ms: u64,
+    /// 失败时该步骤的输出兜底值,`continue`/`retry` 路径会把它交给下游。
+    #[serde(default)]
+    pub output: Option<serde_yaml::Value>,
+}
+
+fn default_on_error_mode() -> String {
+    "interrupt".into()
+}
+fn default_on_error_interval() -> u64 {
+    1000
+}
+
+impl OnErrorSpec {
+    /// 是否需要在失败后继续执行(而不是把错误抛给上层)。
+    pub fn continues(&self) -> bool {
+        matches!(self.mode.as_str(), "continue" | "retry")
+    }
 }
 fn default_backoff() -> String {
     "fixed".into()
