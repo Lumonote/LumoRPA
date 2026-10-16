@@ -111,7 +111,27 @@ Ubuntu runner 的 glibc 可能比目标麒麟 / 统信发行版更新，Ubuntu �
 
 ## 构建与发布
 
-### 打包 CLI
+### 一次产出桌面包 + CLI 归档
+
+发布需要**桌面安装包和 CLI 归档两份产物**。用统一入口一次做完：
+
+```bash
+scripts/package-release.sh                                      # 宿主平台
+scripts/package-release.sh "" deb,rpm,appimage                  # Linux / 麒麟 x86_64
+scripts/package-release.sh x86_64-pc-windows-msvc nsis,msi      # Windows（在 Windows 构建机上）
+scripts/package-release.sh universal-apple-darwin app,dmg       # macOS universal
+```
+
+它按顺序调用下面两个脚本，共用一次依赖解析与同一个 target 目录，**任一半失败即整体失败**（不产出"只有安装包没有归档"的半成品）。只要有其中一半时用环境变量跳过另一半：
+
+```bash
+LUMO_SKIP_DESKTOP=1 scripts/package-release.sh   # 只要 CLI 归档
+LUMO_SKIP_CLI=1     scripts/package-release.sh   # 只要桌面安装包
+```
+
+CI 的 macOS / Windows / Linux 三个平台走的都是这个入口。
+
+### 单独打包 CLI
 
 ```bash
 scripts/package-cli.sh                          # 宿主平台
@@ -119,7 +139,7 @@ scripts/package-cli.sh x86_64-unknown-linux-gnu # 交叉编译（先 rustup targ
 scripts/package-cli.sh universal-apple-darwin   # macOS fat binary（lipo 合并）
 ```
 
-产出 `dist/lumorpa-<version>-<os>-<arch>.tar.gz`（Windows 为 `.zip`），内含 `bin/lumo`、`examples/`、`README.md` 与 `LICENSE`。
+产出 `dist/lumorpa-<version>-<os>-<arch>.tar.gz`（Windows 为 `.zip`），内含 `bin/lumo`、`examples/`、`README.md` 与 `LICENSE`。loongarch64（龙芯）只出 CLI 归档，走这个脚本。
 
 ### 发布：`.github/workflows/release.yml`
 
@@ -190,7 +210,7 @@ CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）分层把守：
 | `apps/desktop/` | Tauri 桌面工作台：`src-tauri/` 后端与 `frontend/` 原生 ESM 前端 |
 | `examples/` | 可直接运行的流程示例与示例技能 |
 | `docs/` | 中文设计文档：架构、指令集、覆盖矩阵与专题规格 |
-| `scripts/` | 打包与构建脚本（`package-cli.sh`、`build-desktop.sh`） |
+| `scripts/` | 打包与构建脚本（`package-release.sh` 统一入口，及 `package-cli.sh` / `build-desktop.sh`） |
 | `dist/` | 打包输出目录（**非可复现来源**，发布以 CI 产物为准） |
 
 ## 运行时安全

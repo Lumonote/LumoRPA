@@ -1,9 +1,14 @@
 name: release
 
 # Cross-platform packaging pipeline. For each platform it produces BOTH the
-# desktop installer (scripts/build-desktop.sh → cargo tauri) and the CLI archive
-# (scripts/package-cli.sh), uploads them as workflow artifacts, and on a v* tag
-# attaches them to the GitHub Release.
+# desktop installer (build-desktop.sh → cargo tauri) and the CLI archive
+# (package-cli.sh) through one entry point, scripts/package-release.sh, which
+# sequences the pair against a single target directory and fails closed unless
+# both halves are produced. Artifacts are uploaded as workflow artifacts, and on
+# a v* tag attached to the GitHub Release.
+#
+# loongarch64 is the exception: it ships a CLI archive only (no desktop), so it
+# calls package-cli.sh directly.
 #
 # NOTE (honest limitation): the Windows / Linux / loongarch64 packages cannot be
 # built or verified on a macOS dev machine — each Tauri bundler needs the target
@@ -87,14 +92,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
-      - name: Build desktop (universal .app + .dmg)
+      # Desktop installer + CLI archive in one step: both halves share a single
+      # dependency resolve and target directory, and the step fails closed if
+      # either half is missing. See scripts/package-release.sh.
+      - name: Package (universal .dmg + CLI archive)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/build-desktop.sh universal-apple-darwin app,dmg
-      - name: Package CLI (universal)
-        run: scripts/package-cli.sh universal-apple-darwin
+        run: scripts/package-release.sh universal-apple-darwin app,dmg
       - name: Stage artifacts
         run: |
           mkdir -p out
@@ -124,16 +130,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
-      - name: Build desktop (.exe NSIS + .msi)
+      # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
+      - name: Package (.exe NSIS + .msi + CLI archive)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
         shell: bash
-        run: scripts/build-desktop.sh x86_64-pc-windows-msvc nsis,msi
-      - name: Package CLI
-        shell: bash
-        run: scripts/package-cli.sh x86_64-pc-windows-msvc
+        run: scripts/package-release.sh x86_64-pc-windows-msvc nsis,msi
       - name: Stage artifacts
         shell: bash
         run: |
@@ -168,14 +172,13 @@ jobs:
             libayatana-appindicator3-dev patchelf
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
-      - name: Build desktop (.deb / .rpm / AppImage)
+      # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
+      - name: Package (.deb / .rpm / AppImage + CLI archive)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/build-desktop.sh "" deb,rpm,appimage
-      - name: Package CLI
-        run: scripts/package-cli.sh
+        run: scripts/package-release.sh "" deb,rpm,appimage
       - name: Stage artifacts
         run: |
           mkdir -p out
@@ -210,14 +213,13 @@ jobs:
             libayatana-appindicator3-dev patchelf
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
-      - name: Build desktop (.deb / .rpm)
+      # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
+      - name: Package (.deb / .rpm + CLI archive)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/build-desktop.sh "" deb,rpm
-      - name: Package CLI
-        run: scripts/package-cli.sh
+        run: scripts/package-release.sh "" deb,rpm
       - name: Stage artifacts
         run: |
           mkdir -p out
