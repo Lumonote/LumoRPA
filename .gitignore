@@ -4,6 +4,10 @@
 # Local cargo cache used by development agents or offline checks
 /.cargo-home/
 
+# Local rustup home, used to install a toolchain matching CI (e.g. 1.99) without
+# touching the machine-wide ~/.rustup.
+/.rustup-home/
+
 # Local runtime data
 /.lumorpa/
 *.db
