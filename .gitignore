@@ -20,6 +20,15 @@
 /examples/out/
 *.log
 
+# Packaging / bundling output.
+# `dist/` holds locally produced archives (tar.gz/zip) and unpacked app trees.
+# They are build artifacts, not sources: every platform bundle is produced by
+# `.github/workflows/release.yml` on its own runner (Tauri cannot cross-build
+# a desktop installer), and a committed binary is neither reproducible nor
+# reviewable. `scripts/package-cli.sh` and `scripts/build-desktop.sh` still
+# write here — the directory is simply no longer published.
+/dist/
+
 # Agent / tool runtime state (per-checkout, never shared)
 .omc/
 .workbuddy/
