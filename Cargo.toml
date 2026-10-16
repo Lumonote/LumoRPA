@@ -8,6 +8,7 @@ members = [
     "crates/lumo-ai",
     "crates/lumo-recorder",
     "crates/lumo-skills",
+    "crates/lumo-doc",
     "crates/lumo-agent",
     "crates/lumo-voice",
     "crates/lumo-cli",
@@ -37,6 +38,7 @@ lumo-actions   = { path = "crates/lumo-actions",   version = "0.1.0" }
 lumo-ai        = { path = "crates/lumo-ai",        version = "0.1.0" }
 lumo-recorder  = { path = "crates/lumo-recorder",  version = "0.1.0" }
 lumo-skills    = { path = "crates/lumo-skills",    version = "0.1.0" }
+lumo-doc       = { path = "crates/lumo-doc",       version = "0.1.0" }
 lumo-agent     = { path = "crates/lumo-agent",     version = "0.1.0" }
 lumo-voice     = { path = "crates/lumo-voice",     version = "0.1.0" }
 
@@ -73,6 +75,7 @@ sqlx            = { version = "0.8.6", default-features = false, features = ["ru
 # common
 chrono          = { version = "0.4", features = ["serde"] }
 cron            = "0.13"
+chrono-tz       = "0.10"
 notify          = { version = "6", default-features = false, features = ["macos_kqueue"] }
 ulid            = { version = "1", features = ["serde"] }
 sha2            = "0.10"

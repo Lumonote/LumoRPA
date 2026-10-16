@@ -1,0 +1,30 @@
+[package]
+name = "lumo-doc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Structured document parsing (DocIR) for LumoRPA: DOCX / XLSX / PDF / images"
+
+# 纯解析引擎:不依赖 lumo-core(无 StepCtx / 无 capability 门禁),便于脱离动作层
+# 直接单测与语料回归;动作层 `lumo-actions/src/doc.rs` 负责门禁、超时与序列化。
+#
+# 依赖红线(同 lumo-actions 头注):纯 Rust、无 C 依赖,信创与交叉编译友好。
+# * zip + quick-xml —— DOCX 即 OOXML zip,流式解析,复用工作区既有版本。
+# * calamine —— XLSX 读取(与 excel.* 族同源,避免两套语义)。
+[dependencies]
+calamine.workspace = true
+# PDF:纯 Rust lopdf(MIT),与 lumo-actions 的 pdf.* 族同源,版本注释见其 Cargo.toml。
+lopdf = { version = "0.36", default-features = false }
+quick-xml.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true
