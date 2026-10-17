@@ -1095,15 +1095,26 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_unresponsive_server() {
-        // `sleep` does not read stdin or write to stdout → handshake times out.
-        let mut ctx = make_ctx(vec!["sleep".into()]);
+        // The child must neither read stdin nor write stdout, so the stdio
+        // handshake never completes and the call times out. `sleep` is not a
+        // program on Windows and `/bin/sleep` is not a path there at all — the
+        // MCP layer runs `command` verbatim — so pick a per-platform sleeper,
+        // following the `ping -n` convention already used in
+        // tests/system_process.rs. Neither needs an absolute path: `sleep`
+        // resolves through PATH on Unix, and so does `ping` on Windows.
+        let (program, sleeper) = if cfg!(windows) {
+            ("ping", vec!["-n", "30", "127.0.0.1"])
+        } else {
+            ("sleep", vec!["10"])
+        };
+        let mut ctx = make_ctx(vec![program.into()]);
         let res = McpCallAction
             .execute(
                 &mut ctx,
                 json!({
-                    "server": "sleep",
-                    "command": "/bin/sleep",
-                    "args": ["10"],
+                    "server": program,
+                    "command": program,
+                    "args": sleeper,
                     "tool": "noop",
                     "timeout_ms": 150
                 }),

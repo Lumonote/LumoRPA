@@ -1432,17 +1432,26 @@ mod tests {
     #[tokio::test]
     async fn transport_error_classifies_refused_connect_as_network_kind() {
         use lumo_core::error::ErrorKind;
-        // 先 bind 拿一个必然空闲的端口再放掉 ⇒ 连接被拒。
+        // 先 bind 拿一个必然空闲的端口再放掉 ⇒ 期望连接被拒。
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = free.local_addr().unwrap();
         drop(free);
-        let client = build_gated_client(&[], 1_000).unwrap();
+        // 超时必须明显长于「测试机器自己拒绝一个 loopback 连接」所需的时间,
+        // 否则量到的是超时而不是拒绝。1000ms 在 Linux/macOS 上够用 —— 那里
+        // 空的 loopback 端口立刻回 RST —— 但 Windows 上不够:连关闭的
+        // loopback 端口会先做 SYN 重传、停顿约 2s 才失败
+        // (Bugzilla #2061349),1s 的窗口会先到期,断言于是收到
+        // `Timeout { ms }` 而不是 `Network`。这里给足 10s:它只为拒绝让路,
+        // 不改变被测的判定顺序 —— `transport_error` 依然先看 `is_timeout()`。
+        // 传入的 timeout_ms 只用来构造错误值,与客户端的超时保持一致。
+        let timeout_ms = 10_000;
+        let client = build_gated_client(&[], timeout_ms).unwrap();
         let e = client
             .get(format!("http://{addr}/"))
             .send()
             .await
             .expect_err("nothing listens on the freed port");
-        let err = transport_error("http.request", "send", e, 1_000);
+        let err = transport_error("http.request", "send", e, timeout_ms);
         assert_eq!(err.kind(), ErrorKind::Network, "got: {err:?}");
         assert!(err.to_string().contains("http.request send:"), "got: {err}");
     }
