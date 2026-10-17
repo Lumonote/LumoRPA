@@ -1206,62 +1206,12 @@ fn normalize_path(path: &Path) -> PathBuf {
     // `/data/**` can't be escaped by `/data/../etc/passwd` (whose raw string
     // still starts with `/data/`).
     let cleaned = lexical_clean(&abs);
-    // Windows 8.3 short names: `%TEMP%` is often handed out as
-    // `C:\Users\RUNNER~1\AppData\Local\Temp`, while `read_dir` yields
-    // children under the *long* spelling (`...\runneradmin\...`). Same
-    // directory, different strings, so a grant and a candidate that plainly
-    // describe the same tree compared unequal and `file.list` was denied
-    // mid-walk.
-    //
-    // Only the portion that actually exists is canonicalized, and the rest is
-    // re-appended verbatim. A plain `canonicalize(whole)` is wrong here: a
-    // grant ends in `\**`, which never exists on disk, so it would fail and
-    // fall back to the lexical spelling while a real candidate succeeded —
-    // one side canonical, the other not, i.e. exactly the asymmetry that made
-    // `path_grant_covered` reject a grant against itself. Resolving the
-    // longest existing ancestor keeps both sides collapsing short names the
-    // same way regardless of whether the tail is concrete.
-    //
-    // It stays Windows-only on purpose: elsewhere the lexical result is
-    // already stable, and not touching Unix avoids rewriting `/tmp` →
-    // `/private/tmp` in comparisons and error messages.
-    #[cfg(windows)]
-    let cleaned = canonicalize_existing_prefix(&cleaned);
+    // Canonicalizing here was tried and reverted: a grant ends in `\**`, which
+    // never exists, so the two sides of a comparison could not both be resolved
+    // and the mismatch moved rather than closed. Normalisation now happens per
+    // comparison in `spellings`, and only where a host actually has more than
+    // one spelling for a directory.
     cleaned
-}
-
-/// Canonicalize as much of `path` as exists, re-appending the rest untouched.
-///
-/// The components after the longest existing ancestor are kept verbatim so a
-/// trailing `**` (or any not-yet-created segment) survives and both sides of a
-/// comparison are transformed identically. Returns `path` unchanged when even
-/// the first component cannot be resolved, so callers never lose information.
-#[cfg(windows)]
-fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
-    // Walk up until something exists, then rebuild downward.
-    let mut existing = path.to_path_buf();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if std::fs::symlink_metadata(&existing).is_ok() {
-            break;
-        }
-        let Some(name) = existing.file_name() else {
-            // Reached the root (or a bare prefix) without finding anything.
-            return path.to_path_buf();
-        };
-        tail.push(name.to_os_string());
-        match existing.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => existing = parent.to_path_buf(),
-            _ => return path.to_path_buf(),
-        }
-    }
-    let Ok(mut resolved) = std::fs::canonicalize(&existing) else {
-        return path.to_path_buf();
-    };
-    for segment in tail.iter().rev() {
-        resolved.push(segment);
-    }
-    resolved
 }
 
 /// Resolve `.` and `..` components without touching the filesystem. `..` pops
@@ -1316,23 +1266,78 @@ fn path_matches(candidate: &Path, grant: &str) -> bool {
     if grant == "*" || grant == "**" {
         return true;
     }
-    let candidate = candidate.to_string_lossy();
     let grant = normalize_path(Path::new(grant));
     let grant = grant.to_string_lossy();
     let suffix = recursive_suffix();
+
     if let Some(prefix) = grant.strip_suffix(&suffix) {
-        // Join with the *host* separator, not a hardcoded `/`. On Windows the
+        // A recursive grant covers the directory itself and everything under
+        // it. Two host-specific details matter here.
+        //
+        // The separator is joined rather than hardcoded. On Windows the
         // candidate is `C:\Users\me\temp\a.txt`, so a `{prefix}/` test never
-        // matched and every `/**` grant silently denied the whole tree — the
-        // failure surfaces as `capability denied: fs.read <path> is not
-        // declared` even though the grant plainly covers it. `MAIN_SEPARATOR`
-        // keeps the single-separator intent on Unix unchanged.
-        let child_prefix = format!("{prefix}{}", std::path::MAIN_SEPARATOR);
-        candidate == prefix || candidate.starts_with(&child_prefix)
-    } else if grant.contains('*') {
-        wildcard_match(&candidate, &grant)
-    } else {
-        candidate == grant
+        // matched and every `/**` grant silently denied the whole tree —
+        // surfacing as `capability denied: fs.read <path> is not declared`
+        // even though the grant plainly covered it.
+        //
+        // And on Windows one directory has more than one spelling: `%TEMP%`
+        // delivers `...\RUNNER~1\...` while `read_dir` yields children under
+        // `...\runneradmin\...`. Which spelling a path carries depends on
+        // where it came from, so requiring the two sides to agree is exactly
+        // what made `file.list` and `archive.zip` deny a directory to its own
+        // grant. Offering both sides in each spelling they can take, and
+        // accepting any combination, means neither has to know how the other
+        // was written. Unix produces a single spelling, so this is a no-op
+        // there and the original behaviour is preserved.
+        return pair_matches(&spellings(candidate), &spellings(Path::new(prefix)));
+    }
+
+    let grant = grant.as_ref();
+    spellings(candidate)
+        .iter()
+        .any(|candidate| match grant.contains('*') {
+            true => wildcard_match(candidate, grant),
+            false => candidate.as_str() == grant,
+        })
+}
+
+/// Whether any candidate spelling equals, or sits directly under, any prefix
+/// spelling.
+fn pair_matches(candidates: &[String], prefixes: &[String]) -> bool {
+    let sep = std::path::MAIN_SEPARATOR;
+    candidates.iter().any(|candidate| {
+        prefixes
+            .iter()
+            .any(|prefix| candidate == prefix || candidate.starts_with(&format!("{prefix}{sep}")))
+    })
+}
+
+/// Every spelling this host can produce for `path`, the path itself first.
+///
+/// On Windows that is the path as given plus its canonical form, which resolves
+/// 8.3 short names (`RUNNER~1`) to their long equivalents. Callers compare
+/// across spellings rather than normalising both sides, because a grant ends in
+/// `\**` — a segment that never exists on disk — so it cannot always be
+/// canonicalized and one-sided normalisation leaves the two sides incomparable.
+fn spellings(path: &Path) -> Vec<String> {
+    let given = path.to_string_lossy().to_string();
+    // Only Windows needs a second form today, so on other hosts this stays a
+    // single entry and every comparison reduces to an ordinary string compare
+    // with no added filesystem traffic.
+    #[cfg(not(windows))]
+    {
+        vec![given]
+    }
+    #[cfg(windows)]
+    {
+        let mut out = vec![given.clone()];
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            let canonical = canonical.to_string_lossy().to_string();
+            if canonical != given {
+                out.push(canonical);
+            }
+        }
+        out
     }
 }
 
