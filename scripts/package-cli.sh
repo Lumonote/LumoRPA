@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -euo pipefail
 
 # Package the `lumo` CLI into a distributable archive under dist/.
@@ -19,11 +20,27 @@ set -euo pipefail
 #     README.md
 #     LICENSE
 #   dist/lumorpa-<version>-<os>-<arch>.tar.gz   (.zip for Windows targets)
+#   dist/lumorpa-<version>-<os>-<arch>.tar.gz.sha256   (.zip.sha256 on Windows)
+#
+# WHY THE ASSERTS BELOW EXIST
+# ---------------------------
+# An archive that exists but is empty, or that contains a zero-byte binary, is
+# a successful-looking artifact that installs nothing. `tar`/`zip` both exit 0
+# happily in that case. So before this script claims success it checks the
+# archive is non-empty AND that the binary inside it is non-empty, and it
+# publishes a .sha256 next to the archive for whoever downloads it.
+#
+# ENVIRONMENT
+#   LUMO_CLI_CARGO_FEATURES=...   Extra cargo flags (e.g. --no-default-features).
+#   LUMO_ARTIFACT_MANIFEST=<path> Append kind<TAB>abspath<TAB>bytes<TAB>sha256.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${1:-}"
 
 cd "$ROOT"
+
+# Deterministic collation across macOS bash 3.2 and Git-Bash.
+export LC_ALL=C
 
 # Version comes from [workspace.package] in the root Cargo.toml.
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
@@ -40,13 +57,52 @@ ARCHIVE="tar.gz"
 # Why this exists: lumo-cli's default `hotkey-rdev` feature pulls in rdev,
 # which needs X11 headers via pkg-config on Linux. That is correct for a real
 # desktop release, but it makes *cross*-compilation impossible without a target
-# sysroot — pkg-config refuses to use host .pc files for a foreign target, and
+# sysroot - pkg-config refuses to use host .pc files for a foreign target, and
 # installing host dev packages does not help. A cross build that only needs the
 # CLI (loongarch64 on CI) can pass `--no-default-features`, which selects the
 # stub hotkey backend (see the `#[cfg(not(feature = "hotkey-rdev"))]` arm in
 # crates/lumo-cli/src/cmd/hotkey.rs). Host builds leave this empty and keep the
 # real backend.
 CLI_CARGO_FEATURES="${LUMO_CLI_CARGO_FEATURES:-}"
+
+LUMO_ARTIFACT_MANIFEST="${LUMO_ARTIFACT_MANIFEST:-}"
+MANIFEST_COMPLETE_SUFFIX=".complete"
+MANIFEST_COMPLETE_MARKER="manifest-complete"
+MANIFEST_LINES_BEFORE=0
+
+# Same fallback chain as build-desktop.sh: Git-Bash has no sha256sum.
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  fi
+}
+
+if [[ -n "$LUMO_ARTIFACT_MANIFEST" ]]; then
+  mkdir -p "$(dirname "$LUMO_ARTIFACT_MANIFEST")"
+  if [[ -f "$LUMO_ARTIFACT_MANIFEST" ]]; then
+    MANIFEST_LINES_BEFORE="$(wc -l < "$LUMO_ARTIFACT_MANIFEST" | tr -d '[:space:]')"
+  fi
+fi
+
+# On failure, rewind the manifest to where this run started. Never truncate to
+# empty: the same file may already hold another half's records.
+on_exit() {
+  local status=$?
+  if [[ "$status" -ne 0 && -n "$LUMO_ARTIFACT_MANIFEST" && -e "$LUMO_ARTIFACT_MANIFEST" ]]; then
+    local tmp="${LUMO_ARTIFACT_MANIFEST}.rewind.$$"
+    if head -n "$MANIFEST_LINES_BEFORE" "$LUMO_ARTIFACT_MANIFEST" > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$LUMO_ARTIFACT_MANIFEST"
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  return 0
+}
+trap on_exit EXIT
 
 if [[ "$TARGET" == "universal-apple-darwin" ]]; then
   # cargo has no native universal target: build each arch, then lipo-merge the
@@ -88,6 +144,13 @@ if [[ ! -f "$BIN_PATH" ]]; then
   exit 1
 fi
 
+# A zero-byte binary would sail through the archive step and produce a package
+# that installs nothing, so reject it while we still know which step made it.
+if [[ ! -s "$BIN_PATH" ]]; then
+  echo "error: built binary at $BIN_PATH is EMPTY (0 bytes); refusing to package it." >&2
+  exit 1
+fi
+
 PKG="lumorpa-${VERSION}-${OS}-${ARCH}"
 STAGE="dist/$PKG"
 
@@ -102,6 +165,11 @@ find "$STAGE/examples" \
   \( -name '*.original' -o -name '*.bak' -o -name '*.tmp' \
      -o -name '*.log' -o -name '.DS_Store' \) -delete
 cp README.md LICENSE "$STAGE/"
+
+if [[ ! -s "$STAGE/bin/$BIN_NAME" ]]; then
+  echo "error: staged binary $STAGE/bin/$BIN_NAME is missing or empty; refusing to package it." >&2
+  exit 1
+fi
 
 case "$ARCHIVE" in
   zip)
@@ -118,4 +186,67 @@ case "$ARCHIVE" in
     ;;
 esac
 
-echo "Packaged $OUT ($(du -h "$OUT" | cut -f1))"
+# The archive exists; is it worth shipping?
+if [[ ! -s "$OUT" ]]; then
+  echo "error: archive $OUT is missing or EMPTY; not a deliverable." >&2
+  exit 1
+fi
+
+ARCHIVE_BYTES="$(wc -c < "$OUT" | tr -d '[:space:]')"
+ARCHIVE_SHA="$(sha256_of "$OUT")"
+
+# Prove the BINARY inside the archive is non-empty. The archive being non-empty
+# only means tar/zip wrote headers; a 0-byte payload compresses to a perfectly
+# valid archive. Extract just that one member to a scratch file and measure it
+# - `tar -xOf` keeps nothing on disk, and `unzip -p` does the same for zip.
+BIN_IN_ARCHIVE_BYTES="0"
+case "$ARCHIVE" in
+  zip)
+    BIN_IN_ARCHIVE_BYTES="$(unzip -p "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
+    ;;
+  *)
+    BIN_IN_ARCHIVE_BYTES="$(tar -xOzf "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
+    ;;
+esac
+
+if [[ "${BIN_IN_ARCHIVE_BYTES:-0}" -le 0 ]]; then
+  echo "error: $OUT contains a 0-byte bin/$BIN_NAME; refusing to call this a package." >&2
+  exit 1
+fi
+
+# The checksum sidecar sits next to the archive so a downloader can verify the
+# file they got is the file we built. `shasum -c` compatible: a bare digest,
+# two spaces, then the basename.
+CHECKSUM_FILE="$OUT.sha256"
+printf '%s  %s\n' "$ARCHIVE_SHA" "$(basename "$OUT")" > "$CHECKSUM_FILE"
+if [[ ! -s "$CHECKSUM_FILE" ]]; then
+  echo "error: failed to write checksum file $CHECKSUM_FILE" >&2
+  exit 1
+fi
+
+if [[ -n "$LUMO_ARTIFACT_MANIFEST" ]]; then
+  printf '%s\t%s\t%s\t%s\n' "cli-archive" "$ROOT/$OUT" "$ARCHIVE_BYTES" "$ARCHIVE_SHA" >> "$LUMO_ARTIFACT_MANIFEST"
+  printf '%s\t%s\t%s\t%s\n' "cli-archive-sha256" "$ROOT/$CHECKSUM_FILE" "$(wc -c < "$CHECKSUM_FILE" | tr -d '[:space:]')" "$(sha256_of "$CHECKSUM_FILE")" >> "$LUMO_ARTIFACT_MANIFEST"
+
+  # The seal names the length of the artifact RECORDS above - everything in the
+  # file UP TO BUT NOT INCLUDING the marker line. package-release.sh
+  # merge_manifest() verifies exactly that: the first N bytes are the records and
+  # whatever follows is one well-formed marker line naming N. The marker cannot
+  # state the whole-file length, because the marker is part of the file it would
+  # be measuring (its own digit width feeds back into the total).
+  #
+  # Measured ONCE, here, BEFORE either append, and then reused verbatim for both
+  # copies. Measuring twice would hand the sibling file a different number the
+  # second time around, because the first printf has already appended the marker
+  # line by then - the producer would contradict itself by exactly the marker
+  # line's length. Same trap build-desktop.sh documents: `wc -c` must run as its
+  # own command before the append, never in the same command as the redirection.
+  manifest_bytes="$(wc -c < "$LUMO_ARTIFACT_MANIFEST" | tr -d '[:space:]')"
+  printf '%s\t%s\n' "$MANIFEST_COMPLETE_MARKER" "$manifest_bytes" >> "$LUMO_ARTIFACT_MANIFEST"
+  printf '%s\t%s\n' "$MANIFEST_COMPLETE_MARKER" "$manifest_bytes" > "${LUMO_ARTIFACT_MANIFEST}${MANIFEST_COMPLETE_SUFFIX}"
+fi
+
+echo "Packaged $OUT ($(du -h "$OUT" | cut -f1), $ARCHIVE_BYTES bytes,"
+echo "         sha256 $ARCHIVE_SHA)"
+echo "Wrote $CHECKSUM_FILE"
+echo "Verified bin/$BIN_NAME inside the archive: $BIN_IN_ARCHIVE_BYTES bytes"

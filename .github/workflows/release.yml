@@ -1,12 +1,30 @@
 name: release
 
-# Cross-platform packaging pipeline. For each platform it produces BOTH the
-# desktop installer (build-desktop.sh → cargo tauri) and the CLI archive
-# (package-cli.sh) through one entry point, scripts/package-release.sh, which
-# sequences the pair against a single target directory and fails closed unless
-# both halves are produced. Artifacts are uploaded as workflow artifacts, and on
-# a v* tag attached to the GitHub Release.
+# Two-channel release pipeline. One workflow, two ways to get installable
+# software out of it:
 #
+#   * main branch  -> a ROLLING PRE-RELEASE tagged `dev-latest`. Every push to
+#     main rebuilds the desktop installers for all platforms and republishes
+#     them at one stable URL:
+#       https://github.com/<owner>/<repo>/releases/download/dev-latest/<file>
+#     These are UNOFFICIAL, UNSIGNED development builds — a convenient snapshot
+#     for testing, not a supported release. The build still runs the full
+#     production gate below, so a red gate means no dev-latest is published.
+#   * v* tag       -> a real GitHub Release, exactly as before, with signed and
+#     (on macOS) notarized artifacts. Tag builds additionally REQUIRE the Apple
+#     signing / notarization and Tauri updater secrets, and a tag without them
+#     fails closed rather than shipping an unsigned "release".
+#
+# The sign/notarize assertion is deliberately tag-only for that reason: main
+# pushes carry no signing secrets, so requiring them there would turn every main
+# build red without producing a single extra installer. Unsigned main builds
+# rely on scripts/build-desktop.sh skipping updater artifacts when
+# LUMO_UPDATER_PUBKEY is empty (no .sig files, no broken auto-update manifest).
+#
+# For each platform the pipeline produces BOTH the desktop installer
+# (build-desktop.sh → cargo tauri) and the CLI archive (package-cli.sh) through
+# one entry point, scripts/package-release.sh, which sequences the pair against a
+# single target directory and fails closed unless both halves are produced.
 # loongarch64 is the exception: it ships a CLI archive only (no desktop), so it
 # calls package-cli.sh directly.
 #
@@ -14,30 +32,46 @@ name: release
 # built or verified on a macOS dev machine — each Tauri bundler needs the target
 # OS's own WebKit/GTK + native bundler (the same reason ci.yml's cross-check only
 # runs `cargo check --exclude lumorpa-desktop`). This file is validated for
-# syntax locally; its cross-platform jobs are first exercised by a real tag run
-# on GitHub-hosted runners.
+# syntax locally; its cross-platform jobs are first exercised by a real push on
+# GitHub-hosted runners.
+#
+# Windows and macOS are the priority targets: Windows emits BOTH the NSIS .exe
+# and the .msi (they can share a basename, so staging keeps them distinct), and
+# macOS emits a universal .dmg plus the .app staging tree.
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
+# Collapse superseded builds per ref, but never cancel a tag build: a release
+# that has started must be allowed to finish, while yesterday's dev-latest run
+# is disposable.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 permissions:
-  contents: write # softprops/action-gh-release creates/updates the Release
+  contents: write # softprops/action-gh-release creates/updates releases
 
 env:
   CARGO_TERM_COLOR: always
+  # One artifact path per channel: real releases keep 90 days (auditable), while
+  # rolling dev snapshots are superseded within hours and are dropped at 14.
+  ARTIFACT_RETENTION_DAYS: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}
 
 jobs:
   production-gate:
     name: Production agent gates
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -54,6 +88,8 @@ jobs:
           npm ci
           npm test
           npm run lint
+      # TAG-ONLY on purpose. main pushes have no signing secrets; asserting
+      # them there would turn every main build red — and produce nothing.
       - name: Require macOS signing and notarization secrets for tagged releases
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -84,7 +120,7 @@ jobs:
     needs: production-gate
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust (+ both macOS arches)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -101,17 +137,34 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
         run: scripts/package-release.sh universal-apple-darwin app,dmg
+      # Every copy is `cp -n` (no-clobber) and every find gets `-type f`, so two
+      # sources that happen to share a basename cannot silently overwrite one
+      # another. The closing assertion fails the job if the staging directory is
+      # empty, so a broken glob can never be masked by a green upload step.
       - name: Stage artifacts
         run: |
+          set -euo pipefail
           mkdir -p out
-          cp dist/lumorpa-*-darwin-universal.tar.gz out/
-          find target/universal-apple-darwin/release/bundle \
-            \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp {} out/ \;
+          cp -n dist/lumorpa-*-darwin-universal.tar.gz out/ 2>/dev/null || true
+          find target/universal-apple-darwin/release/bundle -type f \
+            \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp -n {} out/ \;
+          test -n "$(ls -A out)" || { echo "error: macOS staging produced no artifacts" >&2; exit 1; }
+          ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-macos-universal
           path: out/*
           if-no-files-found: error
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+      - name: Summarize artifacts
+        run: |
+          {
+            echo "### macOS (universal · Intel + Apple Silicon)"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | ---: |"
+            find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -123,7 +176,7 @@ jobs:
     needs: production-gate
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -138,18 +191,43 @@ jobs:
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
         shell: bash
         run: scripts/package-release.sh x86_64-pc-windows-msvc nsis,msi
+      # Windows is a priority target, so the NSIS .exe and the .msi are staged
+      # through SEPARATE find passes. Tauri's WiX output and its NSIS output can
+      # carry the SAME basename, so a single flat find|cp could keep only one of
+      # them; `cp -n` (no-clobber) plus the assertions at the end make the job
+      # fail loudly instead of publishing a Release with one installer.
       - name: Stage artifacts
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p out
-          cp dist/lumorpa-*-windows-*.zip out/
-          find target/x86_64-pc-windows-msvc/release/bundle \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.zip' -o -name '*.sig' \) -exec cp {} out/ \;
+          cp -n dist/lumorpa-*-windows-*.zip out/ 2>/dev/null || true
+          find target/x86_64-pc-windows-msvc/release/bundle/nsis -type f \
+            \( -name '*.exe' -o -name '*.zip' -o -name '*.sig' \) -exec cp -n {} out/ \;
+          find target/x86_64-pc-windows-msvc/release/bundle/msi -type f \
+            \( -name '*.msi' -o -name '*.zip' -o -name '*.sig' \) -exec cp -n {} out/ \;
+          test -n "$(ls -A out)" || { echo "error: Windows staging produced no artifacts" >&2; exit 1; }
+          ls -l out
+          test -n "$(find out -maxdepth 1 -name '*.exe' -print -quit)" || {
+            echo "error: no NSIS .exe staged" >&2; exit 1; }
+          test -n "$(find out -maxdepth 1 -name '*.msi' -print -quit)" || {
+            echo "error: no .msi staged" >&2; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-windows-x86_64
           path: out/*
           if-no-files-found: error
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+      - name: Summarize artifacts
+        shell: bash
+        run: |
+          {
+            echo "### Windows (x86_64)"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | ---: |"
+            find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -161,7 +239,7 @@ jobs:
     needs: production-gate
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
@@ -180,16 +258,29 @@ jobs:
         run: scripts/package-release.sh "" deb,rpm,appimage
       - name: Stage artifacts
         run: |
+          set -euo pipefail
           mkdir -p out
-          cp dist/lumorpa-*-linux-*.tar.gz out/
-          find target/release/bundle \
+          cp -n dist/lumorpa-*-linux-*.tar.gz out/ 2>/dev/null || true
+          find target/release/bundle -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.sig' \) \
-            -exec cp {} out/ \;
+            -exec cp -n {} out/ \;
+          test -n "$(ls -A out)" || { echo "error: Linux x86_64 staging produced no artifacts" >&2; exit 1; }
+          ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-linux-x86_64
           path: out/*
           if-no-files-found: error
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+      - name: Summarize artifacts
+        run: |
+          {
+            echo "### Linux (x86_64 · deb/rpm/AppImage)"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | ---: |"
+            find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -201,7 +292,7 @@ jobs:
     needs: production-gate
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
@@ -220,15 +311,28 @@ jobs:
         run: scripts/package-release.sh "" deb,rpm
       - name: Stage artifacts
         run: |
+          set -euo pipefail
           mkdir -p out
-          cp dist/lumorpa-*-linux-*.tar.gz out/
-          find target/release/bundle \
-            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp {} out/ \;
+          cp -n dist/lumorpa-*-linux-*.tar.gz out/ 2>/dev/null || true
+          find target/release/bundle -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp -n {} out/ \;
+          test -n "$(ls -A out)" || { echo "error: Linux aarch64 staging produced no artifacts" >&2; exit 1; }
+          ls -l out
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-linux-aarch64
           path: out/*
           if-no-files-found: error
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+      - name: Summarize artifacts
+        run: |
+          {
+            echo "### Linux (aarch64 · 麒麟 ARM 基线)"
+            echo
+            echo "| Artifact | Size |"
+            echo "| --- | ---: |"
+            find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -241,7 +345,7 @@ jobs:
     runs-on: ubuntu-22.04
     continue-on-error: true # no GitHub-hosted loong runner; informational only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: loongarch64-unknown-linux-gnu
@@ -274,9 +378,121 @@ jobs:
         with:
           name: lumorpa-linux-loongarch64
           path: dist/lumorpa-*-linux-loongarch64.tar.gz
+          # Intentionally `warn`, not `error`: this job is continue-on-error and
+          # has no real runner, so its absence must not fail the release. The
+          # publish job below likewise tolerates its absence.
           if-no-files-found: warn
+          retention-days: ${{ fromJSON(env.ARTIFACT_RETENTION_DAYS) }}
+      - name: Summarize artifacts
+        run: |
+          {
+            echo "### loongarch64 (龙芯 · best-effort CLI)"
+            echo
+            if ls dist/lumorpa-*-linux-loongarch64.tar.gz >/dev/null 2>&1; then
+              echo "| Artifact | Size |"
+              echo "| --- | ---: |"
+              for f in dist/lumorpa-*-linux-loongarch64.tar.gz; do
+                printf '| \`%s\` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+              done
+            else
+              echo "_No loongarch64 CLI archive produced (expected: no hosted runner for this target)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/lumorpa-*-linux-loongarch64.tar.gz
+
+  # MAIN CHANNEL. Runs only for branch pushes (i.e. main), never for tags: on a
+  # tag every platform job has already attached its own files to the real
+  # Release. This job collects the same artifacts into ONE rolling pre-release so
+  # a main push always leaves behind a stable, downloadable URL rather than only
+  # an expiring CI artifact.
+  publish-dev:
+    name: Publish rolling dev-latest pre-release
+    needs: [production-gate, macos, windows, linux-x64, linux-arm64, loongarch64]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # `pattern: lumorpa-*` matches every platform artifact by name;
+          # merge-multiple flattens them all into one flat staging directory.
+          pattern: lumorpa-*
+          merge-multiple: true
+          path: dev-assets
+      - name: Verify we actually have installers
+        run: |
+          set -euo pipefail
+          ls -lR dev-assets
+          test -n "$(find dev-assets -maxdepth 1 -type f -print -quit)" || {
+            echo "error: no artifacts were merged; refusing to publish an empty pre-release" >&2
+            exit 1
+          }
+          # The user-visible promise is "there is an installer to download", so
+          # assert at least one Windows and one macOS payload survived the merge.
+          test -n "$(find dev-assets -maxdepth 1 \( -name '*.exe' -o -name '*.msi' \) -print -quit)" || {
+            echo "error: no Windows installer (.exe/.msi) in dev-assets" >&2; exit 1; }
+          test -n "$(find dev-assets -maxdepth 1 -name '*.dmg' -print -quit)" || {
+            echo "error: no macOS .dmg in dev-assets" >&2; exit 1; }
+      - name: Summarize downloads
+        run: |
+          {
+            echo "## LumoRPA dev-latest (unofficial build)"
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+            echo
+            echo "| Type | Artifact | Size |"
+            echo "| --- | --- | ---: |"
+            find dev-assets -maxdepth 1 -type f -exec sh -c 'printf "| %s | \`%s\` | %s |\n" "$(basename "$1" | sed -E "s/.*\.(exe|msi|dmg|deb|rpm|AppImage|zip|tar\.gz)$/\1/")" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish rolling pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: LumoRPA dev-latest (unofficial, unsigned)
+          prerelease: true
+          make_latest: false
+          files: dev-assets/*
+          body: |
+
+            > **UNOFFICIAL, UNSIGNED DEVELOPMENT BUILD — NOT A RELEASE.**
+            >
+            > These installers are built automatically from the tip of `main`
+            > on every push. They are **not signed, not notarized, and not
+            > verified**. macOS will show a Gatekeeper warning and Windows will
+            > show a SmartScreen warning — that is expected.
+            > For a supported build, use a versioned release instead.
+
+            Rolling development snapshot of `main`.
+
+            - Commit: `${{ github.sha }}`
+            - Built: run `${{ github.run_number }}` of workflow run `${{ github.run_id }}`
+            - Source: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+
+            This tag is **reused** on every main push: the URL is stable, the
+            contents are replaced each time.
+
+            | Platform | What to download |
+            | --- | --- |
+            | **Windows (priority)** | `*-setup.exe` (NSIS installer) or `*.msi` (WiX/MSI) |
+            | **macOS (priority)** | `*.dmg` (universal: Intel + Apple Silicon) |
+            | Linux x86_64 | `.deb`, `.rpm`, `.AppImage` |
+            | Linux aarch64 | `.deb`, `.rpm` |
+            | CLI | `lumorpa-*-cli-*.tar.gz` / `*.zip` per platform |
+
+            Updater signatures (`.sig`) are intentionally absent from dev
+            builds: `LUMO_UPDATER_PUBKEY` is empty on main, so
+            `scripts/build-desktop.sh` skips updater artifacts rather than
+            emitting a manifest that would point at unsigned payloads.
+
+      - name: Job summary
+        run: |
+          {
+            echo
+            echo "**Published rolling pre-release \`dev-latest\`** (prerelease, not latest)."
+            echo
+            echo "Download page: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/dev-latest"
+          } >> "$GITHUB_STEP_SUMMARY"

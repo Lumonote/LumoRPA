@@ -70,19 +70,38 @@ CLI 从 `$LUMO_HOME/skills` 加载已装技能，也会加载流程文件同级�
 
 > 沙箱或受限环境下 `cargo` 可能无法写入默认 registry 缓存，把 `CARGO_HOME` 重定向到工作区即可：`export CARGO_HOME=$PWD/.cargo-home`（该目录已在 `.gitignore` 中）。
 
-### 2. 安装包
+### 2. 安装包与发布流程
 
-前往 [GitHub Releases](https://github.com/Lumonote/LumoRPA/releases) 下载对应平台的产物：
+**每次推送到 `main` 都会自动构建可安装的安装包**，不需要打 tag：Windows（NSIS `.exe` 安装器 **和** `.msi`）、macOS（universal `.dmg`，Intel + Apple Silicon 同一个文件）、Linux 包，外加各平台的 CLI 归档。推 `v*` tag 则发布带签名的正式 GitHub Release。完整流程见 [`docs/release.md`](./docs/release.md)。
 
 | 平台 | 桌面 | CLI 归档 |
 | --- | --- | --- |
-| macOS universal（Intel + ARM） | `.dmg` | `…-darwin-universal.tar.gz` |
 | Windows x86_64 | `.exe`（NSIS）+ `.msi` | `…-windows-x86_64.zip` |
+| macOS universal（Intel + ARM） | `.dmg`（单文件通用） | `…-darwin-universal.tar.gz` |
 | Linux x86_64 | `.deb` / `.rpm` / `.AppImage` | `…-linux-x86_64.tar.gz` |
 | Linux aarch64（麒麟 ARM） | `.deb` / `.rpm` | `…-linux-aarch64.tar.gz` |
 | loongarch64（龙芯） | — | `…-linux-loongarch64.tar.gz` |
 
-> **打包装不了跨平台。** 每个 Tauri 目标都需要该 OS 原生的 WebKit / GTK，桌面安装包无法从 macOS 交叉构建；Linux 与 Windows 产物由 CI 在各自 runner 上构建（见下方「构建与发布」）。仓库内的 `dist/` 是历史的本地打包输出，不作为可复现来源。
+**去哪里下载**（按方便程度排序）：
+
+1. **滚动预览版（固定链接，推荐）**：[github.com/Lumonote/LumoRPA/releases/tag/dev-latest](https://github.com/Lumonote/LumoRPA/releases/tag/dev-latest) —— Windows / macOS 安装包可以直接点。这个 tag **不是**正式发布，它每次 main 推送都会被重建覆盖，所以链接永远有效、内容永远是最新的。
+2. **Workflow 运行页 → Artifacts**：[`release` workflow](https://github.com/Lumonote/LumoRPA/actions/workflows/release.yml) 最近一次 main 运行，在页面底部 `Artifacts` 区下载。**仅保留 14 天**，过期就没了。
+3. **CLI 用户**：`gh run download` 取最近一次 main 构建的产物：
+
+   ```bash
+   gh run download --repo Lumonote/LumoRPA \
+     --branch main --workflow release.yml \
+     --pattern 'lumorpa-*' --dir ./lumorpa-dev
+   ```
+
+> ⚠️ **`dev-latest` 是非官方、未签名的构建快照。** 它由 main 的最新提交自动生成，**没有代码签名、没有 Apple 公证**，macOS 会弹 Gatekeeper 警告、Windows 会弹 SmartScreen 警告——这是预期行为，不是包坏了。
+>
+> - **macOS**：在 Finder 里**右键（或按住 Control 点击）应用 → 打开**，再确认一次；直接双击会被拦下。也可以 `xattr -dr com.apple.quarantine /Applications/LumoRPA.app`（只在你信任该构建时用）。
+> - **Windows**：SmartScreen 提示里点 **更多信息 → 仍要运行**。
+>
+> **需要受支持的构建，请用版本化的 `v*` tag 发布**（见下方「构建与发布」）；需要签名安装包就不要用 `dev-latest`。
+
+> **打包装不了跨平台。** 每个 Tauri 目标都需要该 OS 原生的 WebKit / GTK，桌面安装包无法从 macOS 交叉构建；Linux 与 Windows 产物由 CI 在各自 runner 上构建。仓库内的 `dist/` 是历史的本地打包输出，不作为可复现来源。
 
 ### 3. 桌面工作台（开发模式）
 
@@ -141,14 +160,24 @@ scripts/package-cli.sh universal-apple-darwin   # macOS fat binary（lipo 合并
 
 产出 `dist/lumorpa-<version>-<os>-<arch>.tar.gz`（Windows 为 `.zip`），内含 `bin/lumo`、`examples/`、`README.md` 与 `LICENSE`。loongarch64（龙芯）只出 CLI 归档，走这个脚本。
 
-### 发布：`.github/workflows/release.yml`
+### 发布：`.github/workflows/release.yml`（两条通道）
 
-推送 `v*` tag 会为每个平台在各自 runner 上构建**桌面安装包 + CLI 归档**，并附到同名 GitHub Release。也可在 Actions 页面选择 `release` → *Run workflow* 手动构建（手动触发的产物仅留在 Actions Artifacts）。
+[`release.yml`](./.github/workflows/release.yml) 是一个 workflow、两条发布通道：
+
+| 触发 | 产出 | 签名 |
+| --- | --- | --- |
+| push `main` | 全平台**桌面安装包 + CLI 归档**，合并发布为滚动预发布 `dev-latest` | ❌ 未签名、未公证 |
+| push `v*` tag | 真正的 GitHub Release，各平台各自附上产物 | ✅ 需要 Apple 签名 / 公证与 Tauri updater secrets，缺任一项**直接失败**（绝不放行未签名的「正式版」） |
 
 ```bash
+# 通道二：正式发布
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+main 通道在完整门禁（`production-gate`）通过后才会发布 `dev-latest`，且发布前断言合并产物里确有 Windows 安装包与 macOS `.dmg`——空产物宁可让流水线红，也不发一个装不了东西的包。也可在 Actions 页面选择 `release` → *Run workflow* 手动构建（手动触发走 main 通道语义，产物留在 Actions Artifacts）。
+
+> tag 构建与 main 构建共用同一份打包脚本（`scripts/package-release.sh`），因此**能发布出来的东西，两条通道是一样的**；区别只在签名与保留期（正式 90 天 / dev 14 天）。
 
 ## 测试与质量检查
 
@@ -175,6 +204,7 @@ CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）分层把守：
 | `cargo-deny` | 供应链：advisories（含 yank）、licenses、sources、bans |
 | `msrv` | 在声明的 MSRV 1.88 上 `cargo check` |
 | `cross-check` | aarch64 硬门禁；loongarch64 best-effort |
+| `bundle-smoke` | 只打 CLI 归档，验证打包脚本没坏（不含桌面打包，那由 `release.yml` 在 main 上覆盖） |
 
 > 先在本地把受影响模块的测试与静态检查跑绿再提 PR。CI 单次全量约需数分钟，本地能复现的失败不要留给 CI。
 
@@ -190,6 +220,7 @@ CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）分层把守：
 | [`docs/04-优化与补充开发-路线图.md`](./docs/04-优化与补充开发-路线图.md) | 路线图与补强清单 |
 | [`docs/05-LumoFlow-Instruction-Set.md`](./docs/05-LumoFlow-Instruction-Set.md) | **LumoFlow 指令集规范**：YAML 结构、步骤字段、模板引用、动作清单 |
 | [`docs/06-Capability-Coverage-Matrix.md`](./docs/06-Capability-Coverage-Matrix.md) | **能力覆盖矩阵**：对表进度、A/B/C 缺口分级、实测数字 |
+| [`docs/release.md`](./docs/release.md) | **安装包从哪来**：main / tag 两条通道、产物清单、未签名包的处理 |
 | [`apps/desktop/README.md`](./apps/desktop/README.md) | 桌面打包边界与构建细节 |
 
 ## 仓库结构

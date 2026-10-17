@@ -215,3 +215,48 @@ jobs:
           export "CARGO_TARGET_$(echo "$underscore" | tr '[:lower:]' '[:upper:]')_LINKER=${CROSS_CC}"
           cargo check --workspace --locked --exclude lumorpa-desktop \
             --no-default-features --target "$TARGET"
+
+  # Cheap "can we still produce a downloadable file?" gate on the CLI packaging
+  # path. This is deliberately CLI-ONLY: a full desktop bundle (Tauri + NSIS/MSI
+  # on Windows, a universal .dmg on macOS) is already exercised by release.yml on
+  # every push to main, so duplicating it here would only add ~20 minutes of
+  # runner time per job for a signal we already have. What release.yml does NOT
+  # cover is pull_request: it never runs on a PR, so today a broken packaging
+  # script is only discovered after the merge, on main. This job runs on both
+  # triggers and is the PR-side early warning — it packages the lumo CLI and
+  # asserts an archive actually came out.
+  #
+  # The Linux deps are needed even without Tauri: cargo unifies features across
+  # the workspace, so lumo-cli drags in lumo-actions' `desktop` feature
+  # (rdev/x11, via pkg-config) and lumo-voice's `capture` feature (cpal/alsa).
+  # Same composite action as the other Linux jobs, so the list cannot drift.
+  #
+  # package-cli.sh is left to fail on its own if it is broken — no `|| true`.
+  # A smoke test that swallows the failure it exists to catch is worse than none.
+  bundle-smoke:
+    name: bundle smoke / cli archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/linux-deps
+      # Takes only [TARGET]; with no argument it builds for the host (x86_64
+      # Linux) and writes dist/lumorpa-<version>-linux-<arch>.tar.gz plus the
+      # .sha256 sidecar next to it.
+      - name: Package CLI archive
+        run: scripts/package-cli.sh
+      # Assert at the JOB level, not just inside the script: this catches a
+      # main-branch change to package-cli.sh's output naming or staging, or an
+      # accidental `dist/` clean-up step, that the script's own checks cannot
+      # see. -size +0 catches a truncated release build.
+      - name: Assert the CLI archive is a usable deliverable
+        run: |
+          set -euo pipefail
+          ls -l dist
+          archive="$(find dist -maxdepth 1 -name 'lumorpa-*.tar.gz' -print -quit)"
+          test -n "$archive" || { echo "error: no dist/lumorpa-*.tar.gz was produced" >&2; exit 1; }
+          test -s "$archive" || { echo "error: $archive is empty" >&2; exit 1; }
+          test -s "$archive.sha256" || { echo "error: $archive.sha256 is missing or empty" >&2; exit 1; }
+          echo "OK: $archive ($(du -h "$archive" | cut -f1))"

@@ -20,6 +20,7 @@
 | [`03-Subsystems-Deep-Dive.md`](./03-Subsystems-Deep-Dive.md) | 子系统深潜：动作族、浏览器 / 桌面录制、技能加载、AI 路由、语音 | 实现具体子系统时 |
 | [`04-优化与补充开发-路线图.md`](./04-优化与补充开发-路线图.md) | 路线图与补强清单：分期目标、验收标准、排期依据 | 规划与排期时 |
 | [`05-LumoFlow-Instruction-Set.md`](./05-LumoFlow-Instruction-Set.md) | **LumoFlow 指令集规范**：YAML 结构、步骤字段（含 `on_error` / `retry`）、模板引用、动作清单 | 写流程或加动作时 |
+| [`release.md`](./release.md) | **安装包从哪来**：main / tag 两条发布通道、各平台产物清单、未签名包如何处理 | 需要下发或排查安装包时 |
 | [`06-Capability-Coverage-Matrix.md`](./06-Capability-Coverage-Matrix.md) | **能力覆盖矩阵**：成熟商业 RPA 指令的对表进度、A/B/C 缺口分级、测试与回归实测数字 | 判断「还差什么」时 |
 
 ### 专题设计（实现相关能力时并读）
