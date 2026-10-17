@@ -49,7 +49,13 @@ impl Backend for WindowsBackend {
 
 fn read_foreground() -> anyhow::Result<FocusSnapshot> {
     let hwnd: HWND = unsafe { GetForegroundWindow() };
-    if hwnd.0 == 0 {
+    // `HWND` in the `windows` crate is a newtype over a raw pointer
+    // (`pub struct HWND(pub *mut c_void)`) as of 0.58, so `hwnd.0 == 0` no
+    // longer compiles — it compares a pointer against an integer. `is_invalid()`
+    // is the half that the crate provides for exactly this check (it is
+    // `self.0.is_null()`); `IsWindow` would also work but adds a syscall where a
+    // null test is enough.
+    if hwnd.is_invalid() {
         return Ok(FocusSnapshot::default());
     }
     let mut buf = [0u16; 512];
