@@ -584,6 +584,22 @@ spec:
         .to_string()
     }
 
+    /// Build a `tools/call` request line, escaping any path in `arguments`.
+    ///
+    /// Same reason as `read_request`: interpolating a Windows path into the
+    /// JSON string literal produces `\U` / `\r`, which fail to parse, so the
+    /// response carries no `result.content[0].text` and the test panics on
+    /// "text payload" rather than on anything to do with the tool.
+    fn tool_call_request(id: u32, tool: &str, arguments: Value) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        })
+        .to_string()
+    }
+
     fn unwrap_tool_text(resp: &Value) -> Value {
         let text = resp["result"]["content"][0]["text"]
             .as_str()
@@ -663,14 +679,8 @@ spec:
         let flows = TempDir::new().unwrap();
         write_flow(flows.path(), "demo", &sample_flow("demo"));
         let s = Server::new(home.path().to_path_buf(), flows.path().to_path_buf());
-        let p = flows
-            .path()
-            .join("demo.lumoflow.yaml")
-            .display()
-            .to_string();
-        let line = format!(
-            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"validate_flow","arguments":{{"path":"{p}"}}}}}}"#,
-        );
+        let p = flows.path().join("demo.lumoflow.yaml");
+        let line = tool_call_request(5, "validate_flow", serde_json::json!({ "path": p }));
         let resp = call(&s, &line).await;
         let payload = unwrap_tool_text(&resp);
         assert_eq!(payload["id"], "demo");
@@ -683,14 +693,8 @@ spec:
         let flows = TempDir::new().unwrap();
         write_flow(flows.path(), "demo", &sample_flow("demo"));
         let s = Server::new(home.path().to_path_buf(), flows.path().to_path_buf());
-        let p = flows
-            .path()
-            .join("demo.lumoflow.yaml")
-            .display()
-            .to_string();
-        let line = format!(
-            r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"run_flow","arguments":{{"path":"{p}"}}}}}}"#,
-        );
+        let p = flows.path().join("demo.lumoflow.yaml");
+        let line = tool_call_request(6, "run_flow", serde_json::json!({ "path": p }));
         let resp = call(&s, &line).await;
         let payload = unwrap_tool_text(&resp);
         assert_eq!(payload["success"], true);
