@@ -567,7 +567,10 @@ async fn print_pdf_writes_a_pdf_and_attaches_an_artifact() {
     lumo_actions::register_all(&mut reg);
     let vm = FlowVm::new(reg, Some(repo.clone())).with_artifacts_dir(Some(artifacts_dir));
 
-    let tmp_glob = format!("{}/**", tmp.path().display());
+    let tmp_glob = format!(
+        "{}/**",
+        common::yaml_quoted(&tmp.path().display().to_string())
+    );
     let flow = lumo_dsl::parse_str(&format!(
         r#"
 apiVersion: lumorpa.io/v1
@@ -583,7 +586,7 @@ spec:
     - {{ id: pdf, action: browser.print_pdf, with: {{ path: "{pdf}", landscape: true }} }}
 "#,
         url = server.uri(),
-        pdf = pdf_path.display(),
+        pdf = common::yaml_quoted(&pdf_path.display().to_string()),
     ))
     .expect("parse flow");
 
@@ -826,7 +829,10 @@ async fn screenshot_and_extract_table_attach_artifacts() {
     lumo_actions::register_all(&mut reg);
     let vm = FlowVm::new(reg, Some(repo.clone())).with_artifacts_dir(Some(artifacts_dir));
 
-    let tmp_glob = format!("{}/**", tmp.path().display());
+    let tmp_glob = format!(
+        "{}/**",
+        common::yaml_quoted(&tmp.path().display().to_string())
+    );
     let flow = lumo_dsl::parse_str(&format!(
         r#"
 apiVersion: lumorpa.io/v1
@@ -843,7 +849,7 @@ spec:
     - {{ id: tbl, action: browser.extract_table, with: {{ selector: "table" }} }}
 "#,
         url = server.uri(),
-        shot = shot.display(),
+        shot = common::yaml_quoted(&shot.display().to_string()),
     ))
     .expect("parse flow");
 

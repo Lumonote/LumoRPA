@@ -10,6 +10,19 @@ use lumo_core::{ActionRegistry, StepCtx};
 pub use lumo_dsl::Capabilities;
 use serde_json::Value;
 
+/// Escape a filesystem path for use inside a YAML double-quoted scalar, or a
+/// JSON string literal.
+///
+/// Several fixtures below interpolate a temp directory into YAML (`path:
+/// "..."`). That is fine on Unix and broken on Windows, where the path is
+/// `C:\Users\runneradmin\...`: YAML reads `\U` as a Unicode escape, the
+/// document fails to parse, and the test fails for a reason that has nothing
+/// to do with the action under test. Doubling the backslash is the whole fix;
+/// on Unix there is nothing to escape and this is a no-op.
+pub fn yaml_quoted(path: &str) -> String {
+    path.replace('\\', "\\\\")
+}
+
 /// Build a `StepCtx` carrying `caps` and a registry with every built-in action
 /// registered (so registry-driven actions like `control.*`/`skill.*` resolve).
 pub fn ctx_with(caps: Capabilities) -> StepCtx {

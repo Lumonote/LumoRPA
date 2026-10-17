@@ -270,7 +270,10 @@ async fn bound_sqlite_resource_reuses_one_connection_across_steps() {
     let caps = fs_caps(dir.path());
     let run_id = "db-reuse-1";
     // The resource declares the path; bound steps omit their own `db`.
-    let decl_yaml = format!("kind: sqlite\npath: \"{}\"\n", db.display());
+    let decl_yaml = format!(
+        "kind: sqlite\npath: \"{}\"\n",
+        common::yaml_quoted(&db.display().to_string())
+    );
     let res: &[(&str, &str)] = &[("mydb", decl_yaml.as_str())];
 
     // Step 1 creates a CONNECTION-SCOPED temp table. Temp tables die with the
@@ -329,7 +332,10 @@ async fn bound_sqlite_query_cannot_write_despite_shared_rw_connection() {
     let db = dir.path().join("ro.db");
     let caps = fs_caps(dir.path());
     let run_id = "db-reuse-ro";
-    let decl_yaml = format!("kind: sqlite\npath: \"{}\"\n", db.display());
+    let decl_yaml = format!(
+        "kind: sqlite\npath: \"{}\"\n",
+        common::yaml_quoted(&db.display().to_string())
+    );
     let res: &[(&str, &str)] = &[("mydb", decl_yaml.as_str())];
 
     // Seed a table via the bound (writable) exec path.

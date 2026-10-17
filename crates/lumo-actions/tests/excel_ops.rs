@@ -56,7 +56,10 @@ async fn bound_xlsx_resource_supplies_file_for_repeated_actions() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("bound.xlsx");
     let caps = fs_caps(dir.path());
-    let resource = format!("kind: xlsx\npath: {}\n", file.display());
+    let resource = format!(
+        "kind: xlsx\npath: \"{}\"\n",
+        common::yaml_quoted(&file.display().to_string())
+    );
     let resources = [("book", resource.as_str())];
 
     run_bound(

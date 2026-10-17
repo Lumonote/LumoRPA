@@ -5,6 +5,16 @@ use lumo_core::{ActionRegistry, FlowVm, RunOptions};
 use lumo_dsl::parse_str;
 use lumo_storage::Repo;
 
+/// Escape a filesystem path for use inside a YAML double-quoted scalar.
+///
+/// These fixtures interpolate temp paths into `path: "..."`, and a Windows
+/// path is full of backslashes: `C:\Users\runneradmin\...` makes YAML read
+/// `\U` as a Unicode escape and the whole document fails to parse. Doubling
+/// the backslash is the fix; on Unix the path has none and this is a no-op.
+fn yaml_quoted(path: &str) -> String {
+    path.replace('\\', "\\\\")
+}
+
 async fn run(yaml: &str) -> lumo_core::RunReport {
     let flow = parse_str(yaml).expect("parse");
     let mut reg = ActionRegistry::new();
@@ -183,7 +193,7 @@ spec:
         path: "{}"
         content: hello
 "#,
-        path.display()
+        yaml_quoted(&path.display().to_string())
     );
     let flow = parse_str(&yaml).expect("parse");
     let mut reg = ActionRegistry::new();
