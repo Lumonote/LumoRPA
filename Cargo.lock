@@ -4051,6 +4051,7 @@ dependencies = [
  "calamine",
  "chromiumoxide",
  "chrono",
+ "dirs 5.0.1",
  "encoding_rs",
  "futures",
  "futures-util",

@@ -39,6 +39,11 @@ lumo-doc.workspace = true
 rust_xlsxwriter.workspace = true
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
+# dir.get_special_dir 的 desktop/downloads/documents:Windows 上这三个是经 shell
+# 重定向的已知文件夹(OneDrive、被移动的文档目录、本地化名称),并非
+# %USERPROFILE% 下的固定子目录,必须走平台 API。dirs 已由 lumo-ai/lumo-skills
+# 引入并在锁文件中解析为 5.0.1 —— 这里只是声明已有依赖,不新增编译单元。
+dirs = "5"
 # util.url_encode / util.url_decode:percent-encoding 为 servo 系纯 Rust 微件
 # (url crate 的组成部分,已是本 workspace 经 reqwest/url 的传递依赖,锁定
 # 2.3.2,零新增编译单元成本),无 C 依赖,MSRV 无忧。

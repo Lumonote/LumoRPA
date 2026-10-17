@@ -1267,6 +1267,17 @@ impl Action for DirFindSubdirsAction {
     }
 }
 
+/// 用户主目录:`$HOME`,回退 `$USERPROFILE`(Windows 不设 `HOME`)。
+///
+/// 与本 crate 其它地方同一约定(见 `browser::browser_profiles_root`、
+/// `selector_stats::default_path`):两个变量都要看,否则 Windows 上永远解析
+/// 不到主目录——这正是 `dir.get_special_dir` 之前只在 Unix 可用的原因。
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 /// 取系统特殊目录(桌面/下载/文档/临时/主目录)。
 pub struct DirGetSpecialDirAction;
 #[derive(Deserialize, JsonSchema)]
@@ -1291,15 +1302,22 @@ impl Action for DirGetSpecialDirAction {
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let DirGetSpecialDirIn { name } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("dir.get_special_dir input invalid: {e}")))?;
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| StepError::msg("dir.get_special_dir: HOME is not set on this host"))?;
+        let home = home_dir().ok_or_else(|| {
+            StepError::msg("dir.get_special_dir: neither HOME nor USERPROFILE is set on this host")
+        })?;
         let key = name.as_deref().unwrap_or("home");
         let path = match key {
             "home" => home.clone(),
-            "desktop" => home.join("Desktop"),
-            "downloads" => home.join("Downloads"),
-            "documents" => home.join("Documents"),
+            // Known-user folders are *not* plain subdirectories of the profile
+            // on Windows: they are redirected through the shell (OneDrive, a
+            // moved Documents dir, a localized name), and `%USERPROFILE%\Desktop`
+            // is frequently absent or not the folder the user sees. `dirs::`
+            // resolves them through the platform API, so use it where the
+            // platform actually provides an answer and keep the join as the
+            // fallback for hosts where it returns nothing.
+            "desktop" => dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop")),
+            "downloads" => dirs::download_dir().unwrap_or_else(|| home.join("Downloads")),
+            "documents" => dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
             "temp" => std::env::temp_dir(),
             other => {
                 return Err(StepError::msg(format!(
