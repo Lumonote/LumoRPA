@@ -145,7 +145,16 @@ async fn get_special_dir_resolves_known_names_and_rejects_unknown() {
     for name in ["home", "desktop", "downloads", "documents", "temp"] {
         let out = ok("dir.get_special_dir", json!({ "name": name })).await;
         assert_eq!(out["name"], json!(name));
-        assert!(out["path"].as_str().unwrap().starts_with('/'), "got {out}");
+        // Each of these must resolve to an absolute path. Do not test for a
+        // leading `/`: that is Unix-specific, and on Windows the same
+        // guarantee is expressed as a drive prefix (`C:\Users\...`).
+        // Path::is_absolute encodes the platform rule; the earlier
+        // `starts_with('/')` was really asserting "this is Unix".
+        let path = out["path"].as_str().unwrap_or_else(|| panic!("got {out}"));
+        assert!(
+            std::path::Path::new(path).is_absolute(),
+            "expected an absolute path, got {out}"
+        );
     }
     // Default is home.
     let dflt = ok("dir.get_special_dir", json!({})).await;
