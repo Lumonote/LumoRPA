@@ -209,6 +209,14 @@ pub(crate) fn select_monitor(action: &str, display: usize) -> Result<Monitor, St
 /// 字段读取失败按空/0 兜底 —— 枚举型语义下单字段失败不应整步失败)。
 struct WinInfo {
     id: u32,
+    /// 仅 macOS 的 platform::activate 需要:CGWindowID 喂不进 System Events,
+    /// 那里按 unix id 把整个进程置前。Windows 用 HWND(即 `id`)、Linux 用 wmctrl
+    /// 的窗口 id,都不读 pid —— 不加条件编译的话,该字段在 Linux/Windows 上就是
+    /// dead_code,而 CI 的 `-D warnings` 把它判成错误(曾因此在 ubuntu/windows
+    /// 两个 build-test job 与 clippy job 上三处同时失败)。
+    /// 用 cfg 而不是 #[allow(dead_code)]:字段确实只服务一个平台,让它在别的平台
+    /// 不存在,比让它存在却永远不读更贴近事实。
+    #[cfg(target_os = "macos")]
     pid: u32,
     title: String,
     app: String,
@@ -222,6 +230,7 @@ struct WinInfo {
 fn win_info(w: &Window) -> WinInfo {
     WinInfo {
         id: w.id().unwrap_or(0),
+        #[cfg(target_os = "macos")]
         pid: w.pid().unwrap_or(0),
         title: w.title().unwrap_or_default(),
         app: w.app_name().unwrap_or_default(),
