@@ -1397,7 +1397,12 @@ fn mcp_grant_covered(child: &str, parent: &[String]) -> bool {
 /// A child path grant is covered when its glob-stripped representative path
 /// matches some parent path grant.
 fn path_grant_covered(child: &str, parent: &[String]) -> bool {
-    let stripped = child.trim_end_matches("**").trim_end_matches('/');
+    // Trim the separator *after* `**` in whichever spelling this host uses.
+    // The old `trim_end_matches('/')` left a trailing `\` on a Windows grant
+    // (`C:\data\proj\**`), so the representative path kept a dangling
+    // separator and stopped matching the parent grant — child flows silently
+    // lost capability inheritance they were entitled to.
+    let stripped = child.trim_end_matches("**").trim_end_matches(['/', '\\']);
     let repr = if stripped.is_empty() { child } else { stripped };
     let cand = normalize_path(Path::new(repr));
     parent.iter().any(|p| {
@@ -1608,6 +1613,23 @@ mod tests {
         // A sibling outside the grant must not match.
         let outside = dir.parent().unwrap().join("lumorpa-not-granted.txt");
         assert!(!path_matches(&outside, &grant), "a sibling must not match");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A child grant of `<dir>/**` is covered by a parent grant of the same
+    /// directory. `path_grant_covered` strips `**` and the trailing separator
+    /// before comparing, and used to strip only `/`, so on Windows a grant
+    /// written with `\` kept a dangling separator and inheritance failed.
+    #[test]
+    fn child_recursive_grant_is_covered_by_the_parent() {
+        let dir = std::env::temp_dir().join("lumorpa-inherit-test");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let base = dir.display().to_string();
+
+        let parent = vec![format!("{base}/**")];
+        assert!(path_grant_covered(&format!("{base}/**"), &parent));
+        assert!(path_grant_covered(&format!("{base}/sub/**"), &parent));
 
         std::fs::remove_dir_all(&dir).ok();
     }
