@@ -1095,15 +1095,21 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_unresponsive_server() {
-        // The child must neither read stdin nor write stdout, so the stdio
-        // handshake never completes and the call times out. `sleep` is not a
-        // program on Windows and `/bin/sleep` is not a path there at all — the
-        // MCP layer runs `command` verbatim — so pick a per-platform sleeper,
-        // following the `ping -n` convention already used in
-        // tests/system_process.rs. Neither needs an absolute path: `sleep`
-        // resolves through PATH on Unix, and so does `ping` on Windows.
-        let (program, sleeper) = if cfg!(windows) {
-            ("ping", vec!["-n", "30", "127.0.0.1"])
+        // The child must neither answer the stdio handshake nor read stdin, so
+        // the `initialize` request never gets a response and the call times
+        // out. That rules out `/bin/sleep`: it is not a path on Windows, and
+        // the MCP layer runs `command` verbatim. It also rules out a bare
+        // `ping -n 30 127.0.0.1`, which is the sleeper used elsewhere in this
+        // crate: ping writes its probes to *stdout*, and MCP reads stdout as
+        // the JSON-RPC channel — the handshake then fails with "invalid
+        // JSON-RPC response: expected value at line 1 column 1" instead of
+        // timing out, which is what an earlier version of this fix did.
+        //
+        // So on Windows, drive the sleeper through `cmd /C` and discard its
+        // output with a redirect. `cmd` owns the redirection and stays quiet;
+        // nothing reaches the pipe, and it does not read stdin.
+        let (program, args) = if cfg!(windows) {
+            ("cmd", vec!["/C", "ping -n 30 127.0.0.1 > NUL"])
         } else {
             ("sleep", vec!["10"])
         };
@@ -1114,7 +1120,7 @@ mod tests {
                 json!({
                     "server": program,
                     "command": program,
-                    "args": sleeper,
+                    "args": args,
                     "tool": "noop",
                     "timeout_ms": 150
                 }),
