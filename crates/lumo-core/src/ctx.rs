@@ -1204,11 +1204,33 @@ fn normalize_path(path: &Path) -> PathBuf {
     };
     // P0-2: lexically resolve `.` / `..` BEFORE prefix matching so a grant of
     // `/data/**` can't be escaped by `/data/../etc/passwd` (whose raw string
-    // still starts with `/data/`). We do NOT canonicalize symlinks here on
-    // purpose: canonicalizing the candidate but not the glob grant would break
-    // legitimate cases like macOS `/tmp` → `/private/tmp`. Lexical cleaning is
-    // the standard, footgun-free way to close the traversal hole.
-    lexical_clean(&abs)
+    // still starts with `/data/`).
+    let cleaned = lexical_clean(&abs);
+    // Windows 8.3 short names: `%TEMP%` is often handed out as
+    // `C:\Users\RUNNER~1\AppData\Local\Temp`, while `read_dir` yields
+    // children under the *long* spelling (`...\runneradmin\...`). Same
+    // directory, different strings, so a grant and a candidate that plainly
+    // describe the same tree compared unequal and `file.list` was denied
+    // mid-walk. Canonicalizing collapses both spellings to one.
+    //
+    // This is deliberately applied here rather than at the call sites,
+    // because normalize_path runs for BOTH the candidate and every grant — so
+    // the transformation is symmetric and cannot reintroduce the mismatch the
+    // old comment warned about (canonical `/private/tmp` vs raw `/tmp`).
+    //
+    // Two guards keep it safe. It only runs on Windows: elsewhere the lexical
+    // result is already stable, and leaving Unix untouched avoids rewriting
+    // `/tmp` → `/private/tmp` in error messages and comparisons. And it falls
+    // back to the lexical result whenever canonicalize fails, which is the
+    // normal case for a grant naming a directory that does not exist yet —
+    // there is nothing to canonicalize, and both sides then stay lexical.
+    #[cfg(windows)]
+    {
+        if let Ok(canonical) = std::fs::canonicalize(&cleaned) {
+            return canonical;
+        }
+    }
+    cleaned
 }
 
 /// Resolve `.` and `..` components without touching the filesystem. `..` pops
@@ -1249,7 +1271,14 @@ fn path_matches(candidate: &Path, grant: &str) -> bool {
     let grant = normalize_path(Path::new(grant));
     let grant = grant.to_string_lossy();
     if let Some(prefix) = grant.strip_suffix("/**") {
-        candidate == prefix || candidate.starts_with(&format!("{prefix}/"))
+        // Join with the *host* separator, not a hardcoded `/`. On Windows the
+        // candidate is `C:\Users\me\temp\a.txt`, so a `{prefix}/` test never
+        // matched and every `/**` grant silently denied the whole tree — the
+        // failure surfaces as `capability denied: fs.read <path> is not
+        // declared` even though the grant plainly covers it. `MAIN_SEPARATOR`
+        // keeps the single-separator intent on Unix unchanged.
+        let child_prefix = format!("{prefix}{}", std::path::MAIN_SEPARATOR);
+        candidate == prefix || candidate.starts_with(&child_prefix)
     } else if grant.contains('*') {
         wildcard_match(&candidate, &grant)
     } else {
@@ -1536,6 +1565,31 @@ fn mime_to_ext(mime: &str, kind: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `/**` grant must cover the directory itself and its children, using
+    /// whatever separator the host uses. This regressed on Windows: the child
+    /// prefix was built with a literal `/`, so against `C:\dir\child` the
+    /// `starts_with` test never matched and a correct recursive grant denied
+    /// the whole tree. Expressing the expectation with `join` keeps the test
+    /// meaningful on every platform instead of asserting Unix separators.
+    #[test]
+    fn recursive_grant_covers_children_on_this_host() {
+        let dir = if cfg!(windows) {
+            "C:\\data\\proj"
+        } else {
+            "/data/proj"
+        };
+        let grant = format!("{dir}/**");
+        let root = std::path::Path::new(dir);
+        let child = root.join("nested").join("file.txt");
+
+        assert!(path_matches(root, &grant), "the root itself must match");
+        assert!(path_matches(&child, &grant), "a descendant must match");
+
+        // A sibling that merely shares the textual prefix must not match.
+        let sibling = root.join("sibling.txt");
+        assert!(!path_matches(&sibling, &format!("{dir}/**/other")));
+    }
 
     fn test_ctx() -> StepCtx {
         StepCtx::new(
