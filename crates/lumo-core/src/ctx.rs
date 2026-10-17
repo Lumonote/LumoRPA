@@ -1211,26 +1211,57 @@ fn normalize_path(path: &Path) -> PathBuf {
     // children under the *long* spelling (`...\runneradmin\...`). Same
     // directory, different strings, so a grant and a candidate that plainly
     // describe the same tree compared unequal and `file.list` was denied
-    // mid-walk. Canonicalizing collapses both spellings to one.
+    // mid-walk.
     //
-    // This is deliberately applied here rather than at the call sites,
-    // because normalize_path runs for BOTH the candidate and every grant — so
-    // the transformation is symmetric and cannot reintroduce the mismatch the
-    // old comment warned about (canonical `/private/tmp` vs raw `/tmp`).
+    // Only the portion that actually exists is canonicalized, and the rest is
+    // re-appended verbatim. A plain `canonicalize(whole)` is wrong here: a
+    // grant ends in `\**`, which never exists on disk, so it would fail and
+    // fall back to the lexical spelling while a real candidate succeeded —
+    // one side canonical, the other not, i.e. exactly the asymmetry that made
+    // `path_grant_covered` reject a grant against itself. Resolving the
+    // longest existing ancestor keeps both sides collapsing short names the
+    // same way regardless of whether the tail is concrete.
     //
-    // Two guards keep it safe. It only runs on Windows: elsewhere the lexical
-    // result is already stable, and leaving Unix untouched avoids rewriting
-    // `/tmp` → `/private/tmp` in error messages and comparisons. And it falls
-    // back to the lexical result whenever canonicalize fails, which is the
-    // normal case for a grant naming a directory that does not exist yet —
-    // there is nothing to canonicalize, and both sides then stay lexical.
+    // It stays Windows-only on purpose: elsewhere the lexical result is
+    // already stable, and not touching Unix avoids rewriting `/tmp` →
+    // `/private/tmp` in comparisons and error messages.
     #[cfg(windows)]
-    {
-        if let Ok(canonical) = std::fs::canonicalize(&cleaned) {
-            return canonical;
+    let cleaned = canonicalize_existing_prefix(&cleaned);
+    cleaned
+}
+
+/// Canonicalize as much of `path` as exists, re-appending the rest untouched.
+///
+/// The components after the longest existing ancestor are kept verbatim so a
+/// trailing `**` (or any not-yet-created segment) survives and both sides of a
+/// comparison are transformed identically. Returns `path` unchanged when even
+/// the first component cannot be resolved, so callers never lose information.
+#[cfg(windows)]
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    // Walk up until something exists, then rebuild downward.
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if std::fs::symlink_metadata(&existing).is_ok() {
+            break;
+        }
+        let Some(name) = existing.file_name() else {
+            // Reached the root (or a bare prefix) without finding anything.
+            return path.to_path_buf();
+        };
+        tail.push(name.to_os_string());
+        match existing.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => existing = parent.to_path_buf(),
+            _ => return path.to_path_buf(),
         }
     }
-    cleaned
+    let Ok(mut resolved) = std::fs::canonicalize(&existing) else {
+        return path.to_path_buf();
+    };
+    for segment in tail.iter().rev() {
+        resolved.push(segment);
+    }
+    resolved
 }
 
 /// Resolve `.` and `..` components without touching the filesystem. `..` pops
