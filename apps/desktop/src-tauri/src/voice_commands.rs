@@ -36,6 +36,13 @@ const DEFAULT_DEVICE: &str = "default";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+// 非 macOS 平台没有麦克风权限门控:`microphone_permission()` 直接返回 Granted,
+// 因此 NotDetermined / Restricted 永远不会被构造(Denied 只在下面的测试里构造)。
+// 但 start_runtime 的 match 在所有平台上都编译、且要穷尽四个变体,所以变体本身
+// 不能按平台裁掉;测试也依赖 Denied 来覆盖「权限被拒」这条产品路径。
+// 用 cfg_attr 而不是无条件 allow:macOS 上四个变体都真的会被构造,那里必须保持
+// dead_code 检查有效,不能让这个 allow 顺带把 macOS 的疏漏也盖住。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) enum MicrophonePermission {
     NotDetermined,
     Granted,

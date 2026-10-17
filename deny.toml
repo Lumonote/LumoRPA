@@ -41,24 +41,19 @@ unmaintained = "workspace"
 #     2023; the advisory itself carries `patched = []` and the maintainers
 #     describe the padding as "still not constant-time". Nothing to upgrade to.
 ignore = [
-    # ── class (a): blocked on the zip 8.x yank ────────────────────────────────
+    # ── class (a): upgrade blocked on downstream majors ──────────────────────
     #
-    # zip 2.4.2 / 4.6.1 — yanked upstream, and the upgrade is not a drop-in.
+    # NOTE (2026-10-17): the two `{ crate = "zip@..." }` yank entries that used
+    # to sit here have been REMOVED. They were written when 134 of zip's 136
+    # releases were yanked; upstream has since un-yanked the 8.x line, so those
+    # entries no longer matched anything and cargo-deny reported them as
+    # warning[yanked-not-detected]. Leaving a suppression that matches nothing is
+    # worse than no suppression: it reads as an active accepted risk when the
+    # risk it described is gone. zip now resolves 2.4.2 and 4.6.1 as ordinary
+    # non-yanked releases.
     #
-    # 134 of zip's 136 published versions are yanked; only 9.0.3 / 9.0.4
-    # (2026-10-13 / 2026-10-16) remain available. This is NOT a MSRV blocker:
-    # the workspace floor is now 1.88 and zip 9.x asks for exactly 1.88. What
-    # actually blocks the upgrade is the four crates that depend on zip
-    # transitively and pin the old major — calamine, umya-spreadsheet,
-    # rust_xlsxwriter (all 2.x) and tauri-plugin-updater (4.x). Moving means
-    # raising all four across breaking majors at once, which is a planned
-    # migration rather than a CI fix.
-    #
-    # Both versions we resolve still build correctly; the practical risk is
-    # that Cargo.lock cannot be rebuilt from scratch, which is why the lockfile
-    # stays committed.
-    { crate = "zip@2.4.2", reason = "yanked upstream; upgrade blocked on calamine/umya-spreadsheet/rust_xlsxwriter majors" },
-    { crate = "zip@4.6.1", reason = "yanked upstream; upgrade blocked on tauri-plugin-updater major" },
+    # What still blocks moving to zip 9 is a set of downstream majors, not a
+    # yank — see class (c) below for the version-by-version detail.
 
     # quick-xml — transitive only, and stuck. Our own code is on 0.41 (the
     # patched line); these four are what other crates pin us to:
@@ -66,8 +61,8 @@ ignore = [
     #   0.37.5 ← umya-spreadsheet 2.3.3      0.39.4 ← plist, wayland-scanner
     #
     # Only calamine and umya-spreadsheet matter for these two advisories, and
-    # both are in the deadlock described above: the versions that fix it need
-    # the yanked zip 8.6. Every one of these ids is a transitive edge we do not
+    # both need a major bump to fix (see class (a)): the releases that move to
+    # quick-xml 0.41 also jump to zip ^8.6. Every one of these ids is an edge we do not
     # control, and 0.30/0.39 consumers (xcb, plist, wayland-scanner) are
     # build-time platform glue that never parses untrusted XML on our behalf.
     #
@@ -81,7 +76,7 @@ ignore = [
     # crate spec here as a *yank* suppression, which is why they are written as
     # { id = ... }. The two quick-xml advisories are shared by all four affected
     # versions, so they are listed once each rather than per version.
-    { id = "RUSTSEC-2026-0194", reason = "quadratic duplicate-attribute scan; only reachable via calamine 0.26.1 / umya-spreadsheet 2.3.3, whose fixed releases (calamine >=0.36, umya >=3.0) both require the yanked zip 8.6" },
+    { id = "RUSTSEC-2026-0194", reason = "quadratic duplicate-attribute scan; only reachable via calamine 0.26.1 / umya-spreadsheet 2.3.3. The releases that fix it (calamine >=0.36, umya >=3.0) are breaking major bumps that also move to zip ^8.6 and, for umya 3.x, raise MSRV above our 1.88 floor" },
     { id = "RUSTSEC-2026-0195", reason = "unbounded NsReader namespace allocation; same upstream deadlock as RUSTSEC-2026-0194" },
 
     # ── class (b): no upstream patch ─────────────────────────────────────────
@@ -105,6 +100,49 @@ ignore = [
     # placement, which is the operator's call, not a build-time property — so
     # this is recorded rather than silently accepted.
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing sidechannel; no upstream patch exists (advisory ships patched = []). Reached only via sqlx mysql feature, which backs the shipped db.mysql_* actions" },
+
+    # ── class (c): reachable surface absent from this repo ───────────────────
+    #
+    # zip extraction advisories (filed 2026-10-16; three ids, and cargo-deny
+    # reports each against both zip 2.4.2 and 4.6.1):
+    #   RUSTSEC-2026-0367  SUID/SGID bits preserved from external_attributes
+    #   RUSTSEC-2026-0368  extract() creates symlinks pointing outside dest
+    #   RUSTSEC-2026-0369  permissions applied through symlinks, unconfined
+    #
+    # All three are specific to the crate's own extraction entry points —
+    # ZipArchive::extract() and ZipStreamReader::extract(). This workspace calls
+    # neither, anywhere:
+    #
+    #   * archive.unzip (crates/lumo-actions/src/archive.rs) drives its own loop
+    #     over by_index / by_index_decrypt. It writes each entry with
+    #     File::create + write_all, and never calls set_permissions, never calls
+    #     symlink, and never applies external_attributes — which is precisely
+    #     the code path the three advisories describe. Entry names additionally
+    #     pass through safe_join(), which lexically rejects `..` and absolute
+    #     components (zip-slip), so a hostile name cannot reach outside dest
+    #     even before the permission question arises.
+    #   * docx reads (crates/lumo-actions/src/docx.rs) call by_name() and
+    #     read_to_string straight into memory — nothing is written to disk.
+    #
+    # Grep-verified: no `.extract(` call site exists under crates/ or apps/, and
+    # symlink / set_permissions / PermissionsExt appear nowhere on the extraction
+    # path. The advisories are unreachable here, not merely unpatched.
+    #
+    # The upgrade is genuinely blocked as well, independent of the above. zip
+    # 9.0.4 is the only fixed release and its MSRV (1.88) would suit us, but
+    # nothing in the tree accepts it: calamine ^2, umya-spreadsheet ^2.2.1,
+    # rust_xlsxwriter ^2.2.0, tauri-plugin-updater ^4. Only calamine >= 0.36 and
+    # umya >= 3.0 move to a newer zip, and both demand zip ^8.6; every
+    # tauri-plugin-updater release through 3.0.0-alpha.3 still pins zip ^4. And
+    # raising just our own direct zip declaration would not clear these ids —
+    # calamine would keep resolving zip 2.4.2 alongside it.
+    #
+    # Residual risk: this holds only while our own loop stays in place. If anyone
+    # switches to extract() for convenience, these three suppressions become live
+    # vulnerabilities and must be deleted in the same commit that makes the swap.
+    { id = "RUSTSEC-2026-0367", reason = "SUID/SGID preservation in zip extract(); repo never calls extract() — archive.unzip writes via File::create with no set_permissions, docx only reads by_name into memory. Upgrade to zip 9 blocked on calamine/umya/rust_xlsxwriter/tauri-plugin-updater majors" },
+    { id = "RUSTSEC-2026-0368", reason = "symlink escape in zip extract(); repo never calls extract() or symlink(), and safe_join rejects `..`/absolute entry names" },
+    { id = "RUSTSEC-2026-0369", reason = "unconfined permission application in zip extract(); repo never applies permissions anywhere on the extraction path" },
 ]
 
 [licenses]
