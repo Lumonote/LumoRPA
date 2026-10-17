@@ -1154,10 +1154,22 @@ spec:
         assert!(next > chrono::Utc::now());
     }
 
+    /// Escape a filesystem path for use inside a YAML double-quoted scalar.
+    ///
+    /// Windows paths are the reason this exists: `C:\Users\runneradmin\...`
+    /// pasted verbatim into `path: "..."` makes YAML read `\U` as a Unicode
+    /// escape and the document fails to parse, so the trigger silently never
+    /// matched and the assertion saw zero watchers. Backslash is the only
+    /// character that needs escaping here; quoting is handled by the caller.
+    fn yaml_quoted(path: &str) -> String {
+        path.replace('\\', "\\\\")
+    }
+
     fn flow_with_file_trigger(id: &str, path: &str, events: &str, pattern: Option<&str>) -> String {
         let pat = pattern
             .map(|p| format!(", pattern: \"{p}\""))
             .unwrap_or_default();
+        let path = yaml_quoted(path);
         format!(
             r#"
 apiVersion: lumorpa.io/v1
@@ -1210,7 +1222,7 @@ spec:
   steps:
     - {{ id: hi, action: control.log, with: {{ message: "tick" }} }}
 "#,
-            inbox.path().display()
+            yaml_quoted(&inbox.path().display().to_string())
         );
         write_flow(flows.path(), "x", &yaml);
         let watched = scan_file_triggers(flows.path());

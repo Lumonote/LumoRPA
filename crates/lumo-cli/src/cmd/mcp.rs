@@ -564,6 +564,26 @@ spec:
         serde_json::from_str(&raw).unwrap()
     }
 
+    /// Build the `resources/read` request line for `path`, escaping the path for
+    /// the JSON string literal it is embedded in.
+    ///
+    /// The raw `format!("...{uri}...")` this replaces was silently wrong on
+    /// Windows: the URI carries a path like `C:\Users\runneradmin\...`, and
+    /// dropping those backslashes into a JSON string yields `\U`/`\r`, which are
+    /// not valid JSON escapes. The request then failed to parse at all and came
+    /// back as -32700 instead of the -32002 the assertion expected. Serializing
+    /// through serde_json is what makes the backslashes survive as data.
+    fn read_request(id: u32, path: &Path) -> String {
+        let uri = format!("file://{}", path.display());
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "resources/read",
+            "params": { "uri": uri },
+        })
+        .to_string()
+    }
+
     fn unwrap_tool_text(resp: &Value) -> Value {
         let text = resp["result"]["content"][0]["text"]
             .as_str()
@@ -756,10 +776,7 @@ spec:
             .canonicalize()
             .unwrap()
             .join("alpha.lumoflow.yaml");
-        let uri = format!("file://{}", real_path.display());
-        let line = format!(
-            r#"{{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#,
-        );
+        let line = read_request(9, &real_path);
         let resp = call(&s, &line).await;
         let contents = resp["result"]["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -777,10 +794,7 @@ spec:
         let evil = outside.path().join("secret.lumoflow.yaml");
         std::fs::write(&evil, "shhh").unwrap();
         let s = Server::new(home.path().to_path_buf(), flows.path().to_path_buf());
-        let uri = format!("file://{}", evil.canonicalize().unwrap().display());
-        let line = format!(
-            r#"{{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#,
-        );
+        let line = read_request(10, &evil.canonicalize().unwrap());
         let resp = call(&s, &line).await;
         assert_eq!(resp["error"]["code"], -32002);
     }
