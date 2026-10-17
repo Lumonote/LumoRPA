@@ -1263,6 +1263,24 @@ fn lexical_clean(path: &Path) -> PathBuf {
     }
 }
 
+/// The `/**` suffix a recursive grant is written with, spelled with the host
+/// separator.
+///
+/// Grants are authored as `"/data/**"` and that literal is what flows in, but
+/// `normalize_path` rebuilds them through `PathBuf`, which re-joins the
+/// components with the *platform* separator. On Windows that turns the same
+/// grant into `C:\data\**`, so a plain `strip_suffix("/**")` stopped
+/// matching, the grant fell through to the exact-equality branch at the bottom
+/// of `path_matches`, and every recursive grant silently denied everything.
+/// Searching for the separator-qualified `**` component keeps the check
+/// independent of how the path was spelled.
+fn recursive_suffix() -> String {
+    let mut s = String::with_capacity(3);
+    s.push(std::path::MAIN_SEPARATOR);
+    s.push_str("**");
+    s
+}
+
 fn path_matches(candidate: &Path, grant: &str) -> bool {
     if grant == "*" || grant == "**" {
         return true;
@@ -1270,7 +1288,8 @@ fn path_matches(candidate: &Path, grant: &str) -> bool {
     let candidate = candidate.to_string_lossy();
     let grant = normalize_path(Path::new(grant));
     let grant = grant.to_string_lossy();
-    if let Some(prefix) = grant.strip_suffix("/**") {
+    let suffix = recursive_suffix();
+    if let Some(prefix) = grant.strip_suffix(&suffix) {
         // Join with the *host* separator, not a hardcoded `/`. On Windows the
         // candidate is `C:\Users\me\temp\a.txt`, so a `{prefix}/` test never
         // matched and every `/**` grant silently denied the whole tree — the
@@ -1574,21 +1593,23 @@ mod tests {
     /// meaningful on every platform instead of asserting Unix separators.
     #[test]
     fn recursive_grant_covers_children_on_this_host() {
-        let dir = if cfg!(windows) {
-            "C:\\data\\proj"
-        } else {
-            "/data/proj"
-        };
-        let grant = format!("{dir}/**");
-        let root = std::path::Path::new(dir);
-        let child = root.join("nested").join("file.txt");
+        // A real directory, so the grant names something that exists and the
+        // Windows canonicalize step has a path to resolve. Building it from a
+        // literal would also have to guess at separators; joining keeps the
+        // test about the matching rule rather than about path spelling.
+        let dir = std::env::temp_dir().join("lumorpa-grant-test");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let grant = format!("{}/**", dir.display());
 
-        assert!(path_matches(root, &grant), "the root itself must match");
+        assert!(path_matches(&dir, &grant), "the root itself must match");
+        let child = dir.join("nested").join("file.txt");
         assert!(path_matches(&child, &grant), "a descendant must match");
 
-        // A sibling that merely shares the textual prefix must not match.
-        let sibling = root.join("sibling.txt");
-        assert!(!path_matches(&sibling, &format!("{dir}/**/other")));
+        // A sibling outside the grant must not match.
+        let outside = dir.parent().unwrap().join("lumorpa-not-granted.txt");
+        assert!(!path_matches(&outside, &grant), "a sibling must not match");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn test_ctx() -> StepCtx {
