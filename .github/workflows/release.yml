@@ -342,7 +342,13 @@ jobs:
   loongarch64:
     name: loongarch64 (龙芯 · best-effort CLI)
     needs: production-gate
-    runs-on: ubuntu-22.04
+    # noble, NOT jammy. The loongarch64 cross C compiler is only packaged from
+    # noble onward: `apt-get install gcc-14-loongarch64-linux-gnu` on
+    # ubuntu-22.04 dies with "Unable to locate package" (jammy ships no
+    # loongarch64 cross toolchain at all — the package first appears in
+    # noble/universe as 14.2.0-4ubuntu2~24.04cross1), which is what made this
+    # best-effort job fail before it ever reached the cross build.
+    runs-on: ubuntu-24.04
     continue-on-error: true # no GitHub-hosted loong runner; informational only
     steps:
       - uses: actions/checkout@v5
@@ -350,10 +356,23 @@ jobs:
         with:
           targets: loongarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
+      # A best-effort job must degrade, not explode, when the toolchain is not
+      # installable: this step records whether the cross CC landed and the
+      # build step below skips itself when it did not. Without that, an apt
+      # failure aborts the job before the reason is visible — and because the
+      # job is continue-on-error, the red would be the only signal anyone got.
       - name: Install cross C toolchain
+        id: cross-cc
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y gcc-14-loongarch64-linux-gnu
+          if sudo apt-get install -y gcc-14-loongarch64-linux-gnu; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            loongarch64-linux-gnu-gcc-14 --version | head -n 1
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::gcc-14-loongarch64-linux-gnu is not installable here; skipping the best-effort loongarch64 CLI build."
+          fi
       # GitHub has no loongarch64 runner and the Tauri bundler needs the target's
       # own GTK/WebKit, so only the CLI is cross-built — a best-effort convenience
       # binary. A full desktop package needs a native 麒麟/龙芯 or QEMU
@@ -367,6 +386,11 @@ jobs:
       # this convenience build, not a silent one; a native 龙芯 build keeps the
       # real backend.
       - name: Package CLI (cross)
+        # Guarded on the install step above. `continue-on-error` already makes
+        # this job non-blocking, but an unguarded run here would fail on a
+        # missing compiler and hide the fact that the SKIP was the intended
+        # outcome; skipping is honest, a spurious red is not.
+        if: steps.cross-cc.outputs.available == 'true'
         env:
           CROSS_CC: loongarch64-linux-gnu-gcc-14
           LUMO_CLI_CARGO_FEATURES: --no-default-features

@@ -67,7 +67,13 @@ jobs:
           cargo run -p lumo-cli --locked -- --home "$RUNNER_TEMP/lumorpa" run --no-store examples/skill-driver.lumoflow.yaml
 
   fmt-clippy:
-    runs-on: ubuntu-latest
+    # Audit note: this file mixes pinned and floating runner labels. The floaters
+    # were `ubuntu-latest`, which is migrating from 24.04 to 26.04 during
+    # 2026-10-19..2026-11-19; a silent base-image change can move compiler, glibc,
+    # and apt package versions under a job that asserts exact toolchain behaviour.
+    # Pinned to ubuntu-24.04 so the image only changes when this file says so —
+    # raise it deliberately after testing, one job at a time.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,7 +91,7 @@ jobs:
 
   coverage:
     name: coverage floor
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -122,7 +128,7 @@ jobs:
 
   cargo-deny:
     name: cargo-deny (supply chain)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # Runs advisories + bans + licenses + sources against deny.toml. The
@@ -133,7 +139,7 @@ jobs:
 
   msrv:
     name: MSRV 1.88
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # Tracks the workspace `rust-version`. Raised from 1.83 to the smallest
@@ -156,7 +162,15 @@ jobs:
 
   cross-check:
     name: cross check / ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. Two independent reasons:
+    #   1. `ubuntu-latest` is migrating from 24.04 to 26.04 between 2026-10-19
+    #      and 2026-11-19, and this job installs a cross C toolchain by exact
+    #      apt name — a silent base-image change is exactly the kind of thing
+    #      that turns a green job red for reasons unrelated to this repo.
+    #   2. `gcc-14-loongarch64-linux-gnu` only exists from noble (24.04) onward.
+    #      On jammy (22.04) apt cannot locate it at all; 24.04 is the version
+    #      verified to carry it.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -180,10 +194,30 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # A missing cross toolchain must SKIP, not fail. `continue-on-error`
+      # already stops this job from blocking the build, but without this guard
+      # the apt lookup failure is what CI reports — which reads like a repo
+      # defect instead of "this informational check had nothing to run with".
       - name: Install cross C toolchain
+        id: cross-cc
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.apt }}
+          if sudo apt-get install -y ${{ matrix.apt }}; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Only a best-effort leg is allowed to degrade to a skip. For a hard
+          # gate (aarch64), an uninstallable toolchain is a real failure:
+          # silently skipping it would turn the gate green while checking
+          # nothing, which is worse than the red it replaces.
+          if [[ "${{ matrix.best_effort }}" == "true" ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${{ matrix.apt }} is not installable on this image; skipping the best-effort ${{ matrix.target }} cross check."
+          else
+            echo "error: ${{ matrix.apt }} is required for the hard ${{ matrix.target }} gate but could not be installed." >&2
+            exit 1
+          fi
       # rusqlite (bundled SQLite) and ring (rustls) build C for the target, so
       # the cross C compiler must be wired in via cc-crate's CC_<triple> env.
       # Only the per-target var is set — clobbering host CC would break build
@@ -206,6 +240,10 @@ jobs:
       # that comes from lumo-cli, which the previous revision of this job
       # assumed it did.
       - name: cargo check (cross, desktop + native-only features excluded)
+        # Guarded on the install step: if the cross C compiler is not present,
+        # this check cannot mean anything and must skip rather than fail on a
+        # linker/crate that is missing for environmental reasons.
+        if: steps.cross-cc.outputs.available == 'true'
         env:
           TARGET: ${{ matrix.target }}
           CROSS_CC: ${{ matrix.cc }}
@@ -235,7 +273,7 @@ jobs:
   # A smoke test that swallows the failure it exists to catch is worse than none.
   bundle-smoke:
     name: bundle smoke / cli archive
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
