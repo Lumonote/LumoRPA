@@ -254,6 +254,16 @@ sha256_of() {
   fi
 }
 
+# A deterministic digest of a DIRECTORY TREE (the .app is a directory, so a
+# plain shasum refuses it with "Is a directory"). Hash every regular file in
+# sorted path order, then hash the list of per-file digests: the result is a
+# stable identity for this tree regardless of directory mtimes.
+sha256_dir() {
+  local dir="$1"
+  ( cd "$dir" && find . -type f -print0 | LC_ALL=C sort -z \
+      | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}' )
+}
+
 # bash 3.2.57 has no ${v,,}/${v^^}, so case folding goes through tr.
 to_lower_ascii() {
   tr '[:upper:]' '[:lower:]' <<< "$1"
@@ -269,11 +279,17 @@ to_lower_ascii() {
 dir_files() {
   local dir="$1"
   local entry
+  local tmp
 
   [[ -d "$dir" ]] || return 0
 
-  find "$dir" -maxdepth 1 -mindepth 1 -type f -print > "$DIR_FILES_TMP" 2>/dev/null || true
-  find "$dir" -maxdepth 1 -mindepth 1 -type d -print >> "$DIR_FILES_TMP" 2>/dev/null || true
+  # Per-invocation temp file: the previous implementation shared one
+  # DIR_FILES_TMP across recursion, so a recursive call overwrote the
+  # parent's list while the parent's loop might still be reading it.
+  tmp="$(mktemp "${TMPDIR:-/tmp}/lumorpa-dir-files.XXXXXX")"
+
+  find "$dir" -maxdepth 1 -mindepth 1 -type f -print > "$tmp" 2>/dev/null || true
+  find "$dir" -maxdepth 1 -mindepth 1 -type d -print >> "$tmp" 2>/dev/null || true
 
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
@@ -282,7 +298,9 @@ dir_files() {
     else
       printf '%s\n' "$entry"
     fi
-  done < <(tr '\n' '\t' < "$DIR_FILES_TMP" | tr '\t' '\n')
+  done < <(tr '\n' '\t' < "$tmp" | tr '\t' '\n')
+
+  rm -f "$tmp"
 }
 
 # Finds the FIRST file, in C collation order, matching a name pattern under the
@@ -303,7 +321,11 @@ lookup_artifact() {
     return 1
   fi
 
-  for f in $sorted_output; do
+  # Read line-by-line (here-string keeps the loop in the current shell) so a
+  # path containing spaces is one entry; the previous `for f in $...` split
+  # such paths into words and silently missed them.
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
     lf="$(to_lower_ascii "$f")"
     case "$pattern" in
       *..*|*/*)
@@ -328,7 +350,7 @@ lookup_artifact() {
       glob_absolute="$(cd "$(dirname "$glob_result")" && pwd)/$(basename "$glob_result")"
       return 0
     fi
-  done
+  done <<< "$sorted_output"
 
   return 1
 }
@@ -397,12 +419,22 @@ verify_requested_bundles() {
       "")
         ;;
       app)
-        # A macOS .app is a directory tree, not a file. Its presence alone is
-        # not a deliverable (the DMG is), so it is recorded but the DMG check
-        # below is what actually gates a macOS release.
-        if lookup_artifact "*.app"; then
-          note_artifact "app" "$glob_absolute" 0 "$(sha256_of "$glob_absolute")"
-          echo "   verified app: $glob_absolute (directory tree; no byte digest)"
+        # A macOS .app is a DIRECTORY TREE, not a regular file. dir_files only
+        # emits regular files (it recurses *through* the .app into its
+        # contents), so lookup_artifact "*.app" can never return it and the
+        # previous code reported the .app missing on every successful build.
+        # Locate the directory directly under the bundler's macos/ output.
+        app_dir=""
+        if [[ -d "$BUNDLE_ROOT/macos" ]]; then
+          app_dir="$(find "$BUNDLE_ROOT/macos" -maxdepth 1 -mindepth 1 \
+            -type d -name '*.app' -print -quit 2>/dev/null || true)"
+        fi
+        if [[ -n "$app_dir" ]]; then
+          app_dir="$(cd "$(dirname "$app_dir")" && pwd)/$(basename "$app_dir")"
+          # No byte size for a directory (the manifest uses 0); the digest is
+          # of the whole tree, see sha256_dir.
+          note_artifact "app" "$app_dir" 0 "$(sha256_dir "$app_dir")"
+          echo "   verified app: $app_dir (directory tree; no byte size)"
         else
           if [[ -n "$missing_artifacts" ]]; then
             missing_artifacts="${missing_artifacts}, app"
@@ -646,8 +678,6 @@ if [[ -n "$LUMO_ARTIFACT_MANIFEST" ]]; then
     MANIFEST_LINES_BEFORE="$(wc -l < "$LUMO_ARTIFACT_MANIFEST" | tr -d '[:space:]')"
   fi
 fi
-DIR_FILES_TMP="${TMPDIR:-/tmp}/lumorpa-dir-files.$$.tmp"
-
 # A failed build must never leave a manifest that looks complete.
 on_exit() {
   local status=$?
@@ -655,7 +685,6 @@ on_exit() {
   if [[ -n "$DMG_STAGE" ]]; then rm -rf "$DMG_STAGE"; fi
   if [[ -n "$DMG_RW" ]]; then rm -f "$DMG_RW"; fi
   if [[ -n "$DMG_OUT" ]]; then rm -f "$DMG_OUT"; fi
-  rm -f "$DIR_FILES_TMP"
 
   if [[ "$status" -ne 0 ]]; then
     maybe_clear_manifest

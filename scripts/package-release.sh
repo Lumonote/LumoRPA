@@ -238,6 +238,7 @@ merge_manifest() {
           ;;
       esac
 
+      kind="$(printf '%s' "$line" | cut -f1)"
       rel_path="$(printf '%s' "$line" | cut -f2)"
       abs_path="$rel_path"
       case "$abs_path" in
@@ -245,20 +246,32 @@ merge_manifest() {
         *) abs_path="$ROOT/$abs_path" ;;
       esac
 
-      if [[ ! -f "$abs_path" ]]; then
-        echo "error: artifact listed in $src does not exist: $abs_path" >&2
-        return 1
-      fi
-
       bytes="$(printf '%s' "$line" | cut -f3)"
       digest="$(printf '%s' "$line" | cut -f4)"
-      actual="$(wc -c < "$abs_path" | tr -d '[:space:]')"
-      if [[ "$actual" -ne "$bytes" ]]; then
-        echo "error: $abs_path is $actual bytes, manifest from $src says $bytes." >&2
-        return 1
+
+      if [[ "$kind" == "app" ]]; then
+        # The macOS .app is a directory tree, not a regular file: `-f` is false
+        # for it and `wc -c` cannot read it. build-desktop.sh records the app
+        # with bytes=0, so verify existence as a directory and skip the byte
+        # comparison rather than failing the seal on a real bundle.
+        if [[ ! -d "$abs_path" ]]; then
+          echo "error: app bundle listed in $src does not exist as a directory: $abs_path" >&2
+          return 1
+        fi
+      else
+        if [[ ! -f "$abs_path" ]]; then
+          echo "error: artifact listed in $src does not exist: $abs_path" >&2
+          return 1
+        fi
+
+        actual="$(wc -c < "$abs_path" | tr -d '[:space:]')"
+        if [[ "$actual" -ne "$bytes" ]]; then
+          echo "error: $abs_path is $actual bytes, manifest from $src says $bytes." >&2
+          return 1
+        fi
       fi
 
-      printf '%s\t%s\t%s\t%s\n' "$(printf '%s' "$line" | cut -f1)" "$abs_path" "$bytes" "$digest" >> "$out"
+      printf '%s\t%s\t%s\t%s\n' "$kind" "$abs_path" "$bytes" "$digest" >> "$out"
       lines=$((lines + 1))
     done < "$src"
   done

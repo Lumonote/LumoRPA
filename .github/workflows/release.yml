@@ -44,6 +44,7 @@ on:
   push:
     branches:
       - main
+      - dev
     tags:
       - 'v*'
 
@@ -66,7 +67,17 @@ env:
 jobs:
   production-gate:
     name: Production agent gates
-    runs-on: macos-14
+    # Pinned to an explicit supported image, NOT the floating `macos-latest`:
+    # that label already migrated once (26 floating onto a 26 image) and would
+    # silently move the SDK, Xcode and preinstalled toolchains under this
+    # workspace-wide gate — the same silent-environment-drift class of bug this
+    # job just hit. The image this job used to run on was RETIRED by GitHub
+    # Actions (brownouts from 2026-10-16, removal 2026-11-02), which is why this
+    # job failed next to a green ci.yml build-test leg on the very same commit.
+    # Raise this label deliberately, after checking the new image against these
+    # steps. See scripts/check-runner-labels.sh, which now fails the build if a
+    # retired or floating label is reintroduced.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -118,7 +129,11 @@ jobs:
   macos:
     name: macOS (universal · Intel + Apple Silicon)
     needs: production-gate
-    runs-on: macos-14
+    # Pinned to the same explicit image as production-gate, for the same reason
+    # (see the note on that job). This job runs `cargo tauri` for a universal
+    # x86_64 + aarch64 .dmg, so it is at least as sensitive to anything the
+    # runner image preinstalls.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust (+ both macOS arches)

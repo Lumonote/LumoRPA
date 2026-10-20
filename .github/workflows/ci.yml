@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
 
@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
         toolchain: [stable]
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +73,11 @@ jobs:
     # and apt package versions under a job that asserts exact toolchain behaviour.
     # Pinned to ubuntu-24.04 so the image only changes when this file says so —
     # raise it deliberately after testing, one job at a time.
+    #
+    # NOTE: scripts/check-runner-labels.sh (the last step of this job) *warns* on
+    # floating labels like the ones above; it fails only on RETIRED labels. That
+    # split is deliberate — do not "fix" the guard by making floats fatal, or it
+    # will fail this file, which uses floats legitimately in build-test's matrix.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +93,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Static guard, not a build step: catches a retired runner label (e.g. the
+      # retired macos-14, which fails jobs with an error that never says
+      # "retired") before it reaches a runner. Also catches it in a matrix list
+      # such as `os: [ubuntu-latest, macos-14, windows-latest]`, which is the
+      # shape this bug actually took here. Floating labels are warned, not
+      # failed — see the note on this job above.
+      - name: Runner label guard
+        run: scripts/check-runner-labels.sh
 
   coverage:
     name: coverage floor
