@@ -74,10 +74,17 @@ mod tests {
     #[tokio::test]
     async fn interruptible_timeout_marks_blocking_checkpoint_dead() {
         let interrupt = lumo_core::StepInterrupt::default();
-        let err = with_interruptible_timeout(1, interrupt.clone(), async {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            Ok::<_, StepError>(())
-        })
+        // The timed future never completes on its own, so the timeout cannot
+        // lose a scheduling race against it. The previous version used a 1ms
+        // timeout vs a 20ms sleep; tokio's `timeout` polls the inner future
+        // first, and on a heavily loaded CI runner the task was starved past
+        // 20 ms before its first poll, so the inner future returned Ok and the
+        // test panicked with `unwrap_err() on an Ok value`.
+        let err = with_interruptible_timeout(
+            1,
+            interrupt.clone(),
+            std::future::pending::<Result<(), StepError>>(),
+        )
         .await
         .unwrap_err();
         assert!(matches!(err, StepError::Timeout { ms: 1 }));

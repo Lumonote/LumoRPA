@@ -63,7 +63,13 @@ pub enum McpError {
         data: Option<Value>,
     },
     #[error("MCP operation timed out after {duration_ms}ms")]
-    Timeout { duration_ms: u64 },
+    Timeout {
+        duration_ms: u64,
+        /// When the timeout came from a stdio server, the PID of the spawned
+        /// child. It is known at spawn (before the child ever runs), so callers
+        /// do not have to race the child writing its own PID.
+        stdio_pid: Option<u32>,
+    },
     #[error("MCP tool arguments must be an object or null")]
     InvalidArguments,
 }
@@ -91,6 +97,7 @@ enum McpTransport {
 
 pub struct McpClient {
     transport: Option<McpTransport>,
+    stdio_pid: Option<u32>,
     timeout: Duration,
     next_id: u64,
 }
@@ -100,6 +107,7 @@ impl McpClient {
         config: McpTransportConfig,
         operation_timeout: Duration,
     ) -> Result<Self, McpError> {
+        let mut stdio_pid: Option<u32> = None;
         let transport = match config {
             McpTransportConfig::Stdio { command, args, env } => {
                 let mut child = Command::new(&command)
@@ -113,6 +121,9 @@ impl McpClient {
                     .map_err(|error| McpError::Spawn {
                         message: format!("`{command}`: {error}"),
                     })?;
+                // The child PID is available at spawn, even before the shell
+                // has been scheduled, so it never races a timeout.
+                stdio_pid = child.id();
                 let stdin = child.stdin.take().ok_or_else(|| McpError::Transport {
                     message: "spawned server has no stdin".to_string(),
                 })?;
@@ -188,6 +199,7 @@ impl McpClient {
                 .await
                 .map_err(|_| McpError::Timeout {
                     duration_ms: duration_millis(operation_timeout),
+                    stdio_pid: None,
                 })??;
                 McpTransport::Sse {
                     client,
@@ -201,6 +213,7 @@ impl McpClient {
 
         let mut client = Self {
             transport: Some(transport),
+            stdio_pid,
             timeout: operation_timeout,
             next_id: 1,
         };
@@ -231,6 +244,7 @@ impl McpClient {
                 client.abort_stdio().await;
                 return Err(McpError::Timeout {
                     duration_ms: duration_millis(operation_timeout),
+                    stdio_pid: client.stdio_pid,
                 });
             }
         }
@@ -339,6 +353,7 @@ impl McpClient {
                 self.abort_stdio().await;
                 Err(McpError::Timeout {
                     duration_ms: duration_millis(self.timeout),
+                    stdio_pid: self.stdio_pid,
                 })
             }
         }
@@ -943,7 +958,7 @@ impl Action for McpDiscoverAction {
 fn action_error(action: &str, error: McpError) -> StepError {
     let message = match error {
         McpError::Spawn { message } => format!("{action} spawn: {message}"),
-        McpError::Timeout { duration_ms } => {
+        McpError::Timeout { duration_ms, .. } => {
             format!("{action} timed out after {duration_ms}ms")
         }
         McpError::Server {

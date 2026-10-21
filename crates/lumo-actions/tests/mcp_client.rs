@@ -305,15 +305,10 @@ async fn json_rpc_server_error_is_typed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn timeout_unblocks_and_kills_unresponsive_stdio_server() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let pid_file = temp.path().join("pid");
     let started = Instant::now();
 
     let err = match McpClient::connect(
-        stdio_config(
-            "timeout",
-            [("MCP_PID_FILE".to_string(), pid_file.display().to_string())],
-        ),
+        stdio_config("timeout", std::iter::empty()),
         Duration::from_millis(250),
     )
     .await
@@ -325,12 +320,19 @@ async fn timeout_unblocks_and_kills_unresponsive_stdio_server() {
         Err(err) => err,
     };
 
-    assert!(matches!(err, McpError::Timeout { .. }), "got: {err:?}");
+    // The child PID is reported by the timeout itself (it is known at spawn),
+    // so this assertion never races the fixture writing its PID before being
+    // killed, which is what made the test flaky on a loaded host.
+    let pid = match err {
+        McpError::Timeout { stdio_pid, .. } => {
+            stdio_pid.expect("stdio timeout should report the child PID")
+        }
+        other => panic!("expected McpError::Timeout, got: {other:?}"),
+    };
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "timeout did not unblock promptly"
     );
-    let pid = read_pid(&pid_file);
     wait_for_runtime_reap(pid).await;
 }
 

@@ -81,6 +81,25 @@ sha256_of() {
   fi
 }
 
+# The Windows release job runs this script under Git Bash, which ships neither
+# Info-ZIP's `zip` nor `unzip`. Windows itself ships bsdtar (libarchive) as
+# System32\tar.exe, and it can read and write zip archives. Resolve a usable
+# bsdtar; an empty result means no zip-capable tool is available.
+bsdtar_path() {
+  if command -v bsdtar >/dev/null 2>&1; then
+    command -v bsdtar
+    return 0
+  fi
+  local winroot
+  if command -v cygpath >/dev/null 2>&1; then
+    winroot="$(cygpath -u "${WINDIR:-C:\\Windows}" 2>/dev/null || true)"
+  fi
+  winroot="${winroot:-/c/Windows}"
+  if [[ -x "$winroot/System32/tar.exe" ]]; then
+    echo "$winroot/System32/tar.exe"
+  fi
+}
+
 if [[ -n "$LUMO_ARTIFACT_MANIFEST" ]]; then
   mkdir -p "$(dirname "$LUMO_ARTIFACT_MANIFEST")"
   if [[ -f "$LUMO_ARTIFACT_MANIFEST" ]]; then
@@ -173,11 +192,18 @@ fi
 
 case "$ARCHIVE" in
   zip)
-    if ! command -v zip >/dev/null 2>&1; then
-      echo "error: 'zip' command not found (needed for Windows packages)" >&2
-      exit 1
+    if command -v zip >/dev/null 2>&1; then
+      ( cd dist && rm -f "$PKG.zip" && zip -rq "$PKG.zip" "$PKG" )
+    else
+      # No Info-ZIP (e.g. Windows Git Bash): fall back to the Windows bsdtar,
+      # which writes zip with `--format zip`. Failing closed if neither exists.
+      BSDTAR="$(bsdtar_path)"
+      if [[ -z "$BSDTAR" ]]; then
+        echo "error: no zip tool found (need Info-ZIP 'zip' or Windows bsdtar to create '$PKG.zip')" >&2
+        exit 1
+      fi
+      ( cd dist && rm -f "$PKG.zip" && "$BSDTAR" --format zip -cf "$PKG.zip" "$PKG" )
     fi
-    ( cd dist && rm -f "$PKG.zip" && zip -rq "$PKG.zip" "$PKG" )
     OUT="dist/$PKG.zip"
     ;;
   *)
@@ -202,7 +228,17 @@ ARCHIVE_SHA="$(sha256_of "$OUT")"
 BIN_IN_ARCHIVE_BYTES="0"
 case "$ARCHIVE" in
   zip)
-    BIN_IN_ARCHIVE_BYTES="$(unzip -p "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
+    if command -v unzip >/dev/null 2>&1; then
+      BIN_IN_ARCHIVE_BYTES="$(unzip -p "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
+    else
+      # Git Bash has no `unzip` either: bsdtar extracts the member to stdout.
+      BSDTAR="$(bsdtar_path)"
+      if [[ -z "$BSDTAR" ]]; then
+        echo "error: cannot verify '$OUT': need 'unzip' or Windows bsdtar" >&2
+        exit 1
+      fi
+      BIN_IN_ARCHIVE_BYTES="$( "$BSDTAR" -xOf "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
+    fi
     ;;
   *)
     BIN_IN_ARCHIVE_BYTES="$(tar -xOzf "$OUT" "$PKG/bin/$BIN_NAME" | wc -c | tr -d '[:space:]')"
