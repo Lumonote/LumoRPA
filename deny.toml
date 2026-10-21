@@ -143,6 +143,22 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "SUID/SGID preservation in zip extract(); repo never calls extract() — archive.unzip writes via File::create with no set_permissions, docx only reads by_name into memory. Upgrade to zip 9 blocked on calamine/umya/rust_xlsxwriter/tauri-plugin-updater majors" },
     { id = "RUSTSEC-2026-0368", reason = "symlink escape in zip extract(); repo never calls extract() or symlink(), and safe_join rejects `..`/absolute entry names" },
     { id = "RUSTSEC-2026-0369", reason = "unconfined permission application in zip extract(); repo never applies permissions anywhere on the extraction path" },
+
+    # ── class (d): advisory matches a compatibility shim, not compiled data ──
+    #
+    # RUSTSEC-2026-0381 (distrusted emSign root in webpki-roots < 1.0.10)
+    # matches webpki-roots 0.26.11, but that release is a semver-trick shim:
+    # its only real dependency is `parent = webpki-roots "1"` and its lib.rs is
+    # `pub use parent::TLS_SERVER_ROOTS`. Cargo resolves that parent to 1.0.10,
+    # the patched release (see Cargo.lock), so the shim compiles in the fixed
+    # root list. cargo-deny matches on the shim's own 0.26 version and cannot
+    # see this. The genuine 1.0.7 occurrence (hyper-rustls / reqwest) is
+    # upgraded to 1.0.10; webpki-root-certs and rustls-webpki are likewise on
+    # their patched releases. sqlx 0.8.6 requires webpki-roots "0.26"
+    # specifically, and sqlx 0.9 raises MSRV to 1.94 (> our 1.88), so 0.26.11
+    # is the only version that can be selected today. Delete this entry once a
+    # sqlx 0.8 release accepts webpki-roots 1.x.
+    { id = "RUSTSEC-2026-0381", reason = "matches webpki-roots 0.26.11, a semver-trick shim that re-exports its parent webpki-roots 1.x; Cargo resolves the parent to patched 1.0.10, so no vulnerable root list is compiled. sqlx 0.8 pins 0.26 and sqlx 0.9 needs Rust 1.94" },
 ]
 
 [licenses]
