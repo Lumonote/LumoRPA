@@ -21,6 +21,7 @@ function commitSource(nextSource) {
   state.source = nextSource;
   state.ast = parseYaml(state.source);
   state.selectedStepPaths?.clear();
+  state.draftController?.capture();
 }
 
 export function insertStepAfterPath(path, actionId) {

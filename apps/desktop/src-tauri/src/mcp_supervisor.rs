@@ -262,8 +262,12 @@ impl McpHealthSupervisor {
     }
 
     pub(crate) fn before_call(&mut self, now: Instant) -> Result<CircuitPermit, SupervisorError> {
-        let permit = self.circuit.before_call(now)?;
-        self.limiter.acquire(now)?;
+        let mut circuit = self.circuit.clone();
+        let mut limiter = self.limiter.clone();
+        let permit = circuit.before_call(now)?;
+        limiter.acquire(now)?;
+        self.circuit = circuit;
+        self.limiter = limiter;
         Ok(permit)
     }
 
@@ -273,6 +277,205 @@ impl McpHealthSupervisor {
 
     pub(crate) fn record_failure(&mut self, now: Instant) {
         self.circuit.record_failure(now);
+    }
+}
+
+/// Every granted call records its outcome, including early connection errors,
+/// cancellation, timeout and futures dropped by an outer Agent deadline.
+pub(crate) struct McpHealthCall<'a> {
+    runtime: &'a std::sync::Mutex<McpSupervisorRuntime>,
+    server_id: String,
+    success: bool,
+}
+
+impl<'a> McpHealthCall<'a> {
+    pub(crate) fn acquire(
+        runtime: &'a std::sync::Mutex<McpSupervisorRuntime>,
+        server_id: &str,
+    ) -> Result<Self, String> {
+        runtime
+            .lock()
+            .map_err(|_| "MCP supervisor state is unavailable")?
+            .health_mut(server_id, Instant::now())
+            .before_call(Instant::now())
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            runtime,
+            server_id: server_id.into(),
+            success: false,
+        })
+    }
+    pub(crate) fn complete(&mut self, success: bool) {
+        self.success = success;
+    }
+}
+
+impl Drop for McpHealthCall<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut runtime) = self.runtime.lock() {
+            let health = runtime.health_mut(&self.server_id, Instant::now());
+            if self.success {
+                health.record_success();
+            } else {
+                health.record_failure(Instant::now());
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_governed_mcp<T>(
+    runtime: &std::sync::Mutex<McpSupervisorRuntime>,
+    server_id: &str,
+    context: &lumo_agent::InvocationContext,
+    timeout_ms: u64,
+    operation: impl std::future::Future<Output = Result<T, lumo_agent::InvocationError>>,
+) -> Result<T, lumo_agent::InvocationError> {
+    let mut call = McpHealthCall::acquire(runtime, server_id)
+        .map_err(lumo_agent::InvocationError::Unavailable)?;
+    let result = tokio::select! {
+        _=context.cancel.cancelled()=>Err(lumo_agent::InvocationError::Cancelled),
+        result=tokio::time::timeout(Duration::from_millis(timeout_ms),operation)=>result.map_err(|_|lumo_agent::InvocationError::Timeout{duration_ms:timeout_ms}).and_then(|result|result),
+    };
+    call.complete(result.is_ok());
+    result
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    #[test]
+    fn rate_limit_rejection_does_not_reserve_the_half_open_probe() {
+        let now = Instant::now();
+        let mut supervisor = McpHealthSupervisor::new(
+            RateLimitPolicy {
+                max_requests: 1,
+                window: Duration::from_secs(10),
+            },
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                base_backoff: Duration::from_millis(1),
+                max_backoff: Duration::from_secs(1),
+            },
+            now,
+        );
+        supervisor.before_call(now).unwrap();
+        supervisor.record_failure(now);
+        assert!(matches!(
+            supervisor.before_call(now + Duration::from_millis(2)),
+            Err(SupervisorError::RateLimit(_))
+        ));
+        assert!(supervisor
+            .before_call(now + Duration::from_secs(11))
+            .unwrap()
+            .is_half_open_probe());
+    }
+    #[test]
+    fn dropped_calls_count_as_failures_and_success_clears_them() {
+        let runtime = std::sync::Mutex::new(McpSupervisorRuntime::default());
+        for _ in 0..2 {
+            drop(McpHealthCall::acquire(&runtime, "server").unwrap());
+        }
+        {
+            let mut call = McpHealthCall::acquire(&runtime, "server").unwrap();
+            call.complete(true);
+        }
+        for _ in 0..3 {
+            drop(McpHealthCall::acquire(&runtime, "server").unwrap());
+        }
+        assert!(McpHealthCall::acquire(&runtime, "server").is_err());
+        assert!(McpHealthCall::acquire(&runtime, "unrelated").is_ok());
+    }
+
+    #[tokio::test]
+    async fn early_connection_errors_share_circuit_across_agent_and_manual_callers() {
+        use lumo_agent::{
+            InvocationContext, InvocationError, McpClientInvoker, McpConnectionProfile,
+            McpProfileResolver, McpToolInvoker,
+        };
+        struct MissingServer;
+        impl McpProfileResolver for MissingServer {
+            fn resolve(&self, _: &str) -> Result<McpConnectionProfile, InvocationError> {
+                Ok(McpConnectionProfile {
+                    transport: lumo_actions::mcp::McpTransportConfig::Stdio {
+                        command: "/nonexistent/lumorpa-mcp-test-server".into(),
+                        args: vec![],
+                        env: Default::default(),
+                    },
+                })
+            }
+        }
+        let runtime = std::sync::Mutex::new(McpSupervisorRuntime::default());
+        for caller in ["agent", "manual", "agent"] {
+            let invoker = McpClientInvoker::new(std::sync::Arc::new(MissingServer));
+            let context = InvocationContext::new(caller, "node");
+            assert!(run_governed_mcp(
+                &runtime,
+                "shared-server",
+                &context,
+                1000,
+                invoker.call(
+                    "shared-server",
+                    "tool",
+                    serde_json::json!({}),
+                    &context,
+                    1000
+                )
+            )
+            .await
+            .is_err());
+        }
+        let context = InvocationContext::new("manual", "node");
+        let blocked = run_governed_mcp(&runtime, "shared-server", &context, 1000, async {
+            panic!("open circuit must not invoke transport");
+            #[allow(unreachable_code)]
+            Ok::<_, InvocationError>(())
+        })
+        .await;
+        assert!(blocked.unwrap_err().to_string().contains("circuit is open"));
+    }
+
+    #[tokio::test]
+    async fn timeouts_cancellation_and_outer_aborts_release_and_account_for_calls() {
+        use lumo_agent::{InvocationContext, InvocationError};
+        let runtime = std::sync::Arc::new(std::sync::Mutex::new(McpSupervisorRuntime::default()));
+        let context = InvocationContext::new("agent", "node");
+        let timeout = run_governed_mcp(
+            &runtime,
+            "server",
+            &context,
+            1,
+            std::future::pending::<Result<(), InvocationError>>(),
+        )
+        .await;
+        assert!(matches!(timeout, Err(InvocationError::Timeout { .. })));
+        let context = InvocationContext::new("manual", "node");
+        context.cancel.cancel();
+        assert!(matches!(
+            run_governed_mcp(
+                &runtime,
+                "server",
+                &context,
+                100,
+                std::future::pending::<Result<(), InvocationError>>()
+            )
+            .await,
+            Err(InvocationError::Cancelled)
+        ));
+        let running = runtime.clone();
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ready = started.clone();
+        let task = tokio::spawn(async move {
+            let context = InvocationContext::new("agent", "node");
+            run_governed_mcp(&running, "server", &context, 1000, async {
+                ready.notify_one();
+                std::future::pending::<Result<(), InvocationError>>().await
+            })
+            .await
+        });
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert!(McpHealthCall::acquire(&runtime, "server").is_err());
     }
 }
 

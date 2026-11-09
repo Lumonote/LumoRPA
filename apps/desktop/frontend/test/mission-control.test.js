@@ -84,9 +84,152 @@ function missionRoot(context) {
     querySelector: (name) => boxes[name] || null,
     addEventListener: (name, handler) => { handlers[name] = handler; },
   };
-  globalThis.document = { createElement: () => ({ dataset: {}, setAttribute() {}, addEventListener() {} }) };
-  return { root, boxes, handlers };
+  const elements = [];
+  boxes[".mc-head"] = { append(element) {
+    elements.push(element);
+    if ("mcHistoryError" in element.dataset) boxes["[data-mc-history-error]"] = element;
+  } };
+  globalThis.document = { createElement: (tagName) => {
+    const element = { tagName, dataset: {}, value: "", innerHTML: "", textContent: "", handlers: {}, attributes: {},
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener(name, handler) { this.handlers[name] = handler; },
+    };
+    return element;
+  } };
+  return { root, boxes, handlers, elements, select: (value) => {
+    const selector = elements.find((element) => element.tagName === "select");
+    selector.value = value;
+    return selector.handlers.change();
+  } };
 }
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const flush = async () => { await new Promise((resolve) => globalThis.setImmediate(resolve)); };
+const completedEvents = (label, seq = 2) => [
+  { seq: 1, kind: "node.completed", node_id: "n1", payload: { result: label } },
+  { seq, kind: "run.completed" },
+];
+
+test("history keeps an explicit follow-latest option even when no runs exist", () => {
+  assert.match(renderRunHistoryOptions([]), /<option value="" selected>.*跟随最新/);
+  assert.match(renderRunHistoryOptions([{ id: "old", state: "completed" }], "old"), /<option value="">.*跟随最新/);
+});
+
+test("a pinned history run retains live updates and returning to latest renders immediately", async (context) => {
+  const ui = missionRoot(context);
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => command === "agent_events" ? completedEvents("historical") : []);
+  await ui.select("old");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  ui.root.dataset.selectedNode = "old-node";
+  ui.root.dataset.startLane = "8";
+  updateMissionControl(ui.root, { ...projection, runId: "new-live", seq: 5, status: "failed" });
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  await ui.select("");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /FAILED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 5/);
+  assert.equal(ui.root.dataset.selectedNode, undefined);
+  assert.equal(ui.root.dataset.startLane, undefined);
+});
+
+test("out-of-order history responses cannot replace a newer selection or follow-latest", async (context) => {
+  const ui = missionRoot(context);
+  const requests = new Map();
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command, args) => {
+    if (command !== "agent_events") return [];
+    const request = deferred(); requests.set(args.runId, request); return request.promise;
+  });
+  const loadingA = ui.select("A");
+  const loadingB = ui.select("B");
+  requests.get("B").resolve(completedEvents("B result", 9));
+  await loadingB;
+  requests.get("A").resolve(completedEvents("A result", 3));
+  await loadingA;
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 9/);
+  const loadingC = ui.select("C");
+  updateMissionControl(ui.root, { ...projection, runId: "live", seq: 7, status: "failed" });
+  await ui.select("");
+  requests.get("C").resolve(completedEvents("C result", 20));
+  await loadingC;
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /FAILED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 7/);
+});
+
+test("live progress cannot move backward while a selected live history request resolves", async (context) => {
+  const ui = missionRoot(context);
+  const request = deferred();
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => command === "agent_events" ? request.promise : []);
+  const loading = ui.select("live");
+  updateMissionControl(ui.root, { ...projection, runId: "live", seq: 8, status: "completed" });
+  request.resolve(completedEvents("older", 3));
+  await loading;
+  updateMissionControl(ui.root, { ...projection, runId: "live", seq: 4, status: "running" });
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 8/);
+});
+
+test("a fresher history snapshot of the latest run survives returning to live", async (context) => {
+  const ui = missionRoot(context);
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => command === "agent_events" ? completedEvents("fresh", 9) : []);
+  await ui.select("live");
+  updateMissionControl(ui.root, { ...projection, runId: "live", seq: 4 });
+  await ui.select("");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 9/);
+});
+
+test("a lagging live event switches latest to its fresher cached history run", async (context) => {
+  const ui = missionRoot(context);
+  mountMissionControl(ui.root, { ...projection, runId: "old-live" }, async (command) => command === "agent_events" ? completedEvents("newer", 9) : []);
+  await ui.select("new-live");
+  updateMissionControl(ui.root, { ...projection, runId: "new-live", seq: 4 });
+  await ui.select("");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 9/);
+});
+
+test("new runs and terminal transitions coalesce history refresh and preserve a missing pinned option", async (context) => {
+  const ui = missionRoot(context);
+  const lists = [];
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => {
+    if (command === "agent_events") return completedEvents("old result");
+    if (command === "agent_run_list") { const request = deferred(); lists.push(request); return request.promise; }
+    return [];
+  });
+  await ui.select("old");
+  updateMissionControl(ui.root, { ...projection, runId: "new", seq: 1 });
+  updateMissionControl(ui.root, { ...projection, runId: "new", seq: 2, status: "completed" });
+  updateMissionControl(ui.root, { ...projection, runId: "new", seq: 3, status: "completed" });
+  assert.equal(lists.length, 1);
+  lists[0].resolve([{ id: "live", state: "running" }]);
+  await flush();
+  assert.equal(lists.length, 2);
+  lists[1].resolve([{ id: "new", state: "completed" }]);
+  await flush();
+  const selector = ui.elements.find((element) => element.tagName === "select");
+  assert.match(selector.innerHTML, /value="old" selected/);
+  assert.match(selector.innerHTML, /value="new"/);
+  assert.equal(selector.value, "old");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+});
+
+test("history IPC failures are visible without preventing a return to live", async (context) => {
+  const ui = missionRoot(context);
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => {
+    throw new Error(command === "agent_events" ? "history unavailable" : "list unavailable");
+  });
+  await flush();
+  assert.match(ui.boxes["[data-mc-history-error]"].textContent, /list unavailable/);
+  await ui.select("old");
+  assert.match(ui.boxes["[data-mc-history-error]"].textContent, /history unavailable/);
+  assert.doesNotMatch(ui.boxes["[data-mc-detail]"].innerHTML, /data-agent-action/);
+  await ui.select("");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /RUNNING/);
+});
 
 test("resolved permissions and terminal runs do not leave actionable confirmation cards", (context) => {
   const { root, boxes } = missionRoot(context);

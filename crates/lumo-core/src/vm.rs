@@ -54,6 +54,10 @@ pub struct RunReport {
     pub steps_retried: usize,
     pub steps_caught: usize,
     pub duration_ms: u128,
+    /// Metered usage from this run's persisted AI ledger. Without a repository
+    /// (or when a provider does not report usage), these totals are zero.
+    pub tokens_used: u64,
+    pub cost_usd_micro: u64,
     pub outputs: Option<Value>,
     /// F-20: when the run paused at a breakpoint / single-step, the path of the
     /// step it paused *before* (which did not execute). `None` for a run that
@@ -319,6 +323,7 @@ impl FlowVm {
 
         let inputs = merge_input_defaults(&flow.spec.inputs, opts.inputs.clone())?;
 
+        let mut recorded_usage = (0, 0);
         if let Some(repo) = &self.repo {
             let yaml = serde_yaml::to_string(flow).unwrap_or_default();
             let hash = Sha256::digest(yaml.as_bytes()).to_vec();
@@ -402,7 +407,9 @@ impl FlowVm {
             // flow_runs cost columns before we close the run. After this the
             // CLI / Studio can show "this run cost $0.012 / 1.2k tokens"
             // without re-scanning ai_calls every render.
-            let _ = repo.rollup_run_cost(&run_id);
+            if let Ok((tokens, cost)) = repo.rollup_run_cost(&run_id) {
+                recorded_usage = (tokens.max(0) as u64, cost.max(0) as u64);
+            }
             let state = if paused_at.is_some() {
                 "paused"
             } else if ok {
@@ -433,6 +440,8 @@ impl FlowVm {
             steps_retried: stats.retried,
             steps_caught: stats.caught,
             duration_ms: started.elapsed().as_millis(),
+            tokens_used: recorded_usage.0,
+            cost_usd_micro: recorded_usage.1,
             outputs,
             paused_at,
         })
@@ -2162,7 +2171,12 @@ fn count_steps(steps: &[Step]) -> usize {
     n
 }
 
-fn merge_input_defaults(decls: &[lumo_dsl::IoDecl], provided: Value) -> Result<Value, ExecError> {
+/// Resolve and validate a saved flow's inputs using the same contract as its
+/// execution. Hosts can reject invalid scheduled inputs before enqueueing.
+pub fn merge_input_defaults(
+    decls: &[lumo_dsl::IoDecl],
+    provided: Value,
+) -> Result<Value, ExecError> {
     let mut out = match provided {
         Value::Object(m) => m,
         Value::Null => serde_json::Map::new(),

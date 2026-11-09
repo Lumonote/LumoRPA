@@ -21,6 +21,8 @@ pub enum Source {
     TextLayer,
     /// 本地小 OCR 模型(可选 `ocr-native` 特性,离线)。
     OcrNative,
+    /// Local ModelScope/Transformers OCR backend. Document contents stay local.
+    OcrLocal,
     /// 远程 OCR 接口(自建/第三方 HTTP 服务)。**内容会离开本机**。
     OcrRemote,
     /// 云端视觉模型。**内容会离开本机**,受 `allow_cloud` 与 `llm` 双重门禁。
@@ -38,7 +40,10 @@ impl Source {
 
     /// 是否来自 OCR(与文本层/版面推断相区分)。
     pub fn is_ocr(self) -> bool {
-        matches!(self, Source::OcrNative | Source::OcrRemote | Source::OcrVlm)
+        matches!(
+            self,
+            Source::OcrNative | Source::OcrLocal | Source::OcrRemote | Source::OcrVlm
+        )
     }
 }
 
@@ -417,6 +422,9 @@ mod tests {
     fn only_the_vlm_path_is_reported_as_leaving_the_machine() {
         assert!(Source::OcrVlm.leaves_machine());
         assert!(!Source::OcrNative.leaves_machine());
+        assert!(!Source::OcrLocal.leaves_machine());
+        assert!(Source::OcrLocal.is_ocr());
+        assert_eq!(serde_json::to_value(Source::OcrLocal).unwrap(), "ocr_local");
         assert!(!Source::TextLayer.leaves_machine());
     }
 

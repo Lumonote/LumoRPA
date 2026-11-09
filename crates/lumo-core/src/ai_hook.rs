@@ -146,6 +146,27 @@ pub trait AiHookProvider: Send + Sync {
         model: Option<&str>,
     ) -> Result<String, StepError>;
 
+    /// Select a configured local OCR backend without loading a model. Returning
+    /// a model means the caller must stay local even if its files/runtime fail.
+    /// The default opts out, so a cloud-only provider can never be mistaken for
+    /// an offline OCR engine.
+    fn local_ocr_model(&self, _model: Option<&str>) -> Option<String> {
+        None
+    }
+
+    /// Strictly local OCR. Implementations must not delegate failure to a
+    /// network provider. This separate contract keeps doc.ocr's allow_cloud
+    /// boundary intact when a general provider also supports cloud models.
+    async fn ocr_image_local(
+        &self,
+        _image: Bytes,
+        _media_type: &str,
+        _prompt: &str,
+        _model: Option<&str>,
+    ) -> Result<String, StepError> {
+        Err(StepError::msg("local OCR backend is unavailable"))
+    }
+
     /// P1-4: drain and return the [`AiCallUsage`] records accumulated since the
     /// last drain. The VM calls this right after each hook dispatch to write
     /// `ai_calls` ledger rows and fold tokens/latency into the step's `_ai`

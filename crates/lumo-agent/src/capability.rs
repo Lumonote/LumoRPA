@@ -34,6 +34,27 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
+    /// Bind executable bytes without changing the descriptor wire shape. The
+    /// opaque hash prefix survives metadata overlays and schema refreshes.
+    pub fn bind_source_content(&mut self, content: &[u8]) {
+        self.version_hash = format!("source:{:x}:", Sha256::digest(content));
+        self.refresh_version_hash();
+    }
+
+    pub fn source_content_matches(&self, content: &[u8]) -> bool {
+        self.source_fingerprint()
+            .is_none_or(|expected| expected == format!("{:x}", Sha256::digest(content)))
+    }
+
+    fn source_fingerprint(&self) -> Option<&str> {
+        self.version_hash
+            .strip_prefix("source:")
+            .and_then(|value| value.split_once(':'))
+            .map(|(fingerprint, _)| fingerprint)
+            .filter(|fingerprint| {
+                fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }
     pub fn mcp(
         server: impl Into<String>,
         tool: impl Into<String>,
@@ -96,7 +117,11 @@ impl CapabilityDescriptor {
             self.enabled.into(),
         ]);
         let canonical = canonicalize_json(&fields).to_string();
-        format!("{:x}", Sha256::digest(canonical.as_bytes()))
+        let descriptor = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        match self.source_fingerprint() {
+            Some(fingerprint) => format!("source:{fingerprint}:{descriptor}"),
+            None => descriptor,
+        }
     }
 }
 

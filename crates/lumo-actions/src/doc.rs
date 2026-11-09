@@ -35,7 +35,7 @@ async fn run_ocr(
     document: &mut lumo_doc::Document,
     media: &[(String, Vec<u8>)],
 ) -> Result<usize, StepError> {
-    use crate::ocr::{recognize, resolve_engine, OcrRequest, Resolved};
+    use crate::ocr::{recognize, resolve_engine_with_local, OcrRequest, Resolved};
 
     let targets: Vec<(usize, &str, &[u8])> = document
         .images
@@ -52,10 +52,12 @@ async fn run_ocr(
         return Ok(0);
     }
 
-    let resolved = resolve_engine(
+    let resolved = resolve_engine_with_local(
         options,
         crate::ocr::native::is_available(),
         ctx.ai_provider().is_some(),
+        ctx.ai_provider()
+            .and_then(|provider| provider.local_ocr_model(options.model.as_deref())),
     );
     if let Resolved::Unavailable(reason) = &resolved {
         // 需要 OCR 但没有可用引擎:如实告警而不是静默出空结果
@@ -349,17 +351,19 @@ impl Action for OcrAction {
     }
 
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
-        use crate::ocr::{recognize, resolve_engine, OcrRequest, Resolved};
+        use crate::ocr::{recognize, resolve_engine_with_local, OcrRequest, Resolved};
 
         let OcrIn { image, ocr } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("doc.ocr input invalid: {e}")))?;
         // 先校验能力,再碰文件
         ctx.ensure_fs_read(&image)?;
 
-        let resolved = resolve_engine(
+        let resolved = resolve_engine_with_local(
             &ocr,
             crate::ocr::native::is_available(),
             ctx.ai_provider().is_some(),
+            ctx.ai_provider()
+                .and_then(|provider| provider.local_ocr_model(ocr.model.as_deref())),
         );
         if let Resolved::Unavailable(reason) = &resolved {
             // 说清楚为什么不可用,而不是返回空文本
@@ -412,6 +416,7 @@ impl Action for OcrAction {
             })).collect::<Vec<_>>(),
             // 如实标注是哪档引擎出的结果,以及是否出过网
             "engine": format!("{:?}", result.source).to_lowercase(),
+            "source": result.source,
             "left_machine": result.source.leaves_machine(),
             "low_confidence_lines": low_confidence,
         })))

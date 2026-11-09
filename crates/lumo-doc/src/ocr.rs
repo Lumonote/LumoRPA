@@ -160,6 +160,23 @@ mod tests {
     }
 
     #[test]
+    fn local_model_backend_has_distinct_provenance_without_cloud_audit() {
+        let mut doc = doc_with_pages(&[0.0]);
+        assert_eq!(
+            apply_ocr(
+                &mut doc,
+                &[result(0, "local result", Source::OcrLocal)],
+                0.05
+            ),
+            1
+        );
+        assert_eq!(doc.blocks[0].source, Source::OcrLocal);
+        assert_eq!(doc.pages[0].source, Source::OcrLocal);
+        assert_eq!(doc.diagnostics.ocr_pages, [1]);
+        assert!(doc.diagnostics.cloud_ocr_pages.is_empty());
+    }
+
+    #[test]
     fn pages_that_already_have_text_are_never_overwritten() {
         // OCR 准确率不可能高过文本层 —— 有文本的页必须原样保留
         let mut doc = doc_with_pages(&[0.99]);

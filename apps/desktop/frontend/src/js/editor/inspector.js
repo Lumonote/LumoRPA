@@ -121,6 +121,7 @@ function applyInspectorEdits(step) {
   const updated = mutateStepInSource(state.source, step.id, { ...step, id: newId, action: newAction, with: newWith });
   snapshotSource("inspector");
   state.source = updated;
+  state.draftController?.capture();
   state.ast = parseYaml(state.source);
   state.selectedStepId = newId;
   toast("已应用到 YAML 缓冲区", "记得点 💾 保存", "ok");

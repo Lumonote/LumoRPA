@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Must match `lumo_storage::repo::LATEST_USER_VERSION`. Hard-coded here on
 /// purpose so an accidental change to the migration list trips the test.
 /// v4: adds durable agent, MCP, voice, capability, and improvement tables.
-const EXPECTED_USER_VERSION: i64 = 5;
+const EXPECTED_USER_VERSION: i64 = 6;
 
 fn make_run(id: &str) -> FlowRunRow {
     FlowRunRow {
@@ -90,6 +90,83 @@ fn fresh_db_contains_v5_job_tables() {
             .unwrap();
         assert!(exists, "missing v5 table {table}");
     }
+}
+
+#[test]
+fn version_five_jobs_upgrade_without_losing_checkpoints_or_foreign_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("v5-jobs.db");
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(lumo_storage::schema::V5_DDL)
+            .unwrap();
+        connection.execute_batch(
+            "INSERT INTO agent_jobs(id,idempotency_key,payload_json,schedule_kind,schedule_spec_json,state,available_at,created_at,updated_at) \
+             VALUES ('legacy','legacy-key','{}','one_shot','{}','unknown',1,1,1); \
+             INSERT INTO agent_job_nodes(job_id,node_id,state,risk,idempotent,attempt,updated_at) VALUES ('legacy','send','unknown','L3',0,2,2); \
+             PRAGMA user_version=5;",
+        ).unwrap();
+    }
+    let repo = Repo::open(&path).unwrap();
+    let job = repo.get_job("legacy").unwrap().unwrap();
+    assert!(job.run_id.is_none());
+    assert_eq!(job.state, "unknown");
+    let nodes = repo.list_durable_job_nodes("legacy").unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].checkpoint.node_id, "send");
+    assert_eq!(nodes[0].checkpoint.attempt, 2);
+    assert!(nodes[0].node_hash.is_empty());
+    assert!(nodes[0].result.is_none());
+    repo.with_raw(|connection| {
+        connection.execute(
+            "UPDATE agent_jobs SET state='waiting_approval' WHERE id='legacy'",
+            [],
+        )?;
+        connection.execute("DELETE FROM agent_jobs WHERE id='legacy'", [])?;
+        let nodes: i64 =
+            connection.query_row("SELECT COUNT(*) FROM agent_job_nodes", [], |row| row.get(0))?;
+        assert_eq!(
+            nodes, 0,
+            "v6 foreign-key cascades must survive the table rebuild"
+        );
+        let errors: i64 =
+            connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(errors, 0);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(user_version(&path), EXPECTED_USER_VERSION);
+}
+
+#[test]
+fn version_five_completed_checkpoints_of_active_jobs_require_review_but_history_stays_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("v5-incomplete-output.db");
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(lumo_storage::schema::V5_DDL)
+            .unwrap();
+        for (id, state) in [("active", "waiting"), ("finished", "completed")] {
+            connection.execute("INSERT INTO agent_jobs(id,idempotency_key,payload_json,schedule_kind,schedule_spec_json,state,available_at,created_at,updated_at) VALUES (?,?,'{}','one_shot','{}',?,1,1,1)", rusqlite::params![id,id,state]).unwrap();
+            connection.execute("INSERT INTO agent_job_nodes(job_id,node_id,state,risk,idempotent,attempt,updated_at) VALUES (?,'send','completed','L3',0,1,2)", [id]).unwrap();
+        }
+        connection.execute_batch("PRAGMA user_version=5").unwrap();
+    }
+    let repo = Repo::open(&path).unwrap();
+    assert_eq!(repo.get_job("active").unwrap().unwrap().state, "unknown");
+    assert_eq!(repo.list_job_nodes("active").unwrap()[0].state, "unknown");
+    assert_eq!(
+        repo.get_job("finished").unwrap().unwrap().state,
+        "completed"
+    );
+    assert_eq!(
+        repo.list_job_nodes("finished").unwrap()[0].state,
+        "completed"
+    );
 }
 
 #[test]

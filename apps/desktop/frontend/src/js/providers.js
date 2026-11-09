@@ -4,15 +4,37 @@ import { $, html, toast } from "./dom.js";
 import { call } from "./api.js";
 import { state } from "./state.js";
 
+const ocrOperations = new Map();
+const ocrErrors = new Map();
+let ocrStatusRevision = 0;
+let ocrListRequest = 0;
+let ocrRefreshing = false;
+let ocrRefreshError = "";
+
+async function loadOcrModels() {
+  const request = ++ocrListRequest;
+  const revision = ocrStatusRevision;
+  try {
+    const models = await call("list_ocr_models");
+    if (request === ocrListRequest && revision === ocrStatusRevision) {
+      state.ocrModels = models;
+      ocrRefreshError = "";
+    }
+  } catch (error) {
+    if (request === ocrListRequest) ocrRefreshError = `刷新失败：${String(error)}`;
+    throw error;
+  }
+}
+
 export async function refreshProviders() {
-  const [providers, ocrModels] = await Promise.all([
+  const [providers] = await Promise.all([
     call("provider_status"),
-    call("list_ocr_models").catch(() => []),
+    loadOcrModels().catch(() => {}),
   ]);
   state.providers = providers;
-  state.ocrModels = ocrModels;
   renderProviderList();
   refreshActiveProviderPill();
+  redrawOcrPicker();
 }
 
 export function refreshActiveProviderPill() {
@@ -179,37 +201,91 @@ function renderProviderEditor() {
   });
 }
 
-function renderOcrModelPicker(selected) {
+export function renderOcrModelPicker(selected) {
   const models = state.ocrModels || [];
-  if (!models.length) {
-    return `<div class="ocr-model-panel"><div class="prop-empty">OCR 模型列表不可用</div></div>`;
-  }
-  return `<div class="ocr-model-panel">
+  const badge = (label, ready) => `<span class="status-badge ${ready ? "ready" : "partial"}">${label}</span>`;
+  return `<div class="ocr-model-panel" data-ocr-model-panel>
     <div class="ocr-model-panel-head">
       <span>ModelScope OCR 模型</span>
-      <button type="button" data-refresh-ocr-models>刷新</button>
+      <button type="button" ${ocrRefreshing ? "disabled" : ""} data-refresh-ocr-models>${ocrRefreshing ? "刷新中…" : "刷新"}</button>
     </div>
-    <div class="ocr-model-grid">
+    <p class="ocr-model-desc">先检查文件与运行环境，再测试本地识别。测试会加载所选模型，可能需要一些时间。</p>
+    <p class="ocr-model-desc" role="status">${html(ocrRefreshError)}</p>
+    ${models.length ? `<div class="ocr-model-grid">
       ${models.map((m) => {
         const p = m.preset;
         const isSelected = selected === p.id || selected === p.repo;
+        const complete = m.downloadState === "complete";
+        const busy = ocrOperations.get(p.id);
+        const files = ({ complete: "文件完整", partial: "文件不完整", missing: "文件未下载" })[m.downloadState] || "文件状态未检查";
+        const runtime = ({ ready: "环境检查通过", missing: "运行环境缺失" })[m.runtimeState] || "环境未检查";
+        const inference = ({ ready: "本地识别已验证", failed: "识别测试失败" })[m.inferenceState] || "识别未验证";
+        const reasons = [["文件", m.downloadReason], ["环境", m.runtimeReason], ["识别", m.inferenceReason]].filter(([, reason]) => reason);
         return `<div class="ocr-model-card ${isSelected ? "is-selected" : ""}">
           <div class="ocr-model-title">
             <span>${html(p.label)}</span>
-            ${m.downloaded ? '<span class="status-badge ready">已下载</span>' : '<span class="status-badge partial">未下载</span>'}
             ${p.recommended ? '<span class="status-badge ready">推荐</span>' : ""}
           </div>
+          <div class="ocr-model-statuses">${badge(files, complete)} ${badge(runtime, m.runtimeState === "ready")} ${badge(inference, complete && m.runtimeState === "ready" && m.inferenceState === "ready")}</div>
           <div class="ocr-model-meta">${html(p.repo)} · ${html(p.engine)} · ${html(p.sizeHint || "VLM")}</div>
           <div class="ocr-model-desc">${html(p.description)}</div>
           <div class="ocr-model-path">${html(m.cacheDir)}</div>
+          ${reasons.map(([label, reason]) => `<p class="ocr-model-desc">${label}：${html(reason)}</p>`).join("")}
+          ${p.runnable === false ? '<p class="ocr-model-desc">此模型暂不支持本地识别。</p>' : ""}
           <div class="ocr-model-actions">
             <button type="button" data-set-ocr-model="${html(p.id)}">选择</button>
-            <button type="button" ${m.downloaded ? "disabled" : ""} data-download-ocr-model="${html(p.id)}">${m.downloaded ? "已下载" : "下载"}</button>
+            <button type="button" ${complete || busy ? "disabled " : ""}data-download-ocr-model="${html(p.id)}">${complete ? "文件完整" : m.downloadState === "partial" ? "重新下载" : "下载"}</button>
+            <button type="button" ${busy ? "disabled " : ""}data-check-ocr-model="${html(p.id)}">检查运行环境</button>
+            <button type="button" ${!complete || p.runnable === false || busy ? "disabled " : ""}data-test-ocr-model="${html(p.id)}">测试本地识别</button>
           </div>
+          <p class="ocr-model-desc" role="status">${html(busy || ocrErrors.get(p.id) || "")}</p>
         </div>`;
       }).join("")}
-    </div>
+    </div>` : '<div class="prop-empty">OCR 模型列表不可用，请刷新重试。</div>'}
   </div>`;
+}
+
+function redrawOcrPicker() {
+  const panel = $("providerEditBody")?.querySelector("[data-ocr-model-panel]");
+  if (!panel) return;
+  // Keep the rest of the provider form, including edits made during a long
+  // download/inference request. Replacing the editor discarded those edits.
+  panel.outerHTML = renderOcrModelPicker($("pOcrModel")?.value || "");
+  wireOcrModelPicker();
+}
+
+async function runOcrOperation(model, label, action) {
+  const known = state.ocrModels.find((item) => item.preset.id === model || item.preset.repo === model);
+  const id = known?.preset.id || model;
+  if (ocrOperations.has(id)) return null;
+  ocrOperations.set(id, label);
+  ocrErrors.delete(id);
+  redrawOcrPicker();
+  try {
+    const status = await action(known);
+    if (!status?.preset?.id) throw new Error("OCR 状态响应无效，请刷新重试");
+    ocrStatusRevision++;
+    const exists = state.ocrModels.some((item) => item.preset.id === status.preset.id);
+    state.ocrModels = exists ? state.ocrModels.map((item) => item.preset.id === status.preset.id ? status : item) : [...state.ocrModels, status];
+    return status;
+  } catch (error) {
+    const message = `操作失败：${String(error)}`;
+    ocrErrors.set(id, message);
+    if (!known) ocrRefreshError = message;
+    return null;
+  } finally {
+    ocrOperations.delete(id);
+    redrawOcrPicker();
+  }
+}
+
+export function runOcrModelCheck(model, inference = false) {
+  return runOcrOperation(model, inference ? "正在测试本地识别…" : "正在检查运行环境…", async (known) => {
+    if (inference && (known?.downloadState !== "complete" || known?.preset.runnable === false)) {
+      throw new Error("请先准备完整且支持本地识别的模型文件");
+    }
+    return call("check_ocr_model", { model, inference });
+  });
 }
 
 function wireOcrModelPicker() {
@@ -226,29 +302,22 @@ function wireOcrModelPicker() {
     })
   );
   $("providerEditBody").querySelectorAll("[data-download-ocr-model]").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      const model = btn.dataset.downloadOcrModel;
-      collectProviderDraft();
-      btn.disabled = true;
-      btn.textContent = "下载中";
-      try {
-        const result = await call("download_ocr_model", { model });
-        state.ocrModels = await call("list_ocr_models").catch(() => state.ocrModels || []);
-        renderProviderEditor();
-        toast("OCR 模型已下载", result.model?.cacheDir || model, "ok");
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = "下载";
-        toast("下载失败", String(e), "bad");
-      }
-    })
+    btn.addEventListener("click", () => runOcrOperation(btn.dataset.downloadOcrModel, "正在下载模型…", async () => (await call("download_ocr_model", { model: btn.dataset.downloadOcrModel })).model))
+  );
+  $("providerEditBody").querySelectorAll("[data-check-ocr-model]").forEach((btn) =>
+    btn.addEventListener("click", () => runOcrModelCheck(btn.dataset.checkOcrModel))
+  );
+  $("providerEditBody").querySelectorAll("[data-test-ocr-model]").forEach((btn) =>
+    btn.addEventListener("click", () => runOcrModelCheck(btn.dataset.testOcrModel, true))
   );
   $("providerEditBody").querySelectorAll("[data-refresh-ocr-models]").forEach((btn) =>
     btn.addEventListener("click", async () => {
-      collectProviderDraft();
-      state.ocrModels = await call("list_ocr_models").catch(() => state.ocrModels || []);
-      renderProviderEditor();
-      toast("OCR 模型状态已刷新", "", "ok");
+      if (ocrRefreshing) return;
+      ocrRefreshing = true;
+      redrawOcrPicker();
+      try { await loadOcrModels(); }
+      catch { /* The panel retains previous models and displays the failure. */ }
+      finally { ocrRefreshing = false; redrawOcrPicker(); }
     })
   );
 }
@@ -341,11 +410,12 @@ export async function enableLlmNetworkForSession() {
 export async function testProvider() {
   if (!state.providerDraft) { toast("先保存 / 选择模型源", "", "warn"); return; }
   const draft = collectProviderDraft();
-  if (!draft.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
   if (draft.kind === "local") {
-    toast("本地 OCR 无需连接测试", "选择并下载 OCR 模型后，运行 image.ocr 流程即可验证。", "ok");
+    if (!draft.ocrModel) { toast("请选择本地 OCR 模型", "", "warn"); return; }
+    await runOcrModelCheck(draft.ocrModel, true);
     return;
   }
+  if (!draft.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
   if (state.providers && !state.providers.networkEnabled) {
     await enableLlmNetworkForSession();
   }

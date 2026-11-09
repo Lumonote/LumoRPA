@@ -24,8 +24,14 @@ pub enum LoadError {
 pub fn load_skill_file(path: impl AsRef<Path>) -> Result<Skill, LoadError> {
     let path = path.as_ref().to_path_buf();
     let raw = std::fs::read_to_string(&path)?;
+    load_skill_text(&path, &raw)
+}
+
+/// Parse the exact source text already validated by a host content fingerprint.
+pub fn load_skill_text(path: impl AsRef<Path>, raw: &str) -> Result<Skill, LoadError> {
+    let path = path.as_ref().to_path_buf();
     let (fm_yaml, body) =
-        split_frontmatter(&raw).ok_or_else(|| LoadError::Frontmatter { path: path.clone() })?;
+        split_frontmatter(raw).ok_or_else(|| LoadError::Frontmatter { path: path.clone() })?;
     let fm: SkillFrontmatter = serde_yaml::from_str(fm_yaml)?;
 
     let yaml_block =

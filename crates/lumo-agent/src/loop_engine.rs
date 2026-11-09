@@ -12,9 +12,9 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
     validate_invocation_result, AdapterRegistry, AgentBudget, AgentControlState, AgentEventDraft,
-    AgentEventKind, AgentPlan, AgentProfile, AgentRunControl, BudgetExceeded, CapabilityCatalog,
-    EventSink, InvocationContext, InvocationError, InvocationRequest, InvocationResult,
-    PlanValidator, RiskLevel,
+    AgentEventKind, AgentPlan, AgentProfile, AgentRunControl, ApprovalSnapshot, BudgetExceeded,
+    CapabilityCatalog, EventSink, InvocationContext, InvocationError, InvocationRequest,
+    InvocationResult, JobCheckpointStore, PlanValidator, RiskLevel,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +102,8 @@ pub struct LoopEngine {
     adapters: AdapterRegistry,
     events: Option<Arc<dyn AgentEventPublisher>>,
     control: Option<AgentRunControl>,
+    checkpoint: Option<JobCheckpointStore>,
+    approval: Option<ApprovalSnapshot>,
 }
 
 impl LoopEngine {
@@ -116,6 +118,8 @@ impl LoopEngine {
             adapters,
             events: None,
             control: None,
+            checkpoint: None,
+            approval: None,
         }
     }
 
@@ -126,6 +130,16 @@ impl LoopEngine {
 
     pub fn with_run_control(mut self, control: AgentRunControl) -> Self {
         self.control = Some(control);
+        self
+    }
+
+    pub fn with_job_checkpoint(mut self, checkpoint: JobCheckpointStore) -> Self {
+        self.checkpoint = Some(checkpoint);
+        self
+    }
+
+    pub fn with_approval_snapshot(mut self, approval: ApprovalSnapshot) -> Self {
+        self.approval = Some(approval);
         self
     }
 
@@ -141,8 +155,13 @@ impl LoopEngine {
         }
         let kind = match report.status {
             LoopStatus::Completed => Some(AgentEventKind::RunCompleted),
-            LoopStatus::Failed | LoopStatus::BudgetExceeded => Some(AgentEventKind::RunFailed),
-            LoopStatus::Cancelled => Some(AgentEventKind::RunCancelled),
+            LoopStatus::Failed | LoopStatus::BudgetExceeded if self.checkpoint.is_none() => {
+                Some(AgentEventKind::RunFailed)
+            }
+            LoopStatus::Cancelled if self.checkpoint.is_none() => {
+                Some(AgentEventKind::RunCancelled)
+            }
+            LoopStatus::Failed | LoopStatus::BudgetExceeded | LoopStatus::Cancelled => None,
             LoopStatus::WaitingApproval => None,
         };
         if let Some(kind) = kind {
@@ -157,11 +176,11 @@ impl LoopEngine {
     async fn execute_inner(
         &self,
         plan: AgentPlan,
-        budget: AgentBudget,
+        mut budget: AgentBudget,
         cancel: CancelToken,
     ) -> LoopReport {
         let run_id = plan.id.clone();
-        let validated = match PlanValidator::new(&self.catalog, &self.profile).validate(plan) {
+        let mut validated = match PlanValidator::new(&self.catalog, &self.profile).validate(plan) {
             Ok(validated) => validated,
             Err(error) => {
                 return LoopReport::terminal(
@@ -176,6 +195,59 @@ impl LoopEngine {
                 );
             }
         };
+        let (mut outputs, mut attempts) = match &self.checkpoint {
+            Some(checkpoint) => match checkpoint.restore(&validated.plan, &self.catalog) {
+                Ok(restored) => (restored.outputs, restored.attempts),
+                Err(error) => {
+                    return LoopReport::terminal(
+                        run_id,
+                        LoopStatus::Failed,
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        vec![],
+                        Some(error),
+                    )
+                }
+            },
+            None => (BTreeMap::new(), BTreeMap::new()),
+        };
+        let steps = attempts.values().copied().fold(0_u32, u32::saturating_add);
+        let (tokens, cost, runtime) =
+            outputs
+                .values()
+                .fold((0_u64, 0_u64, 0_u64), |usage, result| {
+                    (
+                        usage.0.saturating_add(result.tokens_used),
+                        usage.1.saturating_add(result.cost_usd_micro),
+                        usage.2.saturating_add(result.duration_ms),
+                    )
+                });
+        if let Err(error) = budget.restore_recorded_usage(steps, tokens, cost, runtime) {
+            return budget_report(run_id, outputs, attempts, Vec::new(), error);
+        }
+        validated
+            .approval_required
+            .retain(|id| !outputs.contains_key(id));
+        if let Some(approval) = &self.approval {
+            if approval.plan_hash == validated.plan.stable_hash()
+                && validated.plan.nodes.iter().all(|node| {
+                    self.catalog
+                        .get(&node.capability_id)
+                        .is_some_and(|capability| {
+                            approval.capability_versions.get(&node.capability_id)
+                                == Some(&capability.version_hash)
+                                && approval.schema_hashes.get(&node.capability_id)
+                                    == Some(&crate::plan::stable_json_hash(
+                                        &capability.input_schema,
+                                    ))
+                        })
+                })
+            {
+                validated
+                    .approval_required
+                    .retain(|id| !approval.approved_nodes.contains(id));
+            }
+        }
         if let Some(control) = &self.control {
             let capabilities = validated
                 .plan
@@ -211,8 +283,8 @@ impl LoopEngine {
             return LoopReport::terminal(
                 run_id,
                 LoopStatus::WaitingApproval,
-                BTreeMap::new(),
-                BTreeMap::new(),
+                outputs,
+                attempts,
                 vec![LoopDecision::AskUser {
                     question: format!("Approve nodes {:?}?", validated.approval_required),
                 }],
@@ -220,7 +292,7 @@ impl LoopEngine {
             );
         }
         if let Err(status) = self.wait_until_running(&budget, &cancel).await {
-            return stopped_report(run_id, status, BTreeMap::new(), BTreeMap::new(), Vec::new());
+            return stopped_report(run_id, status, outputs, attempts, Vec::new());
         }
         let plan = validated.plan;
         let nodes = plan
@@ -228,10 +300,12 @@ impl LoopEngine {
             .iter()
             .map(|node| (node.id.clone(), node.clone()))
             .collect::<BTreeMap<_, _>>();
-        let mut pending = nodes.keys().cloned().collect::<BTreeSet<_>>();
-        let mut completed = BTreeSet::new();
-        let mut outputs = BTreeMap::new();
-        let mut attempts = BTreeMap::new();
+        let mut completed = outputs.keys().cloned().collect::<BTreeSet<_>>();
+        let mut pending = nodes
+            .keys()
+            .filter(|id| !completed.contains(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let mut decisions = Vec::new();
         let budget = Arc::new(Mutex::new(budget));
         let max_parallel = self.profile.max_parallel.clamp(1, 4) as usize;
@@ -241,6 +315,9 @@ impl LoopEngine {
         self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunStarted))
             .await;
         for node in nodes.values() {
+            if completed.contains(&node.id) {
+                continue;
+            }
             self.emit(
                 AgentEventDraft::new(&run_id, AgentEventKind::NodeQueued)
                     .node_id(&node.id)
@@ -328,6 +405,21 @@ impl LoopEngine {
                         Some(format!("no adapter for {}", capability.id)),
                     );
                 };
+                if let Some(checkpoint) = &self.checkpoint {
+                    if let Err(error) =
+                        checkpoint.save(&plan, &node, &self.catalog, attempt_number, None)
+                    {
+                        running.abort_all();
+                        return LoopReport::terminal(
+                            run_id,
+                            LoopStatus::Failed,
+                            outputs,
+                            attempts,
+                            decisions,
+                            Some(error),
+                        );
+                    }
+                }
                 self.emit(
                     AgentEventDraft::new(&run_id, AgentEventKind::NodeStarted)
                         .node_id(&node_id)
@@ -427,6 +519,21 @@ impl LoopEngine {
                 Ok(result)
             }) {
                 Ok(result) => {
+                    if let Some(checkpoint) = &self.checkpoint {
+                        if let Err(error) =
+                            checkpoint.save(&plan, &node, &self.catalog, attempt, Some(&result))
+                        {
+                            running.abort_all();
+                            return LoopReport::terminal(
+                                run_id,
+                                LoopStatus::Failed,
+                                outputs,
+                                attempts,
+                                decisions,
+                                Some(error),
+                            );
+                        }
+                    }
                     if let Err(error) = budget
                         .lock()
                         .await
@@ -447,7 +554,10 @@ impl LoopEngine {
                 Err(InvocationError::Cancelled) if cancel.is_cancelled() => {
                     running.abort_all();
                 }
-                Err(error) if attempt <= node.retry_limit => {
+                Err(error)
+                    if attempt <= node.retry_limit
+                        && (self.checkpoint.is_none() || node.risk == RiskLevel::L0) =>
+                {
                     decisions.push(LoopDecision::Retry {
                         node_id: node.id.clone(),
                     });

@@ -8,6 +8,7 @@ import { parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { renderInspector } from "./editor/inspector.js";
 import { resetHistory } from "./editor/history.js";
+import { chooseEditorAction, draftRecoveryState } from "./editor-drafts.js";
 
 export async function refreshFlows() {
   state.examples = await call("list_flow_library");
@@ -39,9 +40,17 @@ export async function saveCurrentFlowAs() {
   const name = prompt("另存为流程名（不带扩展名）：", seed);
   if (!name) return;
   try {
+    const previousPath = state.flowPath;
     const path = await call("save_flow_as", { name, source });
     await refreshFlows();
-    await loadFlow(path);
+    if (state.flowPath === previousPath) {
+      state.flowPath = path;
+      state.savedSource = source;
+      state.flow = { ...state.flow, path, source: "user", fileName: path.split(/[\\/]/).pop() };
+      await state.draftController?.move(previousPath);
+      if (state.orphanDraftPath) { await state.draftController?.discard(state.orphanDraftPath); state.orphanDraftPath = null; }
+      renderActiveView(); renderInspector(); renderFlowList();
+    }
     toast("已另存", path, "ok");
   } catch (e) {
     toast("另存失败", String(e), "bad");
@@ -194,7 +203,8 @@ let loadSequence = 0;
 export async function loadFlow(path = state.flowPath) {
   if (!path) return;
   const request = ++loadSequence;
-  if (path !== state.flowPath && state.flowPath && state.source !== state.savedSource) {
+  if (state.draftController) await state.draftController.flush();
+  if (path !== state.flowPath && state.source !== state.savedSource) {
     const keep = confirm("当前流程有未保存修改。保存后再切换吗？\n\n确定 = 保存并切换\n取消 = 放弃修改并切换");
     if (keep) {
       try { await saveFlowSource(); }
@@ -207,6 +217,8 @@ export async function loadFlow(path = state.flowPath) {
         setStatus("载入已停止：当前流程有新编辑", "warn");
         return;
       }
+    } else {
+      await state.draftController?.discard(state.flowPath);
     }
   }
   if (request !== loadSequence) return;
@@ -214,7 +226,7 @@ export async function loadFlow(path = state.flowPath) {
   const previousSource = state.source;
   setStatus("载入中…", "warn");
   try {
-    const [flow, source] = await Promise.all([
+    const [flow, diskSource] = await Promise.all([
       call("inspect_flow", { path }),
       call("read_flow_source", { path }),
     ]);
@@ -222,6 +234,18 @@ export async function loadFlow(path = state.flowPath) {
     if (state.flowPath !== previousPath || state.source !== previousSource) {
       setStatus("载入已停止：当前流程有新编辑", "warn");
       return;
+    }
+    let source = diskSource;
+    const draft = state.draftRecovery?.find((entry) => entry.path === path);
+    if (draft) {
+      const recovery = draftRecoveryState(draft, diskSource);
+      if (recovery !== "redundant") {
+        const choice = await chooseEditorAction({ title: recovery === "conflict" ? "磁盘文件与草稿均有修改" : "恢复未保存草稿", detail: "恢复只替换编辑缓冲区，磁盘文件保持不变。可另存为保留双方版本。", actions: [["recover", "恢复到编辑器"], ["discard", "丢弃草稿"], ["cancel", "取消打开"]] });
+        if (request !== loadSequence || choice.action === "cancel") return;
+        if (choice.action === "recover") source = draft.source;
+        else await state.draftController.discard(path);
+      } else await state.draftController.discard(path);
+      state.draftRecovery = state.draftRecovery.filter((entry) => entry !== draft);
     }
     let ast = null;
     try { ast = parseYaml(source); }
@@ -236,7 +260,7 @@ export async function loadFlow(path = state.flowPath) {
     state.flowPath = path;
     state.flow = { ...flow, source: state.examples.find((f) => f.path === path)?.source || flow.source };
     state.source = source;
-    state.savedSource = source;
+    state.savedSource = diskSource;
     state.ast = ast;
     state.selectedStepId = null;
     state.selectedStepPath = null;
@@ -253,6 +277,24 @@ export async function loadFlow(path = state.flowPath) {
   } catch (error) {
     if (request === loadSequence) reportError(error);
   }
+}
+
+export async function restoreOrphanDraft(draft) {
+  const choice = await chooseEditorAction({ title: "原流程文件不可用", detail: "草稿仍可恢复为未命名流程，保存时将创建新文件。", actions: [["recover", "恢复草稿"], ["discard", "丢弃草稿"], ["cancel", "取消"]] });
+  if (choice.action === "cancel") return;
+  if (choice.action === "discard") { await state.draftController.discard(draft.path); return; }
+  state.flowPath = "";
+  state.source = draft.source;
+  state.savedSource = "";
+  state.flow = null;
+  try { state.ast = parseYaml(draft.source); } catch { state.ast = null; }
+  state.orphanDraftPath = draft.path;
+  state.viewMode = "code";
+  resetHistory();
+  renderActiveView();
+  renderInspector();
+  $("flowTitle").textContent = "已恢复草稿 · 请另存为";
+  $("flowSubtitle").textContent = draft.path || "未命名流程";
 }
 
 export function renderFlowConfigCard() {
@@ -296,7 +338,10 @@ export function defaultInputs(flow) {
 }
 
 export async function saveFlowSource() {
-  if (!state.flowPath) return;
+  if (!state.flowPath) {
+    if (state.source) await saveCurrentFlowAs();
+    return;
+  }
   const path = state.flowPath;
   const source = state.source;
   parseYaml(source);
@@ -360,6 +405,7 @@ async function writeFlowSource(pending, source) {
     state.savedSource = source;
     if (example) state.flow = { ...state.flow, path: savedPath, source: "user", fileName: savedPath.split(/[\\/]/).pop() };
     renderFlowConfigCard();
+    await state.draftController?.move(path);
   }
   if (example) {
     await refreshFlows().catch(() => {});

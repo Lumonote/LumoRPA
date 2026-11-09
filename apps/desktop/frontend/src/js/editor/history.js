@@ -36,6 +36,7 @@ function applySnapshot(snap) {
   state.ast = parseYaml(state.source);
   state.selectedStepPath = snap.selectedKey ? parsePathKey(snap.selectedKey) : null;
   state.selectedStepId = snap.selectedId ?? null;
+  state.draftController?.capture();
   state.selectedStepPaths?.clear();
   renderActiveView();
   renderInspector();

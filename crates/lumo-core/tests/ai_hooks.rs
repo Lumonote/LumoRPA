@@ -156,6 +156,11 @@ async fn ai_fallback_heals_selector_not_found_when_provider_attached() {
 
     assert!(report.success, "run should recover via AI heal");
     assert_eq!(
+        report.tokens_used, 0,
+        "a VM without a repository has no persisted usage ledger"
+    );
+    assert_eq!(report.cost_usd_micro, 0);
+    assert_eq!(
         heal_calls.load(Ordering::SeqCst),
         1,
         "heal_selector must fire exactly once"
@@ -198,6 +203,11 @@ async fn heal_selector_hook_writes_a_cost_ledger_row() {
 
     assert!(report.success, "run should recover via AI heal");
     assert_eq!(heal_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        report.tokens_used, 33,
+        "the report must expose actual metered hook usage"
+    );
+    assert_eq!(report.cost_usd_micro, 99);
 
     let calls = repo
         .list_ai_calls(&report.run_id)

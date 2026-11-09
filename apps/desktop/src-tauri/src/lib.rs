@@ -38,8 +38,10 @@ mod dto;
 mod element_library;
 mod execution;
 mod features_data;
+mod flow_drafts;
 mod flow_history;
 mod flow_library;
+mod flow_schedule_commands;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
@@ -75,8 +77,13 @@ use dto::*;
 use element_library::*;
 use execution::{execute_flow, DebugOpts};
 use features_data::{feature_map_data, FeatureSection};
+use flow_drafts::{
+    editor_cancel_exit, editor_confirm_exit, editor_draft_delete, editor_draft_list,
+    editor_draft_upsert,
+};
 use job_commands::{
-    job_cancel, job_list, job_pause, job_resume, job_schedule, setup_job_worker, JobRuntime,
+    job_cancel, job_list, job_pause, job_resolve_unknown, job_resume, job_schedule,
+    job_unknown_nodes, setup_job_worker, JobRuntime,
 };
 use mcp_commands::{
     apply_mcp_import, approve_mcp_schema_change, call_mcp_tool, delete_mcp_server,
@@ -929,6 +936,18 @@ async fn download_ocr_model(
 }
 
 #[tauri::command]
+async fn check_ocr_model(
+    app: AppHandle,
+    model: String,
+    inference: bool,
+) -> Result<lumo_ai::OcrModelStatus, String> {
+    let home = app_home(&app)?;
+    lumo_ai::check_ocr_model(&home, &model, inference)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn test_provider(
     app: AppHandle,
     name: String,
@@ -1309,6 +1328,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            editor_draft_list,
+            editor_draft_upsert,
+            editor_draft_delete,
+            editor_confirm_exit,
+            editor_cancel_exit,
             app_info,
             list_examples,
             list_flow_library,
@@ -1347,6 +1371,10 @@ pub fn run() {
             enable_llm_network_for_session,
             list_ocr_models,
             download_ocr_model,
+            check_ocr_model,
+            flow_schedule_commands::job_schedule_flow,
+            flow_schedule_commands::job_update_schedule,
+            flow_schedule_commands::job_latest_run,
             test_provider,
             generate_flow,
             list_skills,
@@ -1410,6 +1438,8 @@ pub fn run() {
             agent_run_list,
             agent_restore,
             job_list,
+            job_unknown_nodes,
+            job_resolve_unknown,
             job_schedule,
             job_pause,
             job_resume,
@@ -1427,8 +1457,23 @@ pub fn run() {
             desktop_update_install,
             desktop_update_restart,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running LumoRPA desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building LumoRPA desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if !flow_drafts::consume_exit_permission() {
+                    api.prevent_exit();
+                    let kind = if code == Some(tauri::RESTART_EXIT_CODE) {
+                        "restart"
+                    } else {
+                        "quit"
+                    };
+                    if let Err(error) = flow_drafts::request_editor_exit(app, kind) {
+                        tracing::error!(%error, "editor exit request failed; exit prevented");
+                    }
+                }
+            }
+        });
 }
 
 fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
@@ -1470,7 +1515,11 @@ fn setup_tray(app: &mut tauri::App<Wry>) -> tauri::Result<()> {
                     let _ = window.hide();
                 }
             }
-            "tray_quit" => app.exit(0),
+            "tray_quit" => {
+                if let Err(error) = flow_drafts::request_editor_exit(app, "quit") {
+                    tracing::error!(%error, "editor exit request failed; exit prevented");
+                }
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

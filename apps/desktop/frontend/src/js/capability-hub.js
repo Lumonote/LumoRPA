@@ -1,7 +1,8 @@
 import { renderImprovementProposals, runImprovementAction } from "./improvements.js";
 import { buildMcpApplyRequest, collectMcpToolArguments, renderMcpGovernance, renderMcpImportWorkspace, renderMcpToolCall, runMcpGovernanceAction } from "./mcp-manager.js";
 import { renderSecurityCenter, runSecurityAction } from "./security-center.js";
-import { renderJobs, runJobAction } from "./job-manager.js";
+import { createJobReviewController, renderJobs, resolveUnknownNode, runJobAction } from "./job-manager.js";
+import { runAgentControl } from "./agent-confirmation.js";
 import { applyStaticTranslations, getLocale, subscribeLocale, t, tEnum } from "./i18n.js";
 
 const escapeHtml = (value) => String(value ?? "")
@@ -62,10 +63,12 @@ function overviewMarkup(data) {
 }
 
 
-export function mountCapabilityHub({ call, root }) {
+export function mountCapabilityHub({ call, root, editJob }) {
   if (!root) return { refresh: async () => {} };
   const data = { servers: [], skills: [], profiles: [], proposals: [], jobs: [], security: {}, errors: [] };
   let active = "overview";
+  const reviewController = createJobReviewController(call);
+  let lastReviewMarkup = null;
   const content = root.querySelector("[data-hub-content]");
   const render = () => {
     // 静态骨架（导航、导入向导）由词表驱动，语言切换后一并刷新
@@ -75,7 +78,18 @@ export function mountCapabilityHub({ call, root }) {
     else if (active === "servers") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.protocol_fabric"))}</span><h3>${escapeHtml(t("hub.card.servers"))}</h3></div><button class="primary" data-open-import>${escapeHtml(t("hub.action.import_server"))}</button></header>${renderServerRows(data.servers)}<div data-mcp-tool-call></div></section>`;
     else if (active === "skills") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.local_intelligence"))}</span><h3>${escapeHtml(t("hub.card.skills"))}</h3></div></header><div class="hub-import-editor"><input data-skill-local-path placeholder="${escapeHtml(t("hub.skill.local_path"))}"><button data-skill-import-local>${escapeHtml(t("hub.skill.import_local"))}</button><input data-skill-git-url placeholder="${escapeHtml(t("hub.skill.git_url"))}"><input data-skill-git-revision placeholder="${escapeHtml(t("hub.skill.git_revision"))}"><button data-skill-import-git>${escapeHtml(t("hub.skill.import_git"))}</button></div>${renderSkillRows(data.skills)}</section>`;
     else if (active === "profiles") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.execution_policy"))}</span><h3>${escapeHtml(t("hub.card.profiles"))}</h3></div></header>${renderAgentProfileRows(data.profiles)}</section>`;
-    else if (active === "jobs") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.scheduler"))}</span><h3>${escapeHtml(t("hub.card.jobs"))}</h3></div></header>${renderJobs(data.jobs)}</section>`;
+    else if (active === "jobs") {
+      if (!content.querySelector("[data-job-list-host]")) {
+        content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.scheduler"))}</span><h3>${escapeHtml(t("hub.card.jobs"))}</h3></div></header><div data-job-list-host></div><p data-job-operation-error role="status"></p></section><div data-job-review-host></div>`;
+        lastReviewMarkup = null;
+      }
+      content.querySelector("[data-job-list-host]").innerHTML = renderJobs(data.jobs);
+      const markup = reviewController.markup();
+      if (markup !== lastReviewMarkup) {
+        content.querySelector("[data-job-review-host]").innerHTML = markup;
+        lastReviewMarkup = markup;
+      }
+    }
     else if (active === "permissions") content.innerHTML = `<section class="hub-card">${renderSecurityCenter(data.security || {})}</section>`;
     else if (active === "proposals") content.innerHTML = `<section class="hub-card"><header><div><span class="hub-eyebrow">${escapeHtml(t("hub.eyebrow.evolution"))}</span><h3>${escapeHtml(t("hub.card.proposals"))}</h3><p>${escapeHtml(t("hub.proposals_note"))}</p></div></header>${renderImprovementProposals(data.proposals)}</section>`;
     else content.innerHTML = `<section class="hub-card hub-coming"><span class="hub-eyebrow">${escapeHtml(sectionTitle(active))}</span><h3>${escapeHtml(t("hub.coming.title"))}</h3><p>${escapeHtml(t("hub.coming.note"))}</p></section>`;
@@ -121,9 +135,41 @@ export function mountCapabilityHub({ call, root }) {
     if (security) await runSecurityAction({ action: security.dataset.securityAction, grantId: security.dataset.grantId }, call);
     const job = event.target.closest("[data-job-action]");
     if (job) {
-      await runJobAction({ action: job.dataset.jobAction, jobId: job.dataset.jobId }, call);
-      data.jobs = await call("job_list");
-      render();
+      if (job.disabled) return;
+      job.disabled = true;
+      try {
+        if (job.dataset.jobAction === "edit") {
+          if (!editJob) throw new Error("请从流程编辑器创建定时任务");
+          await editJob(data.jobs.find((item) => item.id === job.dataset.jobId));
+        } else if (job.dataset.jobAction === "review") {
+          await reviewController.open(data.jobs.find((item) => item.id === job.dataset.jobId));
+        } else {
+          await runJobAction({ action: job.dataset.jobAction, jobId: job.dataset.jobId }, call);
+          data.jobs = await call("job_list");
+        }
+        render();
+      } catch (error) {
+        const box = root.querySelector("[data-job-operation-error]");
+        if (box) box.textContent = `操作失败：${String(error)}`;
+      } finally { job.disabled = false; }
+      return;
+    }
+    if (event.target.closest("[data-job-review-close]")) { reviewController.close(); render(); return; }
+    const approval = event.target.closest("[data-agent-action]");
+    if (approval && reviewController.current) {
+      if (approval.disabled) return;
+      approval.disabled = true;
+      const operation = reviewController.snapshot();
+      try {
+        await runAgentControl({ action: approval.dataset.agentAction, runId: approval.dataset.runId, nodeId: approval.dataset.nodeId, planHash: approval.dataset.planHash, risk: approval.dataset.risk, strength: approval.dataset.strength, capabilityId: approval.dataset.capabilityId }, call, () => root.querySelector("[data-job-review] [data-plan-hash]")?.dataset.planHash, (message) => window.confirm(message));
+        data.jobs = await call("job_list");
+        if (reviewController.isCurrent(operation)) await reviewController.refresh(data.jobs);
+        render();
+      } catch (error) {
+        const box = root.querySelector("[data-job-review-error]");
+        if (box && reviewController.isCurrent(operation)) box.textContent = `审批失败：${String(error)}`;
+      } finally { approval.disabled = false; }
+      return;
     }
     if (event.target.closest("[data-skill-import-local]")) {
       await call("skill_import_local", { path: root.querySelector("[data-skill-local-path]").value });
@@ -154,7 +200,34 @@ export function mountCapabilityHub({ call, root }) {
       } finally { improvement.disabled = false; }
     }
   });
+  root.addEventListener("input", (event) => {
+    const form = event.target.closest("[data-job-review-node]");
+    if (form && event.target.matches("[data-job-node-result]")) {
+      reviewController.setResult(form.dataset.jobReviewNode, event.target.value);
+      lastReviewMarkup = reviewController.markup();
+    }
+  });
   root.addEventListener("submit", async (event) => {
+    const review = event.target.closest("[data-job-review-node]");
+    if (review) {
+      event.preventDefault();
+      const button = event.submitter;
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      const operation = reviewController.snapshot();
+      try {
+        const changed = await resolveUnknownNode({ jobId: review.dataset.jobId, nodeId: review.dataset.jobReviewNode, outcome: button.value, result: review.querySelector("[data-job-node-result]").value }, call, (message) => window.confirm(message));
+        if (changed) {
+          data.jobs = await call("job_list");
+          if (reviewController.isCurrent(operation)) await reviewController.refresh(data.jobs);
+          render();
+        }
+      } catch (error) {
+        const box = root.querySelector("[data-job-review-error]");
+        if (box && reviewController.isCurrent(operation)) box.textContent = `核验失败：${String(error)}`;
+      } finally { button.disabled = false; }
+      return;
+    }
     const form = event.target.closest("[data-mcp-call-server]");
     if (!form) return;
     event.preventDefault();
@@ -168,6 +241,8 @@ export function mountCapabilityHub({ call, root }) {
       try { const result = await call(command); data[key] = Array.isArray(result) ? result : result?.items || []; }
       catch { data[key] = []; data.errors.push(label(key)); }
     }));
+    try { await reviewController.refresh(data.jobs); }
+    catch { /* Keep a visible review while a transient refresh fails. */ }
     render();
   };
   render();

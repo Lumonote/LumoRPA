@@ -50,6 +50,16 @@ pub(super) async fn run_vm(
     }
 }
 
+pub(super) fn invocation_result(report: RunReport, started: Instant) -> InvocationResult {
+    let mut result = InvocationResult::new(report.outputs.unwrap_or_default(), started);
+    result.tokens_used = report.tokens_used;
+    result.cost_usd_micro = report.cost_usd_micro;
+    result
+        .metadata
+        .insert("flowRunId".into(), report.run_id.into());
+    result
+}
+
 pub struct FlowAdapter {
     vm_factory: ContextualFlowVmFactory,
 }
@@ -78,7 +88,16 @@ impl InvocationAdapter for FlowAdapter {
         let CapabilitySource::Flow { path } = &request.capability.source else {
             return Err(InvocationError::InvalidSource);
         };
-        let flow = lumo_dsl::parse_file(path)
+        let content =
+            std::fs::read(path).map_err(|error| InvocationError::Unavailable(error.to_string()))?;
+        if !request.capability.source_content_matches(&content) {
+            return Err(InvocationError::Unavailable(
+                "flow source changed after planning; create a new plan".into(),
+            ));
+        }
+        let text = std::str::from_utf8(&content)
+            .map_err(|error| InvocationError::Unavailable(error.to_string()))?;
+        let flow = lumo_dsl::parse_str(text)
             .map_err(|error| InvocationError::Unavailable(error.to_string()))?;
         lumo_dsl::validate(&flow)
             .map_err(|error| InvocationError::Unavailable(error.to_string()))?;
@@ -99,9 +118,6 @@ impl InvocationAdapter for FlowAdapter {
                 "flow completed unsuccessfully".into(),
             ));
         }
-        Ok(InvocationResult::new(
-            report.outputs.unwrap_or_default(),
-            started,
-        ))
+        Ok(invocation_result(report, started))
     }
 }

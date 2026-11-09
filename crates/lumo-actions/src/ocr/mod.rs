@@ -38,6 +38,8 @@ pub enum Engine {
     #[default]
     Auto,
     Native,
+    /// A downloaded ModelScope backend exposed by the host's local-only hook.
+    Local,
     Remote,
     Vlm,
 }
@@ -114,6 +116,7 @@ impl Default for OcrOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
     Native,
+    Local(String),
     Remote,
     Vlm,
     /// 不可用及原因 —— 必须能说清为什么,不能静默返回空结果。
@@ -127,10 +130,24 @@ pub fn resolve_engine(
     native_available: bool,
     has_provider: bool,
 ) -> Resolved {
+    resolve_engine_with_local(options, native_available, has_provider, None)
+}
+
+pub fn resolve_engine_with_local(
+    options: &OcrOptions,
+    native_available: bool,
+    has_provider: bool,
+    local_model: Option<String>,
+) -> Resolved {
     match options.engine {
+        Engine::Local => local_model.map(Resolved::Local).unwrap_or_else(|| {
+            Resolved::Unavailable("本地 OCR 未配置 ModelScope 模型；不会改用云端".into())
+        }),
         Engine::Native => {
             if native_available {
                 Resolved::Native
+            } else if let Some(model) = local_model {
+                Resolved::Local(model)
             } else {
                 Resolved::Unavailable(
                     "本地 OCR 不可用:未启用 `ocr-native` 特性或模型/运行时缺失".into(),
@@ -164,6 +181,12 @@ pub fn resolve_engine(
             if native_available {
                 return Resolved::Native;
             }
+            if let Some(model) = local_model {
+                // Configuration pins the privacy boundary. A missing package
+                // or failed inference remains a local failure, never a reason
+                // to send the document to a cloud provider.
+                return Resolved::Local(model);
+            }
             if options.allow_cloud {
                 if options
                     .endpoint
@@ -193,10 +216,47 @@ pub async fn recognize(
 ) -> Result<OcrPageResult, StepError> {
     match resolved {
         Resolved::Native => native::recognize(options, &request),
+        Resolved::Local(model) => recognize_local(ctx, options, &request, model).await,
         Resolved::Remote => remote::recognize(ctx, options, &request).await,
         Resolved::Vlm => recognize_vlm(ctx, options, &request).await,
         Resolved::Unavailable(reason) => Err(StepError::msg(format!("OCR 不可用:{reason}"))),
     }
+}
+
+async fn recognize_local(
+    ctx: &mut StepCtx,
+    options: &OcrOptions,
+    request: &OcrRequest<'_>,
+    model: &str,
+) -> Result<OcrPageResult, StepError> {
+    let provider = ctx
+        .ai_provider()
+        .cloned()
+        .ok_or_else(|| StepError::msg("local OCR backend is unavailable"))?;
+    let prompt = format!("Extract all text from this document image in reading order. Languages: {}. Return plain text only, preserving line breaks.", options.lang.join(", "));
+    let text = crate::contracts::with_timeout(
+        options.timeout_ms,
+        provider.ocr_image_local(
+            bytes::Bytes::copy_from_slice(request.image),
+            request.media_type,
+            &prompt,
+            Some(model),
+        ),
+    )
+    .await?;
+    Ok(OcrPageResult {
+        page: request.page,
+        lines: text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| OcrLine {
+                text: line.to_string(),
+                bbox: None,
+                confidence: 0.75,
+            })
+            .collect(),
+        source: Source::OcrLocal,
+    })
 }
 
 /// 云视觉模型:复用既有 `image.ocr` 的 AI provider 通路。
@@ -205,6 +265,11 @@ async fn recognize_vlm(
     options: &OcrOptions,
     request: &OcrRequest<'_>,
 ) -> Result<OcrPageResult, StepError> {
+    if !options.allow_cloud {
+        return Err(StepError::msg(
+            "云端 OCR 需要显式设置 `ocr.allow_cloud: true`",
+        ));
+    }
     ctx.ensure_llm(options.model.as_deref().unwrap_or(""))?;
     let provider = ctx
         .ai_provider()
@@ -321,6 +386,29 @@ mod tests {
         opts.endpoint = Some("https://ocr.example.com/v1".into());
         assert!(matches!(
             resolve_engine(&opts, false, true),
+            Resolved::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn configured_local_backend_is_selected_without_cloud_permission() {
+        let model = "modelscope/ZhipuAI/GLM-OCR".to_string();
+        for engine in [Engine::Auto, Engine::Local, Engine::Native] {
+            let opts = options(engine);
+            assert_eq!(
+                resolve_engine_with_local(&opts, false, true, Some(model.clone())),
+                Resolved::Local(model.clone())
+            );
+        }
+        let mut opts = options(Engine::Auto);
+        opts.allow_cloud = true;
+        opts.endpoint = Some("https://ocr.example.com".into());
+        assert_eq!(
+            resolve_engine_with_local(&opts, false, true, Some(model.clone())),
+            Resolved::Local(model)
+        );
+        assert!(matches!(
+            resolve_engine_with_local(&options(Engine::Local), false, true, None),
             Resolved::Unavailable(_)
         ));
     }

@@ -71,6 +71,8 @@ pub struct AgentJobRow {
     pub cancelled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Stable execution associated with this occurrence; retained across retries.
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,15 @@ pub struct JobNodeCheckpoint {
     pub idempotent: bool,
     pub attempt: i64,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A node checkpoint and the complete invocation result needed for safe replay.
+/// The hash binds the result to the immutable plan, node, and capability version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableJobNode {
+    pub checkpoint: JobNodeCheckpoint,
+    pub node_hash: String,
+    pub result: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

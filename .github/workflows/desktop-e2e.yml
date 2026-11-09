@@ -1,0 +1,61 @@
+name: desktop acceptance
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  browser:
+    name: real Chrome actions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: browser-acceptance
+      - uses: ./.github/actions/linux-deps
+      - name: Require real Chrome
+        run: google-chrome --version
+      - name: Execute browser workflow against a local HTTP fixture
+        run: cargo test -p lumo-actions --locked --test browser_workflow_e2e -- --ignored --nocapture
+
+  webview:
+    name: Tauri edit, execute, approve and results
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GDK_BACKEND: x11
+      WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-acceptance
+      - uses: ./.github/actions/linux-deps
+      - name: Install the native webview driver and virtual display
+        run: sudo apt-get install -y webkit2gtk-driver xvfb dbus-x11
+      - name: Install Tauri WebDriver bridge
+        run: cargo install tauri-driver --locked
+      - name: Build the desktop application
+        run: cargo build -p lumorpa-desktop --locked
+      - name: Drive the real desktop frontend and production IPC
+        run: dbus-run-session -- xvfb-run -a python3 scripts/desktop-e2e.py --artifacts "$RUNNER_TEMP/desktop-e2e"
+      - name: Upload driver logs and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e
+          path: ${{ runner.temp }}/desktop-e2e
+          if-no-files-found: ignore

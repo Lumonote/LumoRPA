@@ -108,7 +108,12 @@ pub(super) fn desktop_flow_vm(
         .with_human_prompter(prompter);
     let ai = flow.metadata.ai.clone().unwrap_or_default();
     let ai_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
-    match lumo_ai::build_hook_provider(&ai_cfg, ai.enabled, ai.budget.max_calls_per_run) {
+    match lumo_ai::build_hook_provider_with_home(
+        &ai_cfg,
+        ai.enabled,
+        ai.budget.max_calls_per_run,
+        home,
+    ) {
         Some(provider) => vm.with_ai_provider(provider),
         None => vm,
     }

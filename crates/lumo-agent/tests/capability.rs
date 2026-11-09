@@ -26,6 +26,33 @@ fn same_descriptor_has_same_hash() {
 }
 
 #[test]
+fn executable_content_fingerprint_survives_overlay_refresh_and_changes_with_same_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("flow.yaml");
+    std::fs::write(&path, b"old executable").unwrap();
+    let mut original = descriptor();
+    original.source = CapabilitySource::Flow {
+        path: path.display().to_string(),
+    };
+    original.bind_source_content(&std::fs::read(&path).unwrap());
+    let hash = original.version_hash.clone();
+    original.description = "overlay".into();
+    original.refresh_version_hash();
+    assert!(original.has_valid_version_hash());
+    assert!(original.source_content_matches(b"old executable"));
+    assert!(!original.source_content_matches(b"new executable"));
+    assert_ne!(hash, original.version_hash);
+    let old = original.version_hash.clone();
+    std::fs::write(&path, b"new executable").unwrap();
+    original.bind_source_content(&std::fs::read(&path).unwrap());
+    assert_ne!(old, original.version_hash);
+    let restored: CapabilityDescriptor =
+        serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+    assert!(restored.has_valid_version_hash());
+    assert!(restored.source_content_matches(b"new executable"));
+}
+
+#[test]
 fn mcp_source_changes_affect_hash() {
     let original = descriptor();
     let different_server = CapabilityDescriptor::mcp(

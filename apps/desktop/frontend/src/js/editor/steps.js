@@ -329,6 +329,7 @@ async function toggleStepExpand(path) {
       });
       snapshotSource("expand-apply");
       state.source = updated;
+      state.draftController?.capture();
       state.ast = parseYaml(state.source);
       toast("已应用到 YAML 缓冲区", "记得点 💾 保存", "ok");
       renderActiveView();

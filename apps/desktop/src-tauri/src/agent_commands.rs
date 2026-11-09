@@ -127,9 +127,13 @@ async fn start_agent_request(
 
 #[tauri::command]
 pub(super) async fn agent_pause(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
+    if let Some(result) = control_background_run(&app, &state, &run_id, "pause").await? {
+        return Ok(result);
+    }
     let result = {
         let mut runtime = lock_runtime(&state)?;
         pause_session(&mut runtime, &run_id)?
@@ -147,9 +151,13 @@ pub(super) async fn agent_pause(
 
 #[tauri::command]
 pub(super) async fn agent_resume(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
+    if let Some(result) = control_background_run(&app, &state, &run_id, "resume").await? {
+        return Ok(result);
+    }
     let result = {
         let mut runtime = lock_runtime(&state)?;
         resume_session(&mut runtime, &run_id)?
@@ -167,9 +175,13 @@ pub(super) async fn agent_resume(
 
 #[tauri::command]
 pub(super) async fn agent_cancel(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
+    if let Some(result) = control_background_run(&app, &state, &run_id, "cancel").await? {
+        return Ok(result);
+    }
     let (result, restored) = {
         let mut runtime = lock_runtime(&state)?;
         let restored = runtime
@@ -190,6 +202,40 @@ pub(super) async fn agent_cancel(
         .await?;
     }
     Ok(result)
+}
+
+async fn control_background_run(
+    app: &AppHandle,
+    state: &DesktopState,
+    run_id: &str,
+    action: &str,
+) -> Result<Option<AgentSessionDto>, String> {
+    let service = state
+        .agent_service
+        .lock()
+        .map_err(|_| "desktop agent service is unavailable")?
+        .clone()
+        .ok_or("desktop agent service is not initialized")?;
+    if !service.is_background_job(run_id)? {
+        return Ok(None);
+    }
+    let job = service
+        .control_background_job(state, run_id, action)
+        .await?
+        .ok_or("后台任务已变化、已结束或仍待审批，请刷新；待审批任务须先完成审批")?;
+    let _ = app.emit("lumo://job-updated", &job);
+    let state = match action {
+        "resume" => AgentRuntimeState::Running,
+        "cancel" => AgentRuntimeState::Cancelled,
+        _ => AgentRuntimeState::Paused,
+    };
+    Ok(Some(AgentSessionDto {
+        run_id: run_id.into(),
+        state,
+        paused: state == AgentRuntimeState::Paused,
+        approval: None,
+        unknown_nodes: Vec::new(),
+    }))
 }
 
 /// 语音状态播报用：正在运行/暂停中的 agent 会话数。
@@ -274,6 +320,34 @@ pub(super) async fn agent_approve(
     plan_hash: String,
     strengthened: Option<bool>,
 ) -> Result<AgentSessionDto, String> {
+    let service = state
+        .agent_service
+        .lock()
+        .map_err(|_| "desktop agent service is unavailable")?
+        .clone()
+        .ok_or("desktop agent service is not initialized")?;
+    if service.is_background_job(&run_id)? {
+        service
+            .resolve_job_approval(
+                &run_id,
+                &plan_hash,
+                &node_ids,
+                approved,
+                strengthened.unwrap_or(false),
+            )
+            .await?;
+        return Ok(AgentSessionDto {
+            run_id,
+            state: if approved {
+                AgentRuntimeState::WaitingApproval
+            } else {
+                AgentRuntimeState::Cancelled
+            },
+            paused: false,
+            approval: Some(json!({"approved":approved,"nodeIds":node_ids,"planHash":plan_hash})),
+            unknown_nodes: vec![],
+        });
+    }
     let control = {
         let mut runtime = lock_runtime(&state)?;
         let session = require_session(&mut runtime, &run_id)?;

@@ -67,10 +67,15 @@ fn runtime_library_name() -> &'static str {
     }
 }
 
-/// 本地 OCR 是否可用。**探测而不加载** —— 路由决策需要它,但不该有副作用。
-///
-/// 三个条件缺一不可:编译时开了 `ocr-native`、运行时库在位、模型清单校验通过。
+/// The legacy ONNX inference backend is not implemented. Files and a dynamic
+/// library alone must never advertise an executable engine. ModelScope local
+/// OCR is routed separately through the host's local-only AI hook.
 pub fn is_available() -> bool {
+    false
+}
+
+/// Asset readiness is diagnostic information, separate from inference support.
+pub fn assets_available() -> bool {
     if !cfg!(feature = "ocr-native") {
         return false;
     }

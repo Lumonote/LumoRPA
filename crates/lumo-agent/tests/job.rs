@@ -28,6 +28,7 @@ fn job_states_use_stable_wire_names() {
         (JobState::Queued, "queued"),
         (JobState::Running, "running"),
         (JobState::Waiting, "waiting"),
+        (JobState::WaitingApproval, "waiting_approval"),
         (JobState::Paused, "paused"),
         (JobState::Completed, "completed"),
         (JobState::Failed, "failed"),

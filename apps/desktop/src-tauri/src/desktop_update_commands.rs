@@ -137,8 +137,8 @@ pub(super) async fn desktop_update_install(
 }
 
 #[tauri::command]
-pub(super) fn desktop_update_restart(app: AppHandle) {
-    app.restart();
+pub(super) fn desktop_update_restart(app: AppHandle) -> Result<(), String> {
+    super::flow_drafts::request_editor_exit(&app, "restart")
 }
 
 #[cfg(test)]

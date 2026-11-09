@@ -29,6 +29,8 @@ export const state = {
   flow: null,            // FlowSummary
   source: "",            // raw YAML
   savedSource: "",       // last source confirmed on disk; differs while editing
+  draftController: null,
+  draftRecovery: [],
   ast: null,             // parsed AST of source
   selectedStepId: null,
   selectedStepPath: null, // index path like [0, "do", 2]

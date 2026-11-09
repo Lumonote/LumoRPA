@@ -258,3 +258,60 @@ CREATE TABLE IF NOT EXISTS agent_job_nodes (
   FOREIGN KEY (job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
 );
 "#;
+
+/// Rebuild the two job tables together so CHECK constraints and foreign keys
+/// are upgraded atomically while preserving legacy checkpoints.
+pub const V6_DDL: &str = r#"
+CREATE TABLE agent_jobs_v6 (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL,
+  schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('one_shot', 'cron')),
+  schedule_spec_json TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued'
+    CHECK (state IN ('queued', 'running', 'waiting', 'waiting_approval', 'paused', 'completed', 'failed', 'unknown')),
+  priority INTEGER NOT NULL DEFAULT 5,
+  available_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+  worker_id TEXT,
+  lease_until INTEGER,
+  heartbeat_at INTEGER,
+  last_error TEXT,
+  cancelled_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  run_id TEXT
+);
+INSERT INTO agent_jobs_v6 SELECT agent_jobs.*,NULL FROM agent_jobs;
+CREATE TABLE agent_job_nodes_v6 (
+  job_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  state TEXT NOT NULL
+    CHECK (state IN ('queued', 'running', 'waiting', 'paused', 'completed', 'failed', 'unknown')),
+  risk TEXT NOT NULL CHECK (risk IN ('L0', 'L1', 'L2', 'L3')),
+  idempotent INTEGER NOT NULL CHECK (idempotent IN (0, 1)),
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+  updated_at INTEGER NOT NULL,
+  node_hash TEXT NOT NULL DEFAULT '',
+  result_json TEXT,
+  PRIMARY KEY (job_id, node_id),
+  FOREIGN KEY (job_id) REFERENCES agent_jobs_v6(id) ON DELETE CASCADE
+);
+INSERT INTO agent_job_nodes_v6 SELECT agent_job_nodes.*,'',NULL FROM agent_job_nodes;
+DROP TABLE agent_job_nodes;
+DROP TABLE agent_jobs;
+ALTER TABLE agent_jobs_v6 RENAME TO agent_jobs;
+ALTER TABLE agent_job_nodes_v6 RENAME TO agent_job_nodes;
+UPDATE agent_job_nodes SET state='unknown'
+  WHERE state='completed' AND (node_hash='' OR result_json IS NULL)
+    AND job_id IN (SELECT id FROM agent_jobs WHERE state IN ('queued','running','waiting','paused','unknown'));
+UPDATE agent_jobs SET state='unknown',worker_id=NULL,lease_until=NULL,heartbeat_at=NULL,
+  last_error='legacy checkpoint has no durable output; human review required'
+  WHERE state IN ('queued','running','waiting','paused')
+    AND EXISTS(SELECT 1 FROM agent_job_nodes WHERE job_id=agent_jobs.id AND state='unknown');
+CREATE INDEX idx_agent_jobs_ready ON agent_jobs(state, available_at, priority DESC)
+  WHERE state IN ('queued', 'waiting');
+CREATE INDEX idx_agent_jobs_lease ON agent_jobs(state, lease_until) WHERE state = 'running';
+CREATE UNIQUE INDEX idx_agent_jobs_run ON agent_jobs(run_id) WHERE run_id IS NOT NULL;
+"#;

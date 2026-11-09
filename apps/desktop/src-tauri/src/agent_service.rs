@@ -3,14 +3,14 @@ use chrono::Utc;
 use lumo_agent::{
     AdapterRegistry, AgentBudget, AgentEvent, AgentEventDraft, AgentEventKind, AgentEventPublisher,
     AgentHarness, AgentPlan, AgentProfile, AgentProfileDraft, AgentRunControl, AiPlanModel,
-    CapabilityCatalog, CapabilityDescriptor, CapabilitySource, ContextualFlowVmFactory, EventSink,
-    FlowAdapter, InvocationError, LoopEngine, LoopReport, LoopStatus, McpAdapter, McpClientInvoker,
-    McpConnectionProfile, McpProfileResolver, Planner, PlannerBackend, RankedCandidate, RiskLevel,
-    RouteOutcome, Router, SkillAdapter,
+    ApprovalSnapshot, CapabilityCatalog, CapabilityDescriptor, CapabilitySource,
+    ContextualFlowVmFactory, EventSink, FlowAdapter, InvocationError, JobCheckpointStore,
+    LoopEngine, LoopReport, LoopStatus, McpAdapter, McpConnectionProfile, McpProfileResolver,
+    Planner, PlannerBackend, RankedCandidate, RiskLevel, RouteOutcome, Router, SkillAdapter,
 };
 use lumo_ai::{config::ProvidersConfig, AiRouter, ChatMessage, ChatRequest, Role};
 use lumo_core::{CancelToken, HumanPrompter};
-use lumo_storage::{AgentRunRow, Repo};
+use lumo_storage::{AgentJobRow, AgentRunRow, Repo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
@@ -101,6 +101,28 @@ struct PersistingDesktopEventPublisher {
 impl AgentEventPublisher for PersistingDesktopEventPublisher {
     async fn publish(&self, draft: AgentEventDraft) -> Result<(), String> {
         let _guard = self.gate.lock().await;
+        if matches!(
+            draft.kind,
+            AgentEventKind::RunCompleted | AgentEventKind::RunFailed | AgentEventKind::RunCancelled
+        ) {
+            use rusqlite::OptionalExtension;
+            let finished = self
+                .repo
+                .with_raw(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT finished_at IS NOT NULL FROM agent_runs WHERE id=?",
+                            [&draft.run_id],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .optional()
+                })
+                .map_err(|error| error.to_string())?
+                .unwrap_or(false);
+            if finished {
+                return Ok(());
+            }
+        }
         let event = self
             .sink
             .publish(draft)
@@ -178,15 +200,72 @@ impl DesktopAgentService {
     }
 
     pub async fn start(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
-        self.start_inner(input, true).await
+        self.start_inner(input, true, None).await
     }
 
+    #[cfg(test)]
     pub async fn start_background(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
-        self.start_inner(input, false).await
+        self.start_inner(input, false, None).await
+    }
+
+    pub(super) async fn start_job(
+        &self,
+        input: AgentStartInput,
+        job: AgentJobRow,
+        worker_id: &str,
+    ) -> Result<AgentExecution, String> {
+        self.start_inner(input, false, Some((job, worker_id.into())))
+            .await
     }
 
     pub(super) async fn publish_event(&self, draft: AgentEventDraft) -> Result<(), String> {
         self.events.publish(draft).await
+    }
+
+    pub(super) fn is_background_job(&self, run_id: &str) -> Result<bool, String> {
+        self.repo
+            .job_for_run(run_id)
+            .map(|job| job.is_some())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) async fn control_background_job(
+        &self,
+        state: &super::DesktopState,
+        run_id: &str,
+        action: &str,
+    ) -> Result<Option<AgentJobRow>, String> {
+        // Share the event gate with live execution and approval persistence.
+        let _guard = self.events.gate.lock().await;
+        let runtime = super::job_commands::lock_jobs(&state.jobs)?;
+        let controlled = self
+            .repo
+            .control_job_run(run_id, action, Utc::now())
+            .map_err(|error| error.to_string())?;
+        let Some((job, persisted)) = controlled else {
+            return Ok(None);
+        };
+        if action != "resume" {
+            super::job_commands::cancel_job_occurrence(&runtime, &job.id, run_id);
+        }
+        drop(runtime);
+        let kind = match action {
+            "pause" => AgentEventKind::RunPaused,
+            "resume" => AgentEventKind::RunResumed,
+            "cancel" => AgentEventKind::RunCancelled,
+            _ => return Err("unknown background control".into()),
+        };
+        self.events.emitter.emit(&AgentEvent {
+            session_id: run_id.into(),
+            run_id: run_id.into(),
+            seq: persisted.seq,
+            timestamp: persisted.created_at,
+            kind,
+            node_id: None,
+            parent_node_id: None,
+            payload: persisted.payload,
+        });
+        Ok(Some(job))
     }
 
     pub(super) async fn resolve_approval(
@@ -226,10 +305,127 @@ impl DesktopAgentService {
         Ok(())
     }
 
+    pub(super) async fn resolve_job_approval(
+        &self,
+        run_id: &str,
+        plan_hash: &str,
+        node_ids: &[String],
+        approved: bool,
+        strengthened: bool,
+    ) -> Result<(), String> {
+        let _guard = self.events.gate.lock().await;
+        let job = self
+            .repo
+            .job_for_run(run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("background run has no durable job")?;
+        if job.state != "waiting_approval" {
+            return Err("background job is not waiting for approval".into());
+        }
+        let (saved_plan,saved_approval):(String,Option<String>)=self.repo.with_raw(|connection|connection.query_row("SELECT plan_json,approval_json FROM agent_runs WHERE id=? AND finished_at IS NULL",[run_id],|row|Ok((row.get(0)?,row.get(1)?)))).map_err(|error|error.to_string())?;
+        let plan: AgentPlan =
+            serde_json::from_str(&saved_plan).map_err(|error| error.to_string())?;
+        let input: AgentStartInput =
+            serde_json::from_value(job.payload.clone()).map_err(|error| error.to_string())?;
+        let catalog = self.factory.catalog(input.profile_id.as_deref()).await?;
+        let profile = self.factory.profile(input.profile_id.as_deref()).await?;
+        let validated = lumo_agent::PlanValidator::new(&catalog, &profile)
+            .validate(plan.clone())
+            .map_err(|error| error.to_string())?;
+        if plan.stable_hash() != plan_hash {
+            return Err("stale approval: plan hash changed".into());
+        }
+        let capabilities = plan
+            .nodes
+            .iter()
+            .map(|node| {
+                catalog
+                    .get(&node.capability_id)
+                    .map(|capability| (*capability).clone())
+                    .ok_or("approval capability disappeared")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut snapshot = ApprovalSnapshot::capture(&plan, &capabilities, Default::default());
+        let expected_approval = saved_approval.clone();
+        if let Some(saved) = saved_approval {
+            let saved: ApprovalSnapshot =
+                serde_json::from_str(&saved).map_err(|error| error.to_string())?;
+            if saved.plan_hash != snapshot.plan_hash
+                || saved.capability_versions != snapshot.capability_versions
+                || saved.schema_hashes != snapshot.schema_hashes
+            {
+                return Err(
+                    "stale approval: capability version or schema changed; create a new job".into(),
+                );
+            }
+            snapshot.approved_nodes = saved.approved_nodes;
+        }
+        let completed = self
+            .repo
+            .list_durable_job_nodes(&job.id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|node| node.checkpoint.state == "completed")
+            .map(|node| node.checkpoint.node_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let pending = validated
+            .approval_required
+            .iter()
+            .filter(|id| !completed.contains(*id) && !snapshot.approved_nodes.contains(*id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if node_ids.is_empty() || node_ids.iter().any(|id| !pending.contains(id)) {
+            return Err("approval requires pending nodes from the current plan".into());
+        }
+        if approved
+            && !strengthened
+            && node_ids
+                .iter()
+                .any(|id| plan.node(id).is_some_and(|node| node.risk == RiskLevel::L3))
+        {
+            return Err("L3 approval requires strengthened confirmation".into());
+        }
+        if approved {
+            snapshot.approved_nodes.extend(node_ids.iter().cloned());
+        }
+        let ready = pending
+            .iter()
+            .all(|id| snapshot.approved_nodes.contains(id));
+        let payload = json!({"planHash":plan_hash,"nodeIds":node_ids,"approved":approved,"strengthened":strengthened});
+        let encoded_snapshot =
+            serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+        let encoded_payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+        let event=self.repo.with_raw(|connection| {
+            let tx=connection.unchecked_transaction()?;
+            let changed=tx.execute("UPDATE agent_jobs SET state=?,available_at=?,cancelled_at=?,last_error=?,updated_at=? WHERE id=? AND state='waiting_approval' AND cancelled_at IS NULL",rusqlite::params![if !approved {"failed"}else if ready {"queued"}else{"waiting_approval"},Utc::now().timestamp_millis(),if !approved{Some(Utc::now().timestamp_millis())}else{None},if !approved{Some("approval denied")}else{None},Utc::now().timestamp_millis(),job.id])?;
+            if changed!=1{return Err(rusqlite::Error::QueryReturnedNoRows);}
+            let updated=tx.execute("UPDATE agent_runs SET approval_json=?,state=CASE WHEN ? THEN state ELSE 'cancelled' END,finished_at=CASE WHEN ? THEN finished_at ELSE ? END,error=CASE WHEN ? THEN error ELSE 'approval denied' END WHERE id=? AND finished_at IS NULL AND approval_json IS ?",rusqlite::params![encoded_snapshot,approved,approved,Utc::now().timestamp_millis(),approved,run_id,expected_approval])?;
+            if updated!=1{return Err(rusqlite::Error::QueryReturnedNoRows);}
+            let last:i64=tx.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE run_id=?",[run_id],|row|row.get(0))?;
+            let seq=last.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+            let timestamp=Utc::now();
+            tx.execute("INSERT INTO agent_events(run_id,seq,kind,payload,created_at) VALUES (?,?,?,?,?)",rusqlite::params![run_id,seq,AgentEventKind::PermissionResolved.as_str(),encoded_payload,timestamp.timestamp_millis()])?;
+            let terminal=if approved{None}else{
+                let terminal_seq=seq.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+                let terminal_payload=json!({"error":"approval denied"});
+                tx.execute("INSERT INTO agent_events(run_id,seq,kind,payload,created_at) VALUES (?,?,?,?,?)",rusqlite::params![run_id,terminal_seq,AgentEventKind::RunCancelled.as_str(),terminal_payload.to_string(),timestamp.timestamp_millis()])?;
+                Some(AgentEvent{session_id:run_id.into(),run_id:run_id.into(),seq:terminal_seq,timestamp,kind:AgentEventKind::RunCancelled,node_id:None,parent_node_id:None,payload:terminal_payload})
+            };
+            tx.commit()?;
+            Ok((AgentEvent{session_id:run_id.into(),run_id:run_id.into(),seq,timestamp,kind:AgentEventKind::PermissionResolved,node_id:None,parent_node_id:None,payload},terminal))
+        }).map_err(|error|error.to_string())?;
+        self.events.emitter.emit(&event.0);
+        if let Some(terminal) = event.1 {
+            self.events.emitter.emit(&terminal);
+        }
+        Ok(())
+    }
+
     async fn start_inner(
         &self,
         input: AgentStartInput,
         interactive: bool,
+        job: Option<(AgentJobRow, String)>,
     ) -> Result<AgentExecution, String> {
         let utterance = input.utterance.trim();
         if utterance.is_empty() {
@@ -246,6 +442,9 @@ impl DesktopAgentService {
                     .await?
             }
         };
+        if let Some((job, _)) = &job {
+            plan.metadata.insert("jobId".into(), job.id.clone().into());
+        }
         if let Some(conversation_id) = input.conversation_id {
             plan.metadata
                 .insert("conversationId".into(), conversation_id.into());
@@ -254,28 +453,115 @@ impl DesktopAgentService {
                 input.conversation_context.len().into(),
             );
         }
-        let run_id = ulid::Ulid::new().to_string();
+        let run_id = job
+            .as_ref()
+            .and_then(|(job, _)| job.run_id.clone())
+            .unwrap_or_else(|| ulid::Ulid::new().to_string());
         plan.id.clone_from(&run_id);
         lumo_agent::validate_dag(&plan).map_err(|error| error.to_string())?;
-
-        self.repo
-            .create_agent_run(&AgentRunRow {
-                id: run_id.clone(),
-                profile_id: Some(profile.id.clone()),
-                utterance: Some(utterance.to_string()),
-                plan_json: Some(serde_json::to_value(&plan).map_err(|error| error.to_string())?),
-                approval_json: None,
-                state: "running".into(),
-                started_at: Utc::now(),
-                finished_at: None,
-                error: None,
+        if let Some(versions) = plan.metadata.get("capabilityVersions") {
+            let versions = versions
+                .as_object()
+                .ok_or("scheduled capability versions must be an object")?;
+            for node in &plan.nodes {
+                let current = catalog
+                    .get(&node.capability_id)
+                    .ok_or("scheduled capability is no longer available; recreate this job")?;
+                if versions.get(&node.capability_id).and_then(Value::as_str)
+                    != Some(current.version_hash.as_str())
+                {
+                    return Err(
+                        "scheduled capability changed since this job was created; recreate this job"
+                            .into(),
+                    );
+                }
+            }
+        }
+        if let Some((job, worker)) = &job {
+            if !self
+                .repo
+                .bind_job_run(&job.id, worker, &run_id, Utc::now())
+                .map_err(|error| error.to_string())?
+            {
+                return Err("job lease is no longer owned".into());
+            }
+        }
+        let persisted: Option<(String, Option<String>)> = self
+            .repo
+            .with_raw(|connection| {
+                use rusqlite::OptionalExtension;
+                connection
+                    .query_row(
+                        "SELECT plan_json,approval_json FROM agent_runs WHERE id=?",
+                        [&run_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
             })
             .map_err(|error| error.to_string())?;
-        if let Err(error) = self.publish_start_events(&run_id, &plan).await {
-            let _ =
-                self.repo
-                    .update_agent_run_state(&run_id, "failed", Some(Utc::now()), Some(&error));
-            return Err(error);
+        let mut approval = None;
+        if let Some((saved_plan, saved_approval)) = persisted {
+            let saved_plan: AgentPlan =
+                serde_json::from_str(&saved_plan).map_err(|error| error.to_string())?;
+            // Keep legacy checkpoint/approval hashes valid. New occurrences
+            // always persist their Job identity from the first plan onward.
+            if job.is_some() && !saved_plan.metadata.contains_key("jobId") {
+                plan.metadata.remove("jobId");
+            }
+            if saved_plan != plan {
+                return Err("job plan changed since its durable execution was created".into());
+            }
+            approval = saved_approval
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            self.repo
+                .update_agent_run_state(&run_id, "running", None, None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.repo
+                .create_agent_run(&AgentRunRow {
+                    id: run_id.clone(),
+                    profile_id: Some(profile.id.clone()),
+                    utterance: Some(utterance.to_string()),
+                    plan_json: Some(
+                        serde_json::to_value(&plan).map_err(|error| error.to_string())?,
+                    ),
+                    approval_json: if job.is_some() {
+                        Some(
+                            serde_json::to_value(ApprovalSnapshot::capture(
+                                &plan,
+                                &plan
+                                    .nodes
+                                    .iter()
+                                    .filter_map(|node| {
+                                        catalog
+                                            .get(&node.capability_id)
+                                            .map(|capability| (*capability).clone())
+                                    })
+                                    .collect::<Vec<_>>(),
+                                Default::default(),
+                            ))
+                            .map_err(|error| error.to_string())?,
+                        )
+                    } else {
+                        None
+                    },
+                    state: "running".into(),
+                    started_at: Utc::now(),
+                    finished_at: None,
+                    error: None,
+                })
+                .map_err(|error| error.to_string())?;
+            if let Err(error) = self.publish_start_events(&run_id, &plan).await {
+                let _ = self.repo.update_agent_run_state(
+                    &run_id,
+                    "failed",
+                    Some(Utc::now()),
+                    Some(&error),
+                );
+                return Err(error);
+            }
         }
 
         let cancel = CancelToken::new();
@@ -284,6 +570,17 @@ impl DesktopAgentService {
             .with_event_publisher(self.events.clone());
         if let Some(control) = &control {
             engine = engine.with_run_control(control.clone());
+        }
+        let durable = job.is_some();
+        if let Some((job, worker)) = job {
+            engine = engine.with_job_checkpoint(JobCheckpointStore::new(
+                self.repo.clone(),
+                job.id,
+                worker,
+            ));
+        }
+        if let Some(approval) = approval {
+            engine = engine.with_approval_snapshot(approval);
         }
         let harness = AgentHarness::new(engine);
         let budget = AgentBudget::new(
@@ -299,14 +596,20 @@ impl DesktopAgentService {
             let report = harness
                 .execute(execution_plan, budget, execution_cancel)
                 .await;
-            let (state, finished_at) = run_state(report.status);
-            repo.update_agent_run_state(
-                &report.run_id,
-                state,
-                finished_at.then(Utc::now),
-                report.error.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
+            let (state, finished_at) = if durable
+                && matches!(
+                    report.status,
+                    LoopStatus::Failed | LoopStatus::BudgetExceeded | LoopStatus::Cancelled
+                ) {
+                ("interrupted", false)
+            } else {
+                run_state(report.status)
+            };
+            repo.with_raw(|connection| connection.execute(
+                "UPDATE agent_runs SET state=?,finished_at=?,error=? WHERE id=? AND finished_at IS NULL \
+                 AND NOT EXISTS(SELECT 1 FROM agent_jobs WHERE run_id=? AND state IN ('paused','unknown','failed'))",
+                rusqlite::params![state,finished_at.then(||Utc::now().timestamp_millis()),report.error,report.run_id,report.run_id],
+            )).map_err(|error| error.to_string())?;
             Ok(report)
         });
 
@@ -381,7 +684,7 @@ impl ProductionDesktopAgentFactory {
         Ok(Self { app, repo, home })
     }
 
-    fn capability_catalog(&self) -> Result<CapabilityCatalog, String> {
+    pub(super) fn capability_catalog(&self) -> Result<CapabilityCatalog, String> {
         let mut descriptors = BTreeMap::<String, CapabilityDescriptor>::new();
         for flow in list_flow_library(self.app.clone())? {
             if !flow.valid {
@@ -406,7 +709,11 @@ impl ProductionDesktopAgentFactory {
                 enabled: true,
                 version_hash: String::new(),
             };
-            descriptor.refresh_version_hash();
+            if let CapabilitySource::Flow { path } = &descriptor.source {
+                let content = std::fs::read(path)
+                    .map_err(|error| format!("cannot fingerprint flow: {error}"))?;
+                descriptor.bind_source_content(&content);
+            }
             descriptors.entry(id).or_insert(descriptor);
         }
 
@@ -429,7 +736,9 @@ impl ProductionDesktopAgentFactory {
                 enabled: true,
                 version_hash: String::new(),
             };
-            descriptor.refresh_version_hash();
+            let content = std::fs::read(&skill.source)
+                .map_err(|error| format!("cannot fingerprint skill: {error}"))?;
+            descriptor.bind_source_content(&content);
             descriptors.entry(id).or_insert(descriptor);
         }
 
@@ -592,13 +901,9 @@ impl DesktopAgentFactory for ProductionDesktopAgentFactory {
             load_skill_registry(&self.home, None),
             vm_factory,
         )));
-        let resolver = Arc::new(DesktopMcpProfileResolver {
-            repo: self.repo.clone(),
-            home: self.home.clone(),
-        });
-        adapters.register(Arc::new(McpAdapter::new(Arc::new(McpClientInvoker::new(
-            resolver,
-        )))));
+        adapters.register(Arc::new(McpAdapter::new(Arc::new(
+            mcp_commands::DesktopMcpToolInvoker::new(self.app.clone()),
+        ))));
         Ok(adapters)
     }
 
@@ -754,9 +1059,9 @@ impl PlannerBackend for NoFallbackPlanner {
     }
 }
 
-struct DesktopMcpProfileResolver {
-    repo: Repo,
-    home: PathBuf,
+pub(super) struct DesktopMcpProfileResolver {
+    pub(super) repo: Repo,
+    pub(super) home: PathBuf,
 }
 
 impl McpProfileResolver for DesktopMcpProfileResolver {
@@ -1443,5 +1748,549 @@ spec:
             .collect::<Vec<_>>();
         assert_eq!(persisted, emitted);
         assert_eq!(persisted, (1..=persisted.len() as i64).collect::<Vec<_>>());
+    }
+
+    fn queued_test_job(repo: &Repo) -> AgentJobRow {
+        let now = Utc::now();
+        repo.enqueue_job(&lumo_storage::NewAgentJob {
+            id: "durable".into(),
+            idempotency_key: "durable-key".into(),
+            payload: serde_json::to_value(approval_input()).unwrap(),
+            schedule_kind: "one_shot".into(),
+            schedule_spec: json!({}),
+            priority: 5,
+            available_at: now,
+            max_attempts: 3,
+            created_at: now,
+        })
+        .unwrap();
+        repo.acquire_job_lease("worker", now, chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn durable_job_retry_reuses_run_and_persisted_completed_nodes() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let job = queued_test_job(&repo);
+        let input = AgentStartInput {
+            utterance: "运行日报".into(),
+            profile_id: None,
+            supplied_plan: None,
+            conversation_id: None,
+            conversation_context: vec![],
+        };
+        let first = service
+            .start_job(input.clone(), job, "worker")
+            .await
+            .unwrap();
+        let run_id = first.run_id().to_string();
+        assert_eq!(first.plan.metadata["jobId"], "durable");
+        assert_eq!(first.wait().await.unwrap().status, LoopStatus::Completed);
+        let stored_plan: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT plan_json FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentPlan>(&stored_plan)
+                .unwrap()
+                .metadata["jobId"],
+            "durable"
+        );
+        assert_eq!(repo.list_durable_job_nodes("durable").unwrap().len(), 2);
+        assert!(repo
+            .retry_job(
+                "durable",
+                "worker",
+                Utc::now(),
+                Utc::now(),
+                "simulate interrupted worker after all nodes committed"
+            )
+            .unwrap());
+        let job = repo
+            .acquire_job_lease("next", Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.run_id.as_deref(), Some(run_id.as_str()));
+        let second = service.start_job(input, job, "next").await.unwrap();
+        assert_eq!(second.run_id(), run_id);
+        assert_eq!(second.wait().await.unwrap().status, LoopStatus::Completed);
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "node.started")
+                .count(),
+            2,
+            "completed nodes did not dispatch again"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "session.started")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_version_pin_is_checked_before_the_first_run_is_bound() {
+        let repo = Repo::open_in_memory().unwrap();
+        let factory = FakeFactory::new();
+        let version = factory
+            .catalog
+            .get("flow:daily-report")
+            .unwrap()
+            .version_hash
+            .clone();
+        let mut input = approval_input();
+        let plan = input.supplied_plan.as_mut().unwrap();
+        plan.metadata.insert(
+            "capabilityVersions".into(),
+            json!({"flow:daily-report":format!("stale-{version}")}),
+        );
+        let job = queued_test_job(&repo);
+        let service = DesktopAgentService::new(
+            Arc::new(factory),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let error = service.start_job(input, job, "worker").await.err().unwrap();
+        assert!(error.contains("changed since this job was created"));
+        assert!(repo.get_job("durable").unwrap().unwrap().run_id.is_none());
+        assert!(repo.list_durable_job_nodes("durable").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_background_plan_without_job_metadata_keeps_its_approval_hash() {
+        let repo = Repo::open_in_memory().unwrap();
+        let factory = FakeFactory::new();
+        let input = approval_input();
+        let mut plan = input.supplied_plan.clone().unwrap();
+        plan.id = "legacy-run".into();
+        let snapshot = ApprovalSnapshot::capture(
+            &plan,
+            &factory
+                .catalog
+                .all()
+                .iter()
+                .map(|capability| (**capability).clone())
+                .collect::<Vec<_>>(),
+            Default::default(),
+        );
+        repo.create_agent_run(&AgentRunRow {
+            id: plan.id.clone(),
+            profile_id: None,
+            utterance: None,
+            plan_json: Some(serde_json::to_value(&plan).unwrap()),
+            approval_json: Some(serde_json::to_value(snapshot).unwrap()),
+            state: "running".into(),
+            started_at: Utc::now(),
+            finished_at: None,
+            error: None,
+        })
+        .unwrap();
+        queued_test_job(&repo);
+        repo.bind_job_run("durable", "worker", "legacy-run", Utc::now())
+            .unwrap();
+        let job = repo.get_job("durable").unwrap().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(factory),
+            repo,
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let execution = service.start_job(input, job, "worker").await.unwrap();
+        assert_eq!(execution.plan.stable_hash(), plan.stable_hash());
+        assert!(!execution.plan.metadata.contains_key("jobId"));
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::WaitingApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn background_controls_work_without_a_session_and_keep_approval_pending_until_cancel() {
+        let repo = Repo::open_in_memory().unwrap();
+        let emitter = Arc::new(RecordingEmitter::default());
+        let service =
+            DesktopAgentService::new(Arc::new(FakeFactory::new()), repo.clone(), emitter.clone());
+        let job = queued_test_job(&repo);
+        let execution = service
+            .start_job(approval_input(), job, "worker")
+            .await
+            .unwrap();
+        let run_id = execution.run_id().to_string();
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::WaitingApproval
+        );
+        repo.wait_job_approval("durable", "worker", Utc::now())
+            .unwrap();
+        let state = super::super::DesktopState::default();
+        for action in ["pause", "resume"] {
+            assert!(service
+                .control_background_job(&state, &run_id, action)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(
+            repo.get_job("durable").unwrap().unwrap().state,
+            "waiting_approval"
+        );
+        let cancelled = service
+            .control_background_job(&state, &run_id, "cancel")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cancelled.cancelled_at.is_some());
+        assert_eq!(
+            repo.list_agent_events(&run_id, 0)
+                .unwrap()
+                .last()
+                .unwrap()
+                .kind,
+            "run.cancelled"
+        );
+        assert_eq!(
+            emitter.0.lock().unwrap().last().unwrap().kind,
+            AgentEventKind::RunCancelled
+        );
+        assert!(service
+            .resolve_job_approval(&run_id, "stale", &["send".into()], true, true)
+            .await
+            .is_err());
+        service
+            .publish_event(AgentEventDraft::new(&run_id, AgentEventKind::RunCompleted))
+            .await
+            .unwrap();
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert_eq!(events.last().unwrap().kind, "run.cancelled");
+        assert!(!events.iter().any(|event| event.kind == "run.completed"));
+        let persisted_state: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT state FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(persisted_state, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn durable_background_approval_survives_service_restart_and_resumes_the_same_run() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let job = queued_test_job(&repo);
+        let execution = service
+            .start_job(approval_input(), job, "worker")
+            .await
+            .unwrap();
+        let run_id = execution.run_id().to_string();
+        let hash = execution.plan.stable_hash();
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::WaitingApproval
+        );
+        assert!(repo
+            .wait_job_approval("durable", "worker", Utc::now())
+            .unwrap());
+        assert_eq!(repo.get_job("durable").unwrap().unwrap().attempts, 0);
+        let restarted = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        assert!(restarted
+            .resolve_job_approval(&run_id, "stale", &["send".into()], true, true)
+            .await
+            .is_err());
+        assert!(restarted
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, false)
+            .await
+            .is_err());
+        restarted
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .unwrap();
+        let job = repo
+            .acquire_job_lease("next", Utc::now(), chrono::Duration::seconds(30))
+            .unwrap()
+            .unwrap();
+        let resumed = restarted
+            .start_job(approval_input(), job, "next")
+            .await
+            .unwrap();
+        assert_eq!(resumed.run_id(), run_id);
+        assert_eq!(resumed.wait().await.unwrap().status, LoopStatus::Completed);
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "session.started")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "permission.requested")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "node.started")
+                .count(),
+            1
+        );
+        assert!(restarted
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn durable_approval_partial_decisions_and_rejection_do_not_dispatch_or_consume_attempts()
+    {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let mut input = approval_input();
+        let plan = input.supplied_plan.as_mut().unwrap();
+        let mut second = plan.nodes[0].clone();
+        second.id = "second".into();
+        second.depends_on = vec!["send".into()];
+        plan.nodes.push(second);
+        let job = queued_test_job(&repo);
+        let execution = service.start_job(input, job, "worker").await.unwrap();
+        let run_id = execution.run_id().to_string();
+        let hash = execution.plan.stable_hash();
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::WaitingApproval
+        );
+        repo.wait_job_approval("durable", "worker", Utc::now())
+            .unwrap();
+        service
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .unwrap();
+        let job = repo.get_job("durable").unwrap().unwrap();
+        assert_eq!(job.state, "waiting_approval");
+        assert_eq!(job.attempts, 0);
+        assert!(service
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .is_err());
+        service
+            .resolve_job_approval(&run_id, &hash, &["second".into()], false, false)
+            .await
+            .unwrap();
+        let job = repo.get_job("durable").unwrap().unwrap();
+        assert_eq!(job.state, "failed");
+        assert!(job.cancelled_at.is_some());
+        assert_eq!(job.attempts, 0);
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "run.cancelled")
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| event.kind == "node.started"));
+    }
+
+    #[tokio::test]
+    async fn durable_approval_failure_rolls_back_queue_and_snapshot_and_rejects_capability_drift() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let job = queued_test_job(&repo);
+        let execution = service
+            .start_job(approval_input(), job, "worker")
+            .await
+            .unwrap();
+        let run_id = execution.run_id().to_string();
+        let hash = execution.plan.stable_hash();
+        execution.wait().await.unwrap();
+        repo.wait_job_approval("durable", "worker", Utc::now())
+            .unwrap();
+        repo.with_raw(|connection|connection.execute_batch("CREATE TRIGGER deny_background_approval BEFORE INSERT ON agent_events WHEN NEW.kind='permission.resolved' BEGIN SELECT RAISE(ABORT,'disk full'); END")).unwrap();
+        assert!(service
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .is_err());
+        assert_eq!(
+            repo.get_job("durable").unwrap().unwrap().state,
+            "waiting_approval"
+        );
+        let encoded: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT approval_json FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(serde_json::from_str::<ApprovalSnapshot>(&encoded)
+            .unwrap()
+            .approved_nodes
+            .is_empty());
+        repo.with_raw(|connection| {
+            connection.execute_batch("DROP TRIGGER deny_background_approval")
+        })
+        .unwrap();
+        let mut factory = FakeFactory::new();
+        let mut capabilities = factory
+            .catalog
+            .all()
+            .into_iter()
+            .map(|capability| (*capability).clone())
+            .collect::<Vec<_>>();
+        let capability = capabilities
+            .iter_mut()
+            .find(|capability| capability.id == "flow:daily-report")
+            .unwrap();
+        capability
+            .description
+            .push_str("changed capability version");
+        capability.refresh_version_hash();
+        factory.catalog = CapabilityCatalog::new(capabilities).unwrap();
+        let changed = DesktopAgentService::new(
+            Arc::new(factory),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        assert!(changed
+            .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+            .await
+            .is_err());
+        assert_eq!(
+            repo.get_job("durable").unwrap().unwrap().state,
+            "waiting_approval"
+        );
+        assert!(!repo
+            .list_agent_events(&run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "permission.resolved"));
+    }
+
+    #[tokio::test]
+    async fn same_path_source_changes_invalidate_completed_checkpoints_and_pending_approval() {
+        fn source_factory(path: &std::path::Path) -> FakeFactory {
+            let mut factory = FakeFactory::new();
+            let capabilities = factory
+                .catalog
+                .all()
+                .into_iter()
+                .map(|capability| {
+                    let mut capability = (*capability).clone();
+                    if capability.id == "flow:daily-report" {
+                        capability.source = CapabilitySource::Flow {
+                            path: path.display().to_string(),
+                        };
+                        capability.bind_source_content(&std::fs::read(path).unwrap());
+                    }
+                    capability
+                })
+                .collect();
+            factory.catalog = CapabilityCatalog::new(capabilities).unwrap();
+            factory
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("same-flow.yaml");
+        for pending_approval in [false, true] {
+            std::fs::write(&path, "old executable bytes").unwrap();
+            let repo = Repo::open_in_memory().unwrap();
+            let service = DesktopAgentService::new(
+                Arc::new(source_factory(&path)),
+                repo.clone(),
+                Arc::new(NoopDesktopAgentEventEmitter),
+            );
+            let input = if pending_approval {
+                approval_input()
+            } else {
+                AgentStartInput {
+                    utterance: "运行日报".into(),
+                    profile_id: None,
+                    supplied_plan: None,
+                    conversation_id: None,
+                    conversation_context: vec![],
+                }
+            };
+            let job = queued_test_job(&repo);
+            let execution = service
+                .start_job(input.clone(), job, "worker")
+                .await
+                .unwrap();
+            let run_id = execution.run_id().to_string();
+            let hash = execution.plan.stable_hash();
+            execution.wait().await.unwrap();
+            if pending_approval {
+                repo.wait_job_approval("durable", "worker", Utc::now())
+                    .unwrap();
+            } else {
+                repo.retry_job("durable", "worker", Utc::now(), Utc::now(), "resume")
+                    .unwrap();
+            }
+            std::fs::write(&path, "new executable bytes").unwrap();
+            let changed = DesktopAgentService::new(
+                Arc::new(source_factory(&path)),
+                repo.clone(),
+                Arc::new(NoopDesktopAgentEventEmitter),
+            );
+            if pending_approval {
+                assert!(changed
+                    .resolve_job_approval(&run_id, &hash, &["send".into()], true, true)
+                    .await
+                    .is_err());
+                assert_eq!(
+                    repo.get_job("durable").unwrap().unwrap().state,
+                    "waiting_approval"
+                );
+            } else {
+                let job = repo
+                    .acquire_job_lease("next", Utc::now(), chrono::Duration::seconds(30))
+                    .unwrap()
+                    .unwrap();
+                let resumed = changed.start_job(input, job, "next").await.unwrap();
+                assert_eq!(resumed.wait().await.unwrap().status, LoopStatus::Failed);
+                assert_eq!(
+                    repo.list_agent_events(&run_id, 0)
+                        .unwrap()
+                        .iter()
+                        .filter(|event| event.kind == "node.started")
+                        .count(),
+                    2
+                );
+            }
+        }
     }
 }

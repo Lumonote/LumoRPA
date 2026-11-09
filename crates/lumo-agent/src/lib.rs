@@ -2,6 +2,7 @@ mod adapters;
 mod budget;
 mod capability;
 mod catalog;
+mod checkpoint;
 mod evaluation;
 mod event;
 mod event_sink;
@@ -39,6 +40,7 @@ pub use capability::{CapabilityDescriptor, CapabilitySource, RiskLevel};
 pub use catalog::{
     CapabilityCatalog, CapabilityCatalogBuilder, CapabilityCatalogError, CatalogError,
 };
+pub use checkpoint::JobCheckpointStore;
 pub use evaluation::{evaluate_improvement, EvaluationMetrics, EvaluationReport, PermissionDelta};
 pub use event::{AgentEvent, AgentEventDraft, AgentEventKind, EventSequence};
 pub use event_sink::{AgentEventRepository, EventSink, EventSinkError};

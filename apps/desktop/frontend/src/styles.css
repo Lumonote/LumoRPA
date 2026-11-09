@@ -1674,7 +1674,14 @@ select:focus {
 
 .ocr-model-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 6px;
+}
+
+.ocr-model-statuses {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 

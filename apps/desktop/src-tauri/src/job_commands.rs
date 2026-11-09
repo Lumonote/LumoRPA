@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use lumo_agent::{validate_dag, AgentJob, AgentPlan, JobSchedule, LoopStatus, MisfirePolicy};
 use lumo_core::CancelToken;
 use lumo_storage::{AgentJobRow, EnqueueJobResult, NewAgentJob, RecoveredJob, Repo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Mutex, time::Duration as StdDuration};
 use tauri::{Emitter, Manager, State, Wry};
 use tokio_util::sync::CancellationToken;
@@ -20,17 +20,17 @@ const JOB_MISFIRE_GRACE_SECONDS: i64 = 120;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct JobScheduleRequest {
-    utterance: String,
+    pub(super) utterance: String,
     #[serde(default)]
-    profile_id: Option<String>,
-    plan: AgentPlan,
-    schedule: JobSchedule,
+    pub(super) profile_id: Option<String>,
+    pub(super) plan: AgentPlan,
+    pub(super) schedule: JobSchedule,
     #[serde(default)]
-    idempotency_key: Option<String>,
+    pub(super) idempotency_key: Option<String>,
     #[serde(default = "default_priority")]
-    priority: i64,
+    pub(super) priority: i64,
     #[serde(default = "default_max_attempts")]
-    max_attempts: i64,
+    pub(super) max_attempts: i64,
 }
 
 const fn default_priority() -> i64 {
@@ -51,7 +51,7 @@ enum JobControl {
 pub(super) struct JobRuntime {
     root: CancellationToken,
     worker_started: bool,
-    active: HashMap<String, CancelToken>,
+    active: HashMap<String, (String, CancelToken)>,
 }
 
 impl Default for JobRuntime {
@@ -90,6 +90,92 @@ pub(super) fn setup_job_worker(app: &AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub(super) fn job_list(app: AppHandle, limit: Option<u32>) -> Result<Vec<AgentJobRow>, String> {
     list_jobs(&open_repo(&app)?, limit.unwrap_or(100))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UnknownJobNode {
+    node_id: String,
+    risk: String,
+    attempt: i64,
+    state: String,
+}
+
+#[tauri::command]
+pub(super) fn job_unknown_nodes(
+    app: AppHandle,
+    job_id: String,
+) -> Result<Vec<UnknownJobNode>, String> {
+    Ok(open_repo(&app)?
+        .list_job_nodes(&job_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|node| node.state == "unknown")
+        .map(|node| UnknownJobNode {
+            node_id: node.node_id,
+            risk: node.risk,
+            attempt: node.attempt,
+            state: node.state,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub(super) fn job_resolve_unknown(
+    app: AppHandle,
+    job_id: String,
+    node_id: String,
+    outcome: String,
+    result: Option<serde_json::Value>,
+) -> Result<bool, String> {
+    let repo = open_repo(&app)?;
+    let completed = match outcome.as_str() {
+        "retry" => None,
+        "completed" => Some(
+            serde_json::to_value(lumo_agent::InvocationResult {
+                output: result.ok_or("completed verification requires an actual result")?,
+                duration_ms: 0,
+                tokens_used: 0,
+                cost_usd_micro: 0,
+                metadata: Default::default(),
+            })
+            .map_err(|error| error.to_string())?,
+        ),
+        _ => return Err("verification outcome must be completed or retry".into()),
+    };
+    if let Some(result) = &completed {
+        let job = repo
+            .get_job(&job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("unknown job")?;
+        let run_id = job
+            .run_id
+            .ok_or("legacy execution can only be verified safe to retry")?;
+        let encoded: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT plan_json FROM agent_runs WHERE id=?",
+                    [run_id],
+                    |row| row.get(0),
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        let plan: AgentPlan = serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+        let node = plan
+            .node(&node_id)
+            .ok_or("verified node is not in the durable plan")?;
+        let result = serde_json::from_value(result.clone()).map_err(|error| error.to_string())?;
+        lumo_agent::validate_invocation_result(node, &result).map_err(|error| error.to_string())?;
+    }
+    let changed = repo
+        .resolve_unknown_job_node(&job_id, &node_id, completed, Utc::now())
+        .map_err(|error| error.to_string())?;
+    if changed {
+        if let Some(job) = repo.get_job(&job_id).map_err(|error| error.to_string())? {
+            let _ = app.emit("lumo://job-updated", job);
+        }
+    }
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -145,11 +231,19 @@ fn control_job(
     Ok(changed)
 }
 
-fn schedule_job(
+pub(super) fn schedule_job(
     repo: &Repo,
     request: JobScheduleRequest,
     now: DateTime<Utc>,
 ) -> Result<EnqueueJobResult, String> {
+    repo.enqueue_job(&prepare_new_job(request, now)?)
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn prepare_new_job(
+    request: JobScheduleRequest,
+    now: DateTime<Utc>,
+) -> Result<NewAgentJob, String> {
     if request.utterance.trim().is_empty() {
         return Err("job utterance must not be empty".into());
     }
@@ -189,7 +283,7 @@ fn schedule_job(
         conversation_context: Vec::new(),
     })
     .map_err(|error| error.to_string())?;
-    repo.enqueue_job(&NewAgentJob {
+    Ok(NewAgentJob {
         id,
         idempotency_key,
         payload,
@@ -200,7 +294,6 @@ fn schedule_job(
         max_attempts: request.max_attempts,
         created_at: now,
     })
-    .map_err(|error| error.to_string())
 }
 
 fn list_jobs(repo: &Repo, limit: u32) -> Result<Vec<AgentJobRow>, String> {
@@ -222,7 +315,7 @@ fn transition_job(
     }
     .map_err(|error| error.to_string())?;
     if changed && !matches!(control, JobControl::Resume) {
-        if let Some(cancel) = lock_jobs(runtime)?.active.remove(job_id) {
+        if let Some((_, cancel)) = lock_jobs(runtime)?.active.remove(job_id) {
             cancel.cancel();
         }
     }
@@ -318,7 +411,7 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
             return;
         }
     };
-    let execution = match service.start_background(input).await {
+    let execution = match service.start_job(input, job.clone(), worker_id).await {
         Ok(execution) => execution,
         Err(error) => {
             let _ = repo.retry_job(
@@ -334,7 +427,16 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
     let run_id = execution.run_id().to_string();
     let cancel = execution.cancel_token();
     if let Ok(mut runtime) = app.state::<DesktopState>().jobs.lock() {
-        runtime.active.insert(job.id.clone(), cancel.clone());
+        let still_running = repo.get_job(&job.id).ok().flatten().is_some_and(|current| {
+            current.run_id.as_deref() == Some(&run_id) && current.state == "running"
+        });
+        if still_running {
+            runtime
+                .active
+                .insert(job.id.clone(), (run_id.clone(), cancel.clone()));
+        } else {
+            cancel.cancel();
+        }
     }
     let mut completion = Box::pin(execution.wait());
     let mut heartbeat = tokio::time::interval(StdDuration::from_secs(JOB_HEARTBEAT_SECONDS));
@@ -351,13 +453,27 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
         }
     };
     if let Ok(mut runtime) = app.state::<DesktopState>().jobs.lock() {
-        runtime.active.remove(&job.id);
+        if runtime
+            .active
+            .get(&job.id)
+            .is_some_and(|(active_run, _)| active_run == &run_id)
+        {
+            runtime.active.remove(&job.id);
+        }
     }
     let now = Utc::now();
     match outcome {
         Ok(report) if report.status == LoopStatus::Completed => {
             let next = next_run_at(&job, now).unwrap_or(None);
             let _ = repo.complete_job(&job.id, worker_id, now, next);
+        }
+        Ok(report) if report.status == LoopStatus::WaitingApproval => {
+            if let Err(error) = repo.wait_job_approval(&job.id, worker_id, now) {
+                let _ = app.emit(
+                    "lumo://job-worker-error",
+                    serde_json::json!({"error":error.to_string()}),
+                );
+            }
         }
         Ok(report) => {
             let error = report
@@ -370,6 +486,22 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
         }
     }
     if let Ok(Some(updated)) = repo.get_job(&job.id) {
+        let kind = match updated.state.as_str() {
+            "failed" => Some(if updated.cancelled_at.is_some() {
+                lumo_agent::AgentEventKind::RunCancelled
+            } else {
+                lumo_agent::AgentEventKind::RunFailed
+            }),
+            "unknown" | "paused" | "waiting" => Some(lumo_agent::AgentEventKind::RunPaused),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let _ = service
+                .publish_event(lumo_agent::AgentEventDraft::new(&run_id, kind).payload(
+                    serde_json::json!({"error":updated.last_error,"jobState":updated.state}),
+                ))
+                .await;
+        }
         let _ = app.emit("lumo://job-updated", updated);
     }
 }
@@ -415,7 +547,17 @@ fn misfire_should_skip(job: &AgentJobRow, now: DateTime<Utc>) -> bool {
     }
 }
 
-fn lock_jobs(jobs: &Mutex<JobRuntime>) -> Result<std::sync::MutexGuard<'_, JobRuntime>, String> {
+pub(super) fn cancel_job_occurrence(runtime: &JobRuntime, job_id: &str, run_id: &str) {
+    if let Some((active_run, cancel)) = runtime.active.get(job_id) {
+        if active_run == run_id {
+            cancel.cancel();
+        }
+    }
+}
+
+pub(super) fn lock_jobs(
+    jobs: &Mutex<JobRuntime>,
+) -> Result<std::sync::MutexGuard<'_, JobRuntime>, String> {
     jobs.lock()
         .map_err(|_| "desktop job runtime is unavailable".to_string())
 }
@@ -426,6 +568,19 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use lumo_agent::{AgentPlan, JobSchedule, PlanNode, RiskLevel};
     use lumo_storage::{JobNodeCheckpoint, Repo};
+
+    #[test]
+    fn stale_occurrence_controls_cannot_cancel_a_new_execution_token() {
+        let mut runtime = JobRuntime::default();
+        let cancel = CancelToken::new();
+        runtime
+            .active
+            .insert("job".into(), ("current-run".into(), cancel.clone()));
+        cancel_job_occurrence(&runtime, "job", "old-run");
+        assert!(!cancel.is_cancelled());
+        cancel_job_occurrence(&runtime, "job", "current-run");
+        assert!(cancel.is_cancelled());
+    }
     use serde_json::json;
 
     fn at(seconds: i64) -> chrono::DateTime<Utc> {
@@ -451,6 +606,7 @@ mod tests {
             cancelled_at: None,
             created_at: available_at,
             updated_at: available_at,
+            run_id: None,
         }
     }
 

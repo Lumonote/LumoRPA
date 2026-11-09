@@ -1,5 +1,5 @@
 use super::mcp_supervisor::{
-    complete_oauth, refresh_oauth, McpOAuthStart, OAuthBrowser, OAuthTokenVault,
+    complete_oauth, refresh_oauth, run_governed_mcp, McpOAuthStart, OAuthBrowser, OAuthTokenVault,
     ReqwestOAuthTransport,
 };
 use super::{app_home, open_repo, DesktopState};
@@ -7,16 +7,18 @@ use chrono::{DateTime, Utc};
 use lumo_actions::mcp::oauth::{OAuthClientMetadata, StoredOAuthTokenRefs};
 use lumo_actions::mcp::{McpClient, McpTool, McpTransportConfig};
 use lumo_agent::{
-    import_bytes, ConfigValue, ImportWarning, McpImportBatch, McpPublisherMetadata, McpRelease,
-    McpServerDraft, McpToolDefinition, McpTransportDraft, SecretCandidate,
+    import_bytes, ConfigValue, ImportWarning, InvocationContext, InvocationError, McpClientInvoker,
+    McpImportBatch, McpPublisherMetadata, McpRelease, McpServerDraft, McpToolDefinition,
+    McpToolInvoker, McpTransportDraft, SecretCandidate,
 };
 use lumo_storage::{McpServerRow, McpToolRow, Repo, Vault, VaultIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-use tauri::{Emitter, State, Wry};
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{Emitter, Manager, State, Wry};
 
 type AppHandle = tauri::AppHandle<Wry>;
 
@@ -458,11 +460,8 @@ pub(crate) async fn test_mcp_server(
 ) -> Result<McpTestResultDto, String> {
     let repo = open_repo(&app)?;
     let mut row = require_server(&repo, &id)?;
-    supervisor_before_call(&state, &id)?;
-    let identity = load_vault_identity(&app_home(&app)?)?;
-    match connect_and_list(&repo, identity.as_ref(), &row).await {
+    match connect_and_list_governed(&app, &state, &repo, &row).await {
         Ok(tools) => {
-            supervisor_record(&state, &id, true);
             update_health(&repo, &mut row, "healthy")?;
             Ok(McpTestResultDto {
                 id,
@@ -472,7 +471,6 @@ pub(crate) async fn test_mcp_server(
             })
         }
         Err(error) => {
-            supervisor_record(&state, &id, false);
             update_health(&repo, &mut row, "unhealthy")?;
             Ok(McpTestResultDto {
                 id,
@@ -495,15 +493,9 @@ pub(crate) async fn discover_mcp_tools(
     if !row.enabled {
         return Err(format!("MCP server `{id}` is disabled"));
     }
-    supervisor_before_call(&state, &id)?;
-    let identity = load_vault_identity(&app_home(&app)?)?;
-    let tools = match connect_and_list(&repo, identity.as_ref(), &row).await {
-        Ok(tools) => {
-            supervisor_record(&state, &id, true);
-            tools
-        }
+    let tools = match connect_and_list_governed(&app, &state, &repo, &row).await {
+        Ok(tools) => tools,
         Err(error) => {
-            supervisor_record(&state, &id, false);
             update_health(&repo, &mut row, "unhealthy")?;
             return Err(error);
         }
@@ -572,38 +564,80 @@ pub(crate) async fn discover_mcp_tools(
 #[tauri::command]
 pub(crate) async fn call_mcp_tool(
     app: AppHandle,
-    state: State<'_, DesktopState>,
     id: String,
     tool: String,
     arguments: Value,
 ) -> Result<Value, String> {
-    let repo = open_repo(&app)?;
-    let row = require_server(&repo, &id)?;
-    if !row.enabled {
-        return Err(format!("MCP server `{id}` is disabled"));
-    }
-    let stored_tool = repo
-        .list_mcp_tools(&id)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|candidate| candidate.name == tool)
-        .ok_or_else(|| format!("MCP tool `{id}:{tool}` not found; discover tools first"))?;
-    if !stored_tool.enabled {
-        return Err(format!("MCP tool `{id}:{tool}` is disabled"));
-    }
-    supervisor_before_call(&state, &id)?;
-    let identity = load_vault_identity(&app_home(&app)?)?;
-    let config = runtime_transport(&repo, identity.as_ref(), &row)?;
-    let mut client = McpClient::connect(config, MCP_OPERATION_TIMEOUT)
+    DesktopMcpToolInvoker::new(app)
+        .call(
+            &id,
+            &tool,
+            arguments,
+            &InvocationContext::new("manual-mcp", "manual-tool"),
+            MCP_OPERATION_TIMEOUT.as_millis() as u64,
+        )
         .await
-        .map_err(|error| error.to_string())?;
-    let result = client
-        .call_tool(&tool, arguments)
+        .map_err(|error| error.to_string())
+}
+
+pub(super) struct DesktopMcpToolInvoker {
+    app: AppHandle,
+}
+
+impl DesktopMcpToolInvoker {
+    pub(super) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait::async_trait]
+impl McpToolInvoker for DesktopMcpToolInvoker {
+    async fn call(
+        &self,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        context: &InvocationContext,
+        timeout_ms: u64,
+    ) -> Result<Value, InvocationError> {
+        let app = &self.app;
+        let repo = open_repo(app).map_err(InvocationError::Unavailable)?;
+        let row = require_server(&repo, id).map_err(InvocationError::Unavailable)?;
+        if !row.enabled {
+            return Err(InvocationError::Unavailable(format!(
+                "MCP server `{id}` is disabled"
+            )));
+        }
+        let stored_tool = repo
+            .list_mcp_tools(id)
+            .map_err(|error| InvocationError::Unavailable(error.to_string()))?
+            .into_iter()
+            .find(|candidate| candidate.name == tool)
+            .ok_or_else(|| {
+                InvocationError::Unavailable(format!(
+                    "MCP tool `{id}:{tool}` not found; discover tools first"
+                ))
+            })?;
+        if !stored_tool.enabled {
+            return Err(InvocationError::Unavailable(format!(
+                "MCP tool `{id}:{tool}` is disabled"
+            )));
+        }
+        let state = app.state::<DesktopState>();
+        let invoker =
+            McpClientInvoker::new(Arc::new(super::agent_service::DesktopMcpProfileResolver {
+                repo,
+                home: app_home(app).map_err(InvocationError::Unavailable)?,
+            }));
+        run_governed_mcp(
+            &state.mcp,
+            id,
+            context,
+            timeout_ms,
+            invoker.call(id, tool, arguments, context, timeout_ms),
+        )
         .await
-        .map_err(|error| error.to_string());
-    client.close().await;
-    supervisor_record(&state, &id, result.is_ok());
-    result
+    }
 }
 
 #[tauri::command]
@@ -1018,36 +1052,35 @@ async fn connect_and_list(
     result
 }
 
+async fn connect_and_list_governed(
+    app: &AppHandle,
+    state: &DesktopState,
+    repo: &Repo,
+    row: &McpServerRow,
+) -> Result<Vec<McpTool>, String> {
+    let context = InvocationContext::new("mcp:discovery", &row.id);
+    run_governed_mcp(
+        &state.mcp,
+        &row.id,
+        &context,
+        MCP_OPERATION_TIMEOUT.as_millis() as u64,
+        async {
+            let home = app_home(app).map_err(InvocationError::Unavailable)?;
+            let identity = load_vault_identity(&home).map_err(InvocationError::Unavailable)?;
+            connect_and_list(repo, identity.as_ref(), row)
+                .await
+                .map_err(InvocationError::Unavailable)
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 fn update_health(repo: &Repo, row: &mut McpServerRow, health: &str) -> Result<(), String> {
     row.health = health.to_string();
     row.updated_at = Utc::now();
     repo.upsert_mcp_server(row)
         .map_err(|error| error.to_string())
-}
-
-fn supervisor_before_call(state: &State<'_, DesktopState>, id: &str) -> Result<(), String> {
-    let now = Instant::now();
-    state
-        .mcp
-        .lock()
-        .map_err(|_| "MCP supervisor state is unavailable".to_string())?
-        .health_mut(id, now)
-        .before_call(now)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-fn supervisor_record(state: &State<'_, DesktopState>, id: &str, success: bool) {
-    let now = Instant::now();
-    let Ok(mut runtime) = state.mcp.lock() else {
-        return;
-    };
-    let health = runtime.health_mut(id, now);
-    if success {
-        health.record_success();
-    } else {
-        health.record_failure(now);
-    }
 }
 
 fn registry_release(row: &McpServerRow, tools: &[McpTool]) -> Result<McpRelease, String> {

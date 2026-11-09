@@ -11,6 +11,7 @@ pub struct AgentBudget {
     steps_used: u32,
     tokens_used: u64,
     cost_used_usd_micro: u64,
+    restored_runtime: Duration,
     started_at: Instant,
 }
 
@@ -29,8 +30,44 @@ impl AgentBudget {
             steps_used: 0,
             tokens_used: 0,
             cost_used_usd_micro: 0,
+            restored_runtime: Duration::ZERO,
             started_at: Instant::now(),
         }
+    }
+
+    /// Restore only usage that a durable invocation actually recorded. Time
+    /// spent offline or waiting for approval does not consume active runtime.
+    pub fn restore_recorded_usage(
+        &mut self,
+        steps: u32,
+        tokens: u64,
+        cost_usd_micro: u64,
+        runtime_ms: u64,
+    ) -> Result<(), BudgetExceeded> {
+        self.steps_used = self.steps_used.saturating_add(steps);
+        self.tokens_used = self.tokens_used.saturating_add(tokens);
+        self.cost_used_usd_micro = self.cost_used_usd_micro.saturating_add(cost_usd_micro);
+        // Parallel invocation durations are deliberately conservative: their
+        // sum cannot grant a resumed run a fresh runtime allowance.
+        self.restored_runtime = self
+            .restored_runtime
+            .saturating_add(Duration::from_millis(runtime_ms));
+        if self.steps_used > self.max_steps {
+            return Err(BudgetExceeded::Steps {
+                limit: self.max_steps,
+            });
+        }
+        if self.tokens_used > self.max_tokens {
+            return Err(BudgetExceeded::Tokens {
+                limit: self.max_tokens,
+            });
+        }
+        if self.max_cost_usd_micro > 0 && self.cost_used_usd_micro > self.max_cost_usd_micro {
+            return Err(BudgetExceeded::Cost {
+                limit_usd_micro: self.max_cost_usd_micro,
+            });
+        }
+        self.check_runtime()
     }
 
     pub fn reserve_step(&mut self) -> Result<(), BudgetExceeded> {
@@ -64,7 +101,11 @@ impl AgentBudget {
     }
 
     pub fn check_runtime(&self) -> Result<(), BudgetExceeded> {
-        if self.started_at.elapsed() >= self.max_runtime {
+        if self
+            .restored_runtime
+            .saturating_add(self.started_at.elapsed())
+            >= self.max_runtime
+        {
             return Err(BudgetExceeded::Runtime {
                 limit_ms: self.max_runtime.as_millis() as u64,
             });
@@ -74,7 +115,10 @@ impl AgentBudget {
 
     pub fn remaining_runtime(&self) -> Result<Duration, BudgetExceeded> {
         self.max_runtime
-            .checked_sub(self.started_at.elapsed())
+            .checked_sub(
+                self.restored_runtime
+                    .saturating_add(self.started_at.elapsed()),
+            )
             .ok_or(BudgetExceeded::Runtime {
                 limit_ms: self.max_runtime.as_millis() as u64,
             })

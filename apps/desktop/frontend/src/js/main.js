@@ -40,12 +40,24 @@ import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
 import { openFlowHistory } from "./flow-history.js";
 import { mountCapabilityHub } from "./capability-hub.js";
+import { createJobScheduler } from "./job-scheduler.js";
 import { applyStaticTranslations, subscribeLocale } from "./i18n.js";
 import { mountMissionControl, refreshVoiceHistory, updateMissionControl } from "./mission-control.js";
 import { mountVoiceLauncher } from "./voice-launcher.js";
 import { normalizeToastEvent, restoreAndSubscribeAgentEvents } from "./app-events.js";
+import { createDraftController, observeEditorState, handleEditorExit, chooseEditorAction } from "./editor-drafts.js";
 
 let bootStarted = false;
+let exitInFlight = false;
+const jobScheduler = createJobScheduler({
+  call,
+  ensureSaved: ensureCurrentFlowSaved,
+  getCurrentFlow: () => ({ path: state.flowPath, inputs: $("inputsJson").value, dirty: state.source !== state.savedSource }),
+  onSaved: (job) => {
+    toast("定时任务已保存", job.id, "ok");
+    state.capabilityHubController?.refresh?.();
+  },
+});
 
 async function bindAppEvents() {
   const listen = window.__TAURI__?.event?.listen;
@@ -56,6 +68,28 @@ async function bindAppEvents() {
       if (["design", "recorder", "runs", "models", "features", "settings", "capability-hub", "mission-control"].includes(view)) {
         switchTopView(view);
         document.querySelector(`[data-view="${CSS.escape(view)}"]`)?.click();
+      }
+    });
+    await listen("lumo://editor-exit-request", async (event) => {
+      const request = event?.payload;
+      if (!request?.requestId || !state.draftController || exitInFlight) return;
+      exitInFlight = true;
+      try {
+        await handleEditorExit({
+          request,
+          controller: state.draftController,
+          getSnapshot: () => ({ path: state.flowPath, source: state.source, savedSource: state.savedSource }),
+          choose: async () => {
+            const choice = await chooseEditorAction({ title: "有未保存修改", detail: "保存到流程文件，或保留为可恢复草稿后退出？", actions: [["save", "保存并退出"], ["keep", "保留草稿退出"], ["cancel", "取消"]] });
+            return choice.action;
+          },
+          save: saveFlowSource,
+          call,
+        });
+      } catch (error) {
+        toast("退出已阻止", String(error), "bad");
+      } finally {
+        exitInFlight = false;
       }
     });
     await listen("lumo://toast", (event) => {
@@ -99,7 +133,7 @@ function bindEvents() {
     const mission = $("missionControlView");
     mission.style.display = b.dataset.view === "mission-control" ? "" : "none";
     if (b.dataset.view === "capability-hub" && !state.capabilityHubMounted) {
-      state.capabilityHubController = mountCapabilityHub({ call, root: hub });
+      state.capabilityHubController = mountCapabilityHub({ call, root: hub, editJob: (job) => jobScheduler.open(job) });
       state.capabilityHubMounted = true;
     }
     if (b.dataset.view === "mission-control" && !state.missionControlMounted) {
@@ -344,6 +378,7 @@ function bindEvents() {
   $("debugBtn").addEventListener("click", () => startDebug());
   $("cancelRunBtn").addEventListener("click", () => cancelActiveRun());
   $("saveFlowBtn").addEventListener("click", () => saveFlowSource().catch(reportError));
+  $("scheduleFlowBtn").addEventListener("click", () => jobScheduler.open().catch(reportError));
   $("flowHistoryBtn").addEventListener("click", () => openFlowHistory().catch(reportError));
   $("resetInputBtn").addEventListener("click", () => {
     if (state.flow) $("inputsJson").value = pretty(defaultInputs(state.flow));
@@ -453,6 +488,13 @@ async function boot() {
     if (state.currentView) switchTopView(state.currentView);
   });
   bindEvents();
+  state.draftController = createDraftController({
+    call,
+    getSnapshot: () => ({ path: state.flowPath, source: state.source, savedSource: state.savedSource }),
+    onError: (error) => toast("草稿保存失败", String(error), "bad"),
+  });
+  state.draftController.start();
+  observeEditorState(state, state.draftController);
   applyTheme(state.theme);
   applyWindowAlpha(state.windowAlpha);
   applyPanelAlpha(state.panelAlpha);
@@ -461,7 +503,7 @@ async function boot() {
   renderElementLibrary();
   ensureRecorderListener();
   ensureHumanPromptListener();
-  bindAppEvents();
+  await bindAppEvents();
   const agentListen = window.__TAURI__?.event?.listen;
   if (agentListen) restoreAndSubscribeAgentEvents({ runId: "latest", call, listen: agentListen, onProjection: (projection) => {
     state.agentProjection = projection;
@@ -477,7 +519,18 @@ async function boot() {
       loadFeatureMap().catch(() => {}),
       refreshElementLibrary().catch(() => {}),
     ]);
-    if (state.examples[0]) {
+    try { state.draftRecovery = await state.draftController.list(); } catch (error) { toast("草稿读取失败", String(error), "bad"); }
+    let recoveryEntry;
+    if (state.draftRecovery.length) {
+      const choice = await chooseEditorAction({ title: "发现可恢复草稿", detail: "选择要恢复的流程。草稿不会自动覆盖磁盘文件。", entries: state.draftRecovery, actions: [["recover", "打开所选草稿"], ["later", "稍后恢复"]] });
+      if (choice.action === "recover") recoveryEntry = choice.entry;
+    }
+    if (recoveryEntry && (!recoveryEntry.path || !state.examples.some((entry) => entry.path === recoveryEntry.path))) {
+      const { restoreOrphanDraft } = await import("./flows.js");
+      await restoreOrphanDraft(recoveryEntry);
+    } else if (recoveryEntry) {
+      await loadFlow(recoveryEntry.path);
+    } else if (state.examples[0]) {
       // Prefer user-saved → recordings → bundled examples so a returning
       // operator lands on the flow they were actually editing.
       const order = { user: 0, recording: 1, example: 2 };

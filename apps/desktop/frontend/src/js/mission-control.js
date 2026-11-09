@@ -6,6 +6,8 @@ const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").repla
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
 const projections = new WeakMap();
 const controlsInFlight = new WeakSet();
+const missions = new WeakMap();
+const terminal = (projection) => ["completed", "failed", "cancelled"].includes(projection?.status);
 
 function redact(value, key = "") {
   if (secretKey(key)) return "••••••••";
@@ -58,7 +60,7 @@ export function renderRunMetrics(projection) {
 }
 
 export function renderRunHistoryOptions(runs = [], selected = "") {
-  return runs.map((run) => `<option value="${escapeHtml(run.id)}"${run.id === selected ? " selected" : ""}>${escapeHtml((run.utterance || run.id).slice(0, 48))} · ${escapeHtml(run.state || "unknown")}</option>`).join("");
+  return `<option value=""${selected === "" ? " selected" : ""}>跟随最新运行</option>${runs.map((run) => `<option value="${escapeHtml(run.id)}"${run.id === selected ? " selected" : ""}>${escapeHtml((run.utterance || run.id).slice(0, 48))} · ${escapeHtml(run.state || "unknown")}</option>`).join("")}`;
 }
 
 export function renderVoiceHistory(entries = []) {
@@ -74,9 +76,14 @@ export async function refreshVoiceHistory(scope, call) {
   } catch { /* 保留旧内容 */ }
 }
 
-export function updateMissionControl(root, projection) {
-  if (!root) return;
-  if (root.dataset.selectedRun && root.dataset.selectedRun !== projection.runId) return;
+function clearNodeSelection(root) {
+  delete root.dataset.selectedNode;
+  delete root.dataset.startLane;
+}
+
+function renderProjection(root, projection) {
+  if (!projection) return;
+  if (projections.get(root)?.runId !== projection.runId) clearNodeSelection(root);
   projections.set(root, projection);
   const rawTopology = readyTopology(projection);
   const topology = virtualizeTopology(rawTopology, { startLane: Number(root.dataset.startLane || 0), laneCount: Number(root.dataset.laneCount || 12) });
@@ -89,21 +96,113 @@ export function updateMissionControl(root, projection) {
   root.classList.toggle("is-replanning", projection.status === "replanning");
 }
 
+function showHistoryError(state) {
+  state.errorBox.textContent = [state.listError, state.selectionError].filter(Boolean).join("；");
+}
+
+function renderHistory(state) {
+  const selected = state.root.dataset.selectedRun || "";
+  const runs = [...state.history.values()];
+  if (selected && !state.history.has(selected)) {
+    runs.unshift({ id: selected, state: state.cache.get(selected)?.status || "unknown" });
+  }
+  state.selector.innerHTML = renderRunHistoryOptions(runs, selected);
+  state.selector.value = selected;
+}
+
+async function refreshRunHistory(state) {
+  if (state.refreshing) {
+    state.refreshAgain = true;
+    return;
+  }
+  state.refreshing = true;
+  try {
+    const runs = await state.call("agent_run_list", { limit: 50 });
+    state.history = new Map((runs || []).map((run) => [run.id, run]));
+    state.listError = "";
+    renderHistory(state);
+  } catch (error) {
+    state.listError = `刷新运行历史失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    showHistoryError(state);
+    state.refreshing = false;
+    if (state.refreshAgain) {
+      state.refreshAgain = false;
+      void refreshRunHistory(state);
+    }
+  }
+}
+
+export function updateMissionControl(root, projection) {
+  if (!root || !projection) return;
+  const state = missions.get(root);
+  const previous = state?.cache.get(projection.runId) || projections.get(root);
+  if (previous?.runId === projection.runId && previous.seq > projection.seq) projection = previous;
+  if (!state) {
+    if (!root.dataset.selectedRun || root.dataset.selectedRun === projection.runId) renderProjection(root, projection);
+    return;
+  }
+  const latest = state.latest;
+  state.cache.set(projection.runId, projection);
+  state.latest = projection;
+  if (!root.dataset.selectedRun || root.dataset.selectedRun === projection.runId) renderProjection(root, projection);
+  if (latest?.runId !== projection.runId || (!terminal(latest) && terminal(projection))) void refreshRunHistory(state);
+}
+
 export function mountMissionControl(root, projection, call = async () => {}) {
   if (!root) return;
+  if (missions.has(root)) { updateMissionControl(root, projection); return; }
   const selector = document.createElement("select");
   selector.dataset.mcRunSelect = "";
   selector.setAttribute("aria-label", "选择 Agent 运行历史");
   root.querySelector(".mc-head")?.append(selector);
-  call("agent_run_list", { limit: 50 }).then((runs) => {
-    selector.innerHTML = renderRunHistoryOptions(runs, projection.runId);
-  }).catch(() => {});
+  const errorBox = document.createElement("span");
+  errorBox.dataset.mcHistoryError = "";
+  errorBox.setAttribute("role", "status");
+  root.querySelector(".mc-head")?.append(errorBox);
+  const state = { root, call, selector, errorBox, latest: projection, cache: new Map(), history: new Map(), selectionRevision: 0, refreshing: false, refreshAgain: false, listError: "", selectionError: "" };
+  missions.set(root, state);
+  root.dataset.selectedRun = "";
+  renderHistory(state);
   selector.addEventListener("change", async () => {
-    root.dataset.selectedRun = selector.value;
-    const events = await call("agent_events", { runId: selector.value, afterSeq: 0 });
-    let currentProjection = createRunProjection(selector.value);
-    for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
-    updateMissionControl(root, currentProjection);
+    const selected = selector.value;
+    const revision = ++state.selectionRevision;
+    root.dataset.selectedRun = selected;
+    clearNodeSelection(root);
+    state.selectionError = "";
+    showHistoryError(state);
+    selector.setAttribute("aria-busy", "false");
+    renderHistory(state);
+    if (!selected) { renderProjection(root, state.latest); return; }
+    const cached = state.cache.get(selected);
+    if (cached) renderProjection(root, cached);
+    else {
+      projections.delete(root);
+      root.querySelector("[data-mc-topology]").innerHTML = '<div class="mc-empty">正在加载运行记录…</div>';
+      root.querySelector("[data-mc-detail]").innerHTML = "";
+      root.querySelector("[data-mc-metrics]").innerHTML = "";
+      root.querySelector("[data-mc-log]").innerHTML = "";
+      root.classList.toggle("is-replanning", false);
+    }
+    selector.setAttribute("aria-busy", "true");
+    try {
+      const events = await call("agent_events", { runId: selected, afterSeq: 0 });
+      if (revision !== state.selectionRevision) return;
+      let currentProjection = createRunProjection(selected);
+      for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
+      const fresh = state.cache.get(selected);
+      if (fresh && fresh.seq >= currentProjection.seq) currentProjection = fresh;
+      state.cache.set(selected, currentProjection);
+      if (state.latest?.runId === selected) updateMissionControl(root, currentProjection);
+      else renderProjection(root, currentProjection);
+      renderHistory(state);
+    } catch (error) {
+      if (revision !== state.selectionRevision) return;
+      state.selectionError = `加载运行记录失败：${error instanceof Error ? error.message : String(error)}`;
+      showHistoryError(state);
+    } finally {
+      if (revision === state.selectionRevision) selector.setAttribute("aria-busy", "false");
+    }
   });
   root.addEventListener("click", async (event) => {
     const zoom = event.target.closest("[data-mc-zoom]");
@@ -140,7 +239,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     const node = event.target.closest("[data-node-id]");
     if (!node) return;
     root.dataset.selectedNode = node.dataset.nodeId;
-    updateMissionControl(root, projections.get(root));
+    renderProjection(root, projections.get(root));
   });
   root.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
@@ -152,4 +251,5 @@ export function mountMissionControl(root, projection, call = async () => {}) {
   });
   refreshVoiceHistory(root, call);
   updateMissionControl(root, projection);
+  void refreshRunHistory(state);
 }

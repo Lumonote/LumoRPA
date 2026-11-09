@@ -77,6 +77,7 @@ export function openAiDrawer(path) {
     if (addCap && newMode !== "off") updated = ensureLlmCapability(updated);
     snapshotSource("ai-drawer");
     state.source = updated;
+    state.draftController?.capture();
     state.ast = parseYaml(state.source);
     close();
     toast("已写入 ai 配置", `step ${step.id} · mode=${newMode}`, "ok");

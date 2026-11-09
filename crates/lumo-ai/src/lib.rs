@@ -15,10 +15,11 @@ pub use action::ChatAction;
 pub use budget::RunBudget;
 pub use config::{ConfigError, ProviderProfile, ProvidersConfig};
 pub use helpers::{
-    build_hook_provider, decide, diagnose, extract_visual, heal_selector, vision_locate, AiHooks,
+    build_hook_provider, build_hook_provider_with_home, decide, diagnose, extract_visual,
+    heal_selector, vision_locate, AiHooks,
 };
 pub use ocr_models::{
-    download_modelscope_model, ocr_model_catalog, OcrModelDownload, OcrModelStatus,
+    check_ocr_model, download_modelscope_model, ocr_model_catalog, OcrModelDownload, OcrModelStatus,
 };
 // Re-export the canonical hook types from lumo-core so external callers see
 // a single set of `HealedSelector`/`Decision` symbols.

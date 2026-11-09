@@ -13,7 +13,7 @@
 use crate::budget::RunBudget;
 use crate::{
     cost::cost_micro,
-    ocr_models::{is_local_ocr_model, run_modelscope_ocr},
+    ocr_models::{is_local_ocr_model, run_modelscope_ocr_at},
     provider::{ChatMessage, ChatRequest, ChatResponse, ImageAttachment, Role},
     router::AiRouter,
 };
@@ -470,6 +470,7 @@ pub struct AiHooks {
     pub budget: RunBudget,
     vision_model: Option<String>,
     ocr_model: Option<String>,
+    ocr_home: Option<std::path::PathBuf>,
     /// P1-4: per-call usage accumulated across hook dispatches. The VM drains
     /// it with [`AiHookProvider::take_usage`] after each call to write
     /// `ai_calls` ledger rows (it owns the run/step context the hooks lack).
@@ -497,12 +498,18 @@ impl AiHooks {
             budget,
             vision_model,
             ocr_model,
+            ocr_home: None,
             usage: Mutex::new(Vec::new()),
         }
     }
 
     pub fn budget(&self) -> &RunBudget {
         &self.budget
+    }
+
+    pub fn with_home(mut self, home: impl Into<std::path::PathBuf>) -> Self {
+        self.ocr_home = Some(home.into());
+        self
     }
 
     /// Record one metered hook call into the accumulator.
@@ -524,6 +531,24 @@ pub fn build_hook_provider(
     flow_ai_enabled: bool,
     max_calls_per_run: u32,
 ) -> Option<Arc<dyn AiHookProvider>> {
+    build_hook_provider_at(cfg, flow_ai_enabled, max_calls_per_run, None)
+}
+
+pub fn build_hook_provider_with_home(
+    cfg: &crate::config::ProvidersConfig,
+    flow_ai_enabled: bool,
+    max_calls_per_run: u32,
+    home: &std::path::Path,
+) -> Option<Arc<dyn AiHookProvider>> {
+    build_hook_provider_at(cfg, flow_ai_enabled, max_calls_per_run, Some(home))
+}
+
+fn build_hook_provider_at(
+    cfg: &crate::config::ProvidersConfig,
+    flow_ai_enabled: bool,
+    max_calls_per_run: u32,
+    home: Option<&std::path::Path>,
+) -> Option<Arc<dyn AiHookProvider>> {
     if !flow_ai_enabled || cfg.profiles.is_empty() {
         return None;
     }
@@ -531,12 +556,11 @@ pub fn build_hook_provider(
     let budget = RunBudget::new(max_calls_per_run);
     let vision_model = cfg.active_vision_model();
     let ocr_model = cfg.active_ocr_model();
-    Some(Arc::new(AiHooks::with_model_defaults(
-        router,
-        budget,
-        vision_model,
-        ocr_model,
-    )))
+    let mut hooks = AiHooks::with_model_defaults(router, budget, vision_model, ocr_model);
+    if let Some(home) = home {
+        hooks = hooks.with_home(home);
+    }
+    Some(Arc::new(hooks))
 }
 
 #[async_trait]
@@ -646,18 +670,43 @@ impl AiHookProvider for AiHooks {
             .or(self.ocr_model.as_deref())
             .or(self.vision_model.as_deref());
         if let Some(model) = model.filter(|m| is_local_ocr_model(m)) {
-            self.budget
-                .consume()
-                .map_err(|_| StepError::BudgetExceeded {
-                    max: self.budget.max(),
-                })?;
-            guard_image_size("ai.ocr_image", image.len())?;
-            let (text, usage) = run_modelscope_ocr(image, media_type, prompt, model).await?;
-            self.push_usage(usage);
-            return Ok(text);
+            return self
+                .ocr_image_local(image, media_type, prompt, Some(model))
+                .await;
         }
         let (text, usage) =
             ocr_image(&self.router, &self.budget, image, media_type, prompt, model).await?;
+        self.push_usage(usage);
+        Ok(text)
+    }
+
+    fn local_ocr_model(&self, model: Option<&str>) -> Option<String> {
+        model
+            .or(self.ocr_model.as_deref())
+            .or(self.vision_model.as_deref())
+            .filter(|model| is_local_ocr_model(model))
+            .map(crate::ocr_models::normalize_model_ref)
+    }
+
+    async fn ocr_image_local(
+        &self,
+        image: Bytes,
+        media_type: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, StepError> {
+        let model = self.local_ocr_model(model).ok_or_else(|| {
+            StepError::msg("no local OCR model is configured; cloud fallback is disabled")
+        })?;
+        self.budget
+            .consume()
+            .map_err(|_| StepError::BudgetExceeded {
+                max: self.budget.max(),
+            })?;
+        guard_image_size("ai.ocr_image_local", image.len())?;
+        let (text, usage) =
+            run_modelscope_ocr_at(self.ocr_home.as_deref(), image, media_type, prompt, &model)
+                .await?;
         self.push_usage(usage);
         Ok(text)
     }
