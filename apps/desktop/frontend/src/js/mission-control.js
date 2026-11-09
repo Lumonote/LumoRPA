@@ -5,6 +5,7 @@ import { renderAgentLog } from "./agent-feedback.js";
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
 const projections = new WeakMap();
+const controlsInFlight = new WeakSet();
 
 function redact(value, key = "") {
   if (secretKey(key)) return "••••••••";
@@ -81,8 +82,8 @@ export function updateMissionControl(root, projection) {
   const topology = virtualizeTopology(rawTopology, { startLane: Number(root.dataset.startLane || 0), laneCount: Number(root.dataset.laneCount || 12) });
   root.querySelector("[data-mc-topology]").innerHTML = renderTopology(topology);
   const selected = root.dataset.selectedNode || topology.activeNodeId;
-  const pending = [...(projection.events || [])].reverse().find((event) => event.kind === "permission.requested" && !event.resolved);
-  root.querySelector("[data-mc-detail]").innerHTML = `${pending ? renderConfirmation({ runId: projection.runId, nodeId: pending.nodeId || pending.node_id, ...(pending.payload || {}) }) : renderNodeDetail(projection.nodes?.[selected])}${renderRunControls(projection)}`;
+  const pending = projection.pendingApprovals?.[0];
+  root.querySelector("[data-mc-detail]").innerHTML = `${pending ? renderConfirmation({ runId: projection.runId, nodeId: pending.nodeId || pending.node_id, ...(pending.payload || {}) }) : renderNodeDetail(projection.nodes?.[selected])}${renderRunControls(projection)}<p data-mc-control-error role="status"></p>`;
   root.querySelector("[data-mc-metrics]").innerHTML = renderRunMetrics(projection);
   root.querySelector("[data-mc-log]").innerHTML = renderAgentLog(projection.events || []);
   root.classList.toggle("is-replanning", projection.status === "replanning");
@@ -104,7 +105,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
     updateMissionControl(root, currentProjection);
   });
-  root.addEventListener("click", (event) => {
+  root.addEventListener("click", async (event) => {
     const zoom = event.target.closest("[data-mc-zoom]");
     if (zoom) {
       const current = Number(root.dataset.zoom || 1);
@@ -119,8 +120,21 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     }
     const control = event.target.closest("[data-agent-action]");
     if (control) {
+      if (control.disabled || controlsInFlight.has(root)) return;
+      controlsInFlight.add(root);
       control.disabled = true;
-      runAgentControl({ action: control.dataset.agentAction, runId: control.dataset.runId, nodeId: control.dataset.nodeId, planHash: control.dataset.planHash }, call, () => root.querySelector("[data-plan-hash]")?.dataset.planHash).finally(() => { control.disabled = false; });
+      const errorBox = root.querySelector("[data-mc-control-error]");
+      if (errorBox) errorBox.textContent = "";
+      try {
+        await runAgentControl({ action: control.dataset.agentAction, runId: control.dataset.runId, nodeId: control.dataset.nodeId, planHash: control.dataset.planHash, risk: control.dataset.risk, strength: control.dataset.strength, capabilityId: control.dataset.capabilityId }, call, () => root.querySelector("[data-plan-hash]")?.dataset.planHash, (message) => window.confirm(message));
+      } catch (error) {
+        const currentErrorBox = projections.get(root)?.runId === control.dataset.runId
+          ? root.querySelector("[data-mc-control-error]") : null;
+        if (currentErrorBox) currentErrorBox.textContent = `操作失败：${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        control.disabled = false;
+        controlsInFlight.delete(root);
+      }
       return;
     }
     const node = event.target.closest("[data-node-id]");

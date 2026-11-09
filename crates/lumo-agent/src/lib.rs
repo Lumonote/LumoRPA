@@ -19,6 +19,7 @@ mod profile;
 mod proposal_apply;
 mod proposal_builder;
 mod router;
+mod run_control;
 mod security_center;
 mod shadow_eval;
 mod skill_manager;
@@ -74,6 +75,7 @@ pub use proposal_apply::{
 };
 pub use proposal_builder::ProposalBuilder;
 pub use router::{RouteOutcome, Router, SystemControlIntent};
+pub use run_control::{AgentControlState, AgentRunControl};
 pub use security_center::{
     redact_arguments, AuditEvent, AuditEventDraft, BiometricChallenge, InjectionFinding,
     InjectionSeverity, PermissionGrant, PermissionGrantRequest, PermissionRevocation,

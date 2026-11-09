@@ -3,9 +3,12 @@ use super::agent_service::{
     TauriDesktopAgentEventEmitter,
 };
 use super::{open_repo, DesktopState};
-use lumo_agent::{AgentEventKind, AgentPlan, RiskLevel};
+use lumo_agent::{
+    AgentControlState, AgentEventDraft, AgentEventKind, AgentPlan, AgentRunControl, LoopStatus,
+    RiskLevel,
+};
 use lumo_core::CancelToken;
-use lumo_storage::{AgentEventInsert, AgentEventRow, Repo};
+use lumo_storage::{AgentEventRow, Repo};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -20,6 +23,7 @@ type AppHandle = tauri::AppHandle<Wry>;
 #[serde(rename_all = "camelCase")]
 pub(super) enum AgentRuntimeState {
     Running,
+    WaitingApproval,
     Paused,
     Cancelled,
     Completed,
@@ -30,6 +34,7 @@ struct AgentSession {
     _plan: AgentPlan,
     state: AgentRuntimeState,
     cancel: CancelToken,
+    control: Option<AgentRunControl>,
     approval: Option<Value>,
     unknown_nodes: Vec<String>,
 }
@@ -115,65 +120,75 @@ async fn start_agent_request(
         .clone()
         .ok_or_else(|| "desktop agent service is not initialized".to_string())?;
     let execution = service.start(input).await?;
-    let (run_id, plan, cancel) = execution.into_session_parts();
+    let (run_id, plan, cancel, control) = execution.into_session_parts();
     let mut runtime = lock_runtime(state)?;
-    start_session(&mut runtime, run_id, plan, cancel)
+    start_session(&mut runtime, run_id, plan, cancel, control)
 }
 
 #[tauri::command]
-pub(super) fn agent_pause(
-    app: AppHandle,
+pub(super) async fn agent_pause(
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
-    let mut runtime = lock_runtime(&state)?;
-    let result = pause_session(&mut runtime, &run_id)?;
+    let result = {
+        let mut runtime = lock_runtime(&state)?;
+        pause_session(&mut runtime, &run_id)?
+    };
     append_event(
-        &app,
-        &open_repo(&app)?,
+        &state,
         &run_id,
         AgentEventKind::RunPaused,
         None,
-        json!({}),
-    )?;
+        json!({"scope":"subsequent_nodes"}),
+    )
+    .await?;
     Ok(result)
 }
 
 #[tauri::command]
-pub(super) fn agent_resume(
-    app: AppHandle,
+pub(super) async fn agent_resume(
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
-    let mut runtime = lock_runtime(&state)?;
-    let result = resume_session(&mut runtime, &run_id)?;
+    let result = {
+        let mut runtime = lock_runtime(&state)?;
+        resume_session(&mut runtime, &run_id)?
+    };
     append_event(
-        &app,
-        &open_repo(&app)?,
+        &state,
         &run_id,
         AgentEventKind::RunResumed,
         None,
-        json!({}),
-    )?;
+        json!({"state":result.state}),
+    )
+    .await?;
     Ok(result)
 }
 
 #[tauri::command]
-pub(super) fn agent_cancel(
-    app: AppHandle,
+pub(super) async fn agent_cancel(
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
-    let mut runtime = lock_runtime(&state)?;
-    let result = cancel_session(&mut runtime, &run_id)?;
-    append_event(
-        &app,
-        &open_repo(&app)?,
-        &run_id,
-        AgentEventKind::RunCancelled,
-        None,
-        json!({}),
-    )?;
+    let (result, restored) = {
+        let mut runtime = lock_runtime(&state)?;
+        let restored = runtime
+            .sessions
+            .get(&run_id)
+            .is_some_and(|session| session.control.is_none());
+        (cancel_session(&mut runtime, &run_id)?, restored)
+    };
+    // Live execution publishes its terminal event after cancellation/cleanup.
+    if restored {
+        append_event(
+            &state,
+            &run_id,
+            AgentEventKind::RunCancelled,
+            None,
+            json!({}),
+        )
+        .await?;
+    }
     Ok(result)
 }
 
@@ -186,8 +201,10 @@ pub(super) fn active_agent_session_count(state: &DesktopState) -> usize {
                 .values()
                 .filter(|session| {
                     matches!(
-                        session.state,
-                        AgentRuntimeState::Running | AgentRuntimeState::Paused
+                        session_state(session),
+                        AgentRuntimeState::Running
+                            | AgentRuntimeState::Paused
+                            | AgentRuntimeState::WaitingApproval
                     )
                 })
                 .count()
@@ -196,62 +213,100 @@ pub(super) fn active_agent_session_count(state: &DesktopState) -> usize {
 }
 
 pub(super) fn cancel_active_agent_sessions(
-    app: &AppHandle,
+    _app: &AppHandle,
     state: &DesktopState,
 ) -> Result<Vec<String>, String> {
-    let cancelled = {
+    let (ids, restored_ids) = {
         let mut runtime = lock_runtime(state)?;
-        runtime
+        let ids = runtime
             .sessions
-            .iter_mut()
-            .filter_map(|(run_id, session)| {
+            .iter()
+            .filter_map(|(id, session)| {
                 matches!(
-                    session.state,
-                    AgentRuntimeState::Running | AgentRuntimeState::Paused
+                    session_state(session),
+                    AgentRuntimeState::Running
+                        | AgentRuntimeState::Paused
+                        | AgentRuntimeState::WaitingApproval
                 )
-                .then(|| {
-                    session.cancel.cancel();
-                    session.state = AgentRuntimeState::Cancelled;
-                    run_id.clone()
-                })
+                .then_some(id.clone())
             })
-            .collect::<Vec<_>>()
-    };
-    if !cancelled.is_empty() {
-        let repo = open_repo(app)?;
-        for run_id in &cancelled {
-            append_event(
-                app,
-                &repo,
-                run_id,
-                AgentEventKind::RunCancelled,
-                None,
-                json!({"source":"voice_stop"}),
-            )?;
+            .collect::<Vec<_>>();
+        let restored_ids = ids
+            .iter()
+            .filter(|id| runtime.sessions[*id].control.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in &ids {
+            cancel_session(&mut runtime, id)?;
         }
+        (ids, restored_ids)
+    };
+    if !restored_ids.is_empty() {
+        let service = state
+            .agent_service
+            .lock()
+            .map_err(|_| "desktop agent service is unavailable")?
+            .clone()
+            .ok_or("desktop agent service is not initialized")?;
+        tauri::async_runtime::spawn(async move {
+            for run_id in restored_ids {
+                if let Err(error) = service
+                    .publish_event(
+                        AgentEventDraft::new(run_id, AgentEventKind::RunCancelled)
+                            .payload(json!({"source":"voice_stop"})),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "failed to persist cancellation of restored agent run");
+                }
+            }
+        });
     }
-    Ok(cancelled)
+    Ok(ids)
 }
 
 #[tauri::command]
-pub(super) fn agent_approve(
-    app: AppHandle,
+pub(super) async fn agent_approve(
     state: State<'_, DesktopState>,
     run_id: String,
     approved: bool,
     node_ids: Vec<String>,
+    plan_hash: String,
+    strengthened: Option<bool>,
 ) -> Result<AgentSessionDto, String> {
+    let control = {
+        let mut runtime = lock_runtime(&state)?;
+        let session = require_session(&mut runtime, &run_id)?;
+        session
+            .control
+            .clone()
+            .ok_or("restored runs cannot resume automatically; start a new run")?
+    };
+    let service = state
+        .agent_service
+        .lock()
+        .map_err(|_| "desktop agent service is unavailable")?
+        .clone()
+        .ok_or("desktop agent service is not initialized")?;
+    service
+        .resolve_approval(
+            &run_id,
+            &control,
+            &plan_hash,
+            &node_ids,
+            approved,
+            strengthened.unwrap_or(false),
+        )
+        .await?;
     let mut runtime = lock_runtime(&state)?;
-    let result = approve_session(&mut runtime, &run_id, approved, node_ids.clone())?;
-    append_event(
-        &app,
-        &open_repo(&app)?,
-        &run_id,
-        AgentEventKind::PermissionResolved,
-        None,
-        json!({ "approved": approved, "nodeIds": node_ids }),
-    )?;
-    Ok(result)
+    let session = require_session(&mut runtime, &run_id)?;
+    if !approved {
+        session.cancel.cancel();
+    }
+    session.approval = Some(
+        json!({"approved":approved,"nodeIds":node_ids,"planHash":plan_hash,"strengthened":strengthened.unwrap_or(false)}),
+    );
+    Ok(session_dto(&run_id, session))
 }
 
 #[tauri::command]
@@ -298,11 +353,14 @@ fn latest_agent_run_id(repo: &Repo) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub(super) fn agent_restore(
+pub(super) async fn agent_restore(
     app: AppHandle,
     state: State<'_, DesktopState>,
     run_id: String,
 ) -> Result<AgentSessionDto, String> {
+    if let Some(session) = lock_runtime(&state)?.sessions.get(&run_id) {
+        return Ok(session_dto(&run_id, session));
+    }
     let repo = open_repo(&app)?;
     let events = repo
         .list_agent_events(&run_id, 0)
@@ -310,8 +368,7 @@ pub(super) fn agent_restore(
     let restored = restore_from_events(&run_id, &events)?;
     for node_id in &restored.unknown_nodes {
         append_event(
-            &app,
-            &repo,
+            &state,
             &run_id,
             AgentEventKind::NodeFailed,
             Some(node_id),
@@ -319,7 +376,8 @@ pub(super) fn agent_restore(
                 "state": "unknown",
                 "reason": "desktop host restarted during an external side-effect node"
             }),
-        )?;
+        )
+        .await?;
     }
     let dto = session_dto(&run_id, &restored);
     lock_runtime(&state)?.sessions.insert(run_id, restored);
@@ -331,6 +389,7 @@ fn start_session(
     run_id: String,
     plan: AgentPlan,
     cancel: CancelToken,
+    control: Option<AgentRunControl>,
 ) -> Result<AgentSessionDto, String> {
     if runtime.sessions.contains_key(&run_id) {
         return Err(format!("agent run `{run_id}` already exists"));
@@ -339,6 +398,7 @@ fn start_session(
         _plan: plan,
         state: AgentRuntimeState::Running,
         cancel,
+        control,
         approval: None,
         unknown_nodes: Vec::new(),
     };
@@ -352,10 +412,11 @@ fn pause_session(
     run_id: &str,
 ) -> Result<AgentSessionDto, String> {
     let session = require_session(runtime, run_id)?;
-    if session.state != AgentRuntimeState::Running {
-        return Err(format!("agent run `{run_id}` is not running"));
-    }
-    session.state = AgentRuntimeState::Paused;
+    session
+        .control
+        .as_ref()
+        .ok_or("restored runs cannot resume automatically; start a new run")?
+        .pause()?;
     Ok(session_dto(run_id, session))
 }
 
@@ -364,10 +425,11 @@ fn resume_session(
     run_id: &str,
 ) -> Result<AgentSessionDto, String> {
     let session = require_session(runtime, run_id)?;
-    if session.state != AgentRuntimeState::Paused {
-        return Err(format!("agent run `{run_id}` is not paused"));
-    }
-    session.state = AgentRuntimeState::Running;
+    session
+        .control
+        .as_ref()
+        .ok_or("restored runs cannot resume automatically; start a new run")?
+        .resume()?;
     Ok(session_dto(run_id, session))
 }
 
@@ -376,19 +438,41 @@ fn cancel_session(
     run_id: &str,
 ) -> Result<AgentSessionDto, String> {
     let session = require_session(runtime, run_id)?;
+    if matches!(
+        session_state(session),
+        AgentRuntimeState::Completed | AgentRuntimeState::Failed | AgentRuntimeState::Cancelled
+    ) {
+        return Err(format!("agent run `{run_id}` has already ended"));
+    }
     session.cancel.cancel();
     session.state = AgentRuntimeState::Cancelled;
+    if let Some(control) = &session.control {
+        control.finish(LoopStatus::Cancelled);
+    }
     Ok(session_dto(run_id, session))
 }
 
+#[cfg(test)]
 fn approve_session(
     runtime: &mut DesktopAgentRuntime,
     run_id: &str,
     approved: bool,
     node_ids: Vec<String>,
+    plan_hash: &str,
+    strengthened: bool,
 ) -> Result<AgentSessionDto, String> {
     let session = require_session(runtime, run_id)?;
-    session.approval = Some(json!({ "approved": approved, "nodeIds": node_ids }));
+    let control = session
+        .control
+        .as_ref()
+        .ok_or("restored runs cannot resume automatically; start a new run")?;
+    control.resolve_approval(plan_hash, &node_ids, approved, strengthened)?;
+    if !approved {
+        session.cancel.cancel();
+    }
+    session.approval = Some(
+        json!({"approved":approved,"nodeIds":node_ids,"planHash":plan_hash,"strengthened":strengthened}),
+    );
     Ok(session_dto(run_id, session))
 }
 
@@ -456,6 +540,7 @@ fn restore_from_events(run_id: &str, events: &[AgentEventRow]) -> Result<AgentSe
         _plan: plan,
         state,
         cancel: CancelToken::new(),
+        control: None,
         approval,
         unknown_nodes,
     })
@@ -471,11 +556,23 @@ fn require_session<'a>(
         .ok_or_else(|| format!("agent run `{run_id}` is not active; restore it first"))
 }
 
+fn session_state(session: &AgentSession) -> AgentRuntimeState {
+    match session.control.as_ref().map(AgentRunControl::state) {
+        Some(AgentControlState::Running) => AgentRuntimeState::Running,
+        Some(AgentControlState::WaitingApproval) => AgentRuntimeState::WaitingApproval,
+        Some(AgentControlState::Paused) => AgentRuntimeState::Paused,
+        Some(AgentControlState::Completed) => AgentRuntimeState::Completed,
+        Some(AgentControlState::Failed) => AgentRuntimeState::Failed,
+        Some(AgentControlState::Cancelled) => AgentRuntimeState::Cancelled,
+        None => session.state,
+    }
+}
+
 fn session_dto(run_id: &str, session: &AgentSession) -> AgentSessionDto {
     AgentSessionDto {
         run_id: run_id.to_string(),
-        state: session.state,
-        paused: session.state == AgentRuntimeState::Paused,
+        state: session_state(session),
+        paused: session_state(session) == AgentRuntimeState::Paused,
         approval: session.approval.clone(),
         unknown_nodes: session.unknown_nodes.clone(),
     }
@@ -490,33 +587,24 @@ fn lock_runtime(
         .map_err(|_| "desktop agent runtime is unavailable".to_string())
 }
 
-fn append_event(
-    app: &AppHandle,
-    repo: &Repo,
+async fn append_event(
+    state: &DesktopState,
     run_id: &str,
     kind: AgentEventKind,
     node_id: Option<&str>,
     payload: Value,
 ) -> Result<(), String> {
-    let seq = repo
-        .list_agent_events(run_id, 0)
-        .map_err(|error| error.to_string())?
-        .last()
-        .map_or(1, |event| event.seq + 1);
-    repo.append_agent_event(AgentEventInsert {
-        run_id,
-        seq,
-        kind: kind.as_str(),
-        node_id,
-        parent_node_id: None,
-        payload: &payload,
-    })
-    .map_err(|error| error.to_string())?;
-    let _ = app.emit(
-        "lumo://agent-event",
-        json!({ "runId": run_id, "seq": seq, "kind": kind.as_str(), "nodeId": node_id, "payload": payload }),
-    );
-    Ok(())
+    let service = state
+        .agent_service
+        .lock()
+        .map_err(|_| "desktop agent service is unavailable")?
+        .clone()
+        .ok_or("desktop agent service is not initialized")?;
+    let mut draft = AgentEventDraft::new(run_id, kind).payload(payload);
+    if let Some(id) = node_id {
+        draft = draft.node_id(id);
+    }
+    service.publish_event(draft).await
 }
 
 #[cfg(test)]
@@ -558,18 +646,37 @@ mod tests {
     #[test]
     fn runtime_start_pause_resume_approve_and_cancel() {
         let mut runtime = DesktopAgentRuntime::default();
+        let control = AgentRunControl::default();
+        let approval_plan = plan(RiskLevel::L1);
+        control.prepare(
+            &approval_plan,
+            &[],
+            [("send".into(), RiskLevel::L1)].into_iter().collect(),
+        );
         let started = start_session(
             &mut runtime,
             "run-1".into(),
             plan(RiskLevel::L1),
             CancelToken::new(),
+            Some(control.clone()),
         )
         .unwrap();
-        assert_eq!(started.state, AgentRuntimeState::Running);
+        assert_eq!(started.state, AgentRuntimeState::WaitingApproval);
 
         pause_session(&mut runtime, "run-1").unwrap();
-        assert_eq!(runtime.sessions["run-1"].state, AgentRuntimeState::Paused);
-        approve_session(&mut runtime, "run-1", true, vec!["send".into()]).unwrap();
+        assert_eq!(
+            session_state(&runtime.sessions["run-1"]),
+            AgentRuntimeState::Paused
+        );
+        approve_session(
+            &mut runtime,
+            "run-1",
+            true,
+            vec!["send".into()],
+            &approval_plan.stable_hash(),
+            false,
+        )
+        .unwrap();
         assert!(runtime.sessions["run-1"].approval.as_ref().unwrap()["approved"] == true);
         resume_session(&mut runtime, "run-1").unwrap();
         let cancel = runtime.sessions["run-1"].cancel.clone();
@@ -596,5 +703,69 @@ mod tests {
         let restored = restore_from_events("run-1", &events).unwrap();
         assert_eq!(restored.state, AgentRuntimeState::Paused);
         assert_eq!(restored.unknown_nodes, ["send"]);
+    }
+
+    #[test]
+    fn live_session_reads_execution_terminal_state_and_rejects_further_controls() {
+        for status in [
+            LoopStatus::Completed,
+            LoopStatus::Failed,
+            LoopStatus::BudgetExceeded,
+            LoopStatus::Cancelled,
+        ] {
+            let mut runtime = DesktopAgentRuntime::default();
+            let control = AgentRunControl::default();
+            start_session(
+                &mut runtime,
+                "run-1".into(),
+                plan(RiskLevel::L0),
+                CancelToken::new(),
+                Some(control.clone()),
+            )
+            .unwrap();
+            control.finish(status);
+            let expected = match status {
+                LoopStatus::Completed => AgentRuntimeState::Completed,
+                LoopStatus::Cancelled => AgentRuntimeState::Cancelled,
+                _ => AgentRuntimeState::Failed,
+            };
+            assert_eq!(
+                session_dto("run-1", &runtime.sessions["run-1"]).state,
+                expected
+            );
+            assert!(pause_session(&mut runtime, "run-1").is_err());
+            assert!(resume_session(&mut runtime, "run-1").is_err());
+            assert!(cancel_session(&mut runtime, "run-1").is_err());
+        }
+    }
+
+    #[test]
+    fn restored_runs_reject_resume_and_approval_without_a_live_executor() {
+        let restored = restore_from_events(
+            "run-1",
+            &[event_row(
+                1,
+                "plan.created",
+                None,
+                json!({"plan":plan(RiskLevel::L2)}),
+            )],
+        )
+        .unwrap();
+        let mut runtime = DesktopAgentRuntime::default();
+        runtime.sessions.insert("run-1".into(), restored);
+        assert!(resume_session(&mut runtime, "run-1").is_err());
+        assert!(approve_session(
+            &mut runtime,
+            "run-1",
+            true,
+            vec!["send".into()],
+            "hash",
+            false
+        )
+        .is_err());
+        assert_eq!(
+            cancel_session(&mut runtime, "run-1").unwrap().state,
+            AgentRuntimeState::Cancelled
+        );
     }
 }

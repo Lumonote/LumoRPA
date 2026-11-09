@@ -74,3 +74,52 @@ async fn concurrent_publishers_get_unique_monotonic_sequences() {
     sequences.sort_unstable();
     assert_eq!(sequences, (1..=8).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn durable_sequence_lookup_does_not_decode_history_or_mix_runs() {
+    let repo = lumo_storage::Repo::open_in_memory().unwrap();
+    assert_eq!(repo.last_sequence("empty").unwrap(), 0);
+    for id in ["run-1", "other-run"] {
+        repo.create_agent_run(&lumo_storage::AgentRunRow {
+            id: id.into(),
+            profile_id: None,
+            utterance: None,
+            plan_json: None,
+            approval_json: None,
+            state: "running".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            error: None,
+        })
+        .unwrap();
+    }
+    for (id, seq) in [("run-1", 3), ("run-1", 1), ("other-run", 99)] {
+        repo.append_agent_event(lumo_storage::AgentEventInsert {
+            run_id: id,
+            seq,
+            kind: "run.started",
+            node_id: None,
+            parent_node_id: None,
+            payload: &serde_json::json!({}),
+        })
+        .unwrap();
+    }
+    // A damaged historical payload should remain visible to a reader, while
+    // sequence allocation only needs the indexed sequence column.
+    repo.with_raw(|conn| {
+        conn.execute(
+            "UPDATE agent_events SET payload='{' WHERE run_id='run-1' AND seq=1",
+            [],
+        )
+    })
+    .unwrap();
+    assert!(repo.list_agent_events("run-1", 0).is_err());
+    assert_eq!(repo.last_sequence("run-1").unwrap(), 3);
+    let sink = EventSink::new(Arc::new(repo.clone()), 8);
+    let event = sink
+        .publish(AgentEventDraft::new("run-1", AgentEventKind::RunCompleted))
+        .await
+        .unwrap();
+    assert_eq!(event.seq, 4);
+    assert_eq!(repo.list_agent_events("run-1", 3).unwrap()[0].seq, 4);
+}

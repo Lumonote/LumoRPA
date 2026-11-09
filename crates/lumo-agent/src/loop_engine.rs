@@ -11,9 +11,10 @@ use serde_json::json;
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
-    validate_invocation_result, AdapterRegistry, AgentBudget, AgentEventDraft, AgentEventKind,
-    AgentPlan, AgentProfile, BudgetExceeded, CapabilityCatalog, EventSink, InvocationContext,
-    InvocationError, InvocationRequest, InvocationResult, PlanValidator,
+    validate_invocation_result, AdapterRegistry, AgentBudget, AgentControlState, AgentEventDraft,
+    AgentEventKind, AgentPlan, AgentProfile, AgentRunControl, BudgetExceeded, CapabilityCatalog,
+    EventSink, InvocationContext, InvocationError, InvocationRequest, InvocationResult,
+    PlanValidator, RiskLevel,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ pub struct LoopEngine {
     profile: AgentProfile,
     adapters: AdapterRegistry,
     events: Option<Arc<dyn AgentEventPublisher>>,
+    control: Option<AgentRunControl>,
 }
 
 impl LoopEngine {
@@ -113,6 +115,7 @@ impl LoopEngine {
             profile,
             adapters,
             events: None,
+            control: None,
         }
     }
 
@@ -121,7 +124,37 @@ impl LoopEngine {
         self
     }
 
+    pub fn with_run_control(mut self, control: AgentRunControl) -> Self {
+        self.control = Some(control);
+        self
+    }
+
     pub async fn execute(
+        &self,
+        plan: AgentPlan,
+        budget: AgentBudget,
+        cancel: CancelToken,
+    ) -> LoopReport {
+        let report = self.execute_inner(plan, budget, cancel).await;
+        if let Some(control) = &self.control {
+            control.finish(report.status);
+        }
+        let kind = match report.status {
+            LoopStatus::Completed => Some(AgentEventKind::RunCompleted),
+            LoopStatus::Failed | LoopStatus::BudgetExceeded => Some(AgentEventKind::RunFailed),
+            LoopStatus::Cancelled => Some(AgentEventKind::RunCancelled),
+            LoopStatus::WaitingApproval => None,
+        };
+        if let Some(kind) = kind {
+            self.emit(
+                AgentEventDraft::new(&report.run_id, kind).payload(json!({"error": report.error})),
+            )
+            .await;
+        }
+        report
+    }
+
+    async fn execute_inner(
         &self,
         plan: AgentPlan,
         budget: AgentBudget,
@@ -143,7 +176,38 @@ impl LoopEngine {
                 );
             }
         };
-        if !validated.approval_required.is_empty() {
+        if let Some(control) = &self.control {
+            let capabilities = validated
+                .plan
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    self.catalog
+                        .get(&node.capability_id)
+                        .map(|capability| (*capability).clone())
+                })
+                .collect::<Vec<_>>();
+            let required = validated
+                .plan
+                .nodes
+                .iter()
+                .filter(|node| validated.approval_required.contains(&node.id))
+                .map(|node| (node.id.clone(), node.risk))
+                .collect();
+            control.prepare(&validated.plan, &capabilities, required);
+        }
+        for node in &validated.plan.nodes {
+            if validated.approval_required.contains(&node.id) {
+                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::PermissionRequested)
+                    .node_id(&node.id).payload(json!({
+                        "planHash": validated.plan.stable_hash(), "nodeIds": [&node.id],
+                        "capabilityId": node.capability_id, "arguments": node.arguments,
+                        "risk": node.risk, "strength": if node.risk == RiskLevel::L3 { "strengthened" } else { "standard" },
+                        "reason": "Agent policy requires confirmation before execution",
+                    }))).await;
+            }
+        }
+        if !validated.approval_required.is_empty() && self.control.is_none() {
             return LoopReport::terminal(
                 run_id,
                 LoopStatus::WaitingApproval,
@@ -154,6 +218,9 @@ impl LoopEngine {
                 }],
                 None,
             );
+        }
+        if let Err(status) = self.wait_until_running(&budget, &cancel).await {
+            return stopped_report(run_id, status, BTreeMap::new(), BTreeMap::new(), Vec::new());
         }
         let plan = validated.plan;
         let nodes = plan
@@ -169,6 +236,7 @@ impl LoopEngine {
         let budget = Arc::new(Mutex::new(budget));
         let max_parallel = self.profile.max_parallel.clamp(1, 4) as usize;
         let mut running = JoinSet::new();
+        let mut control_updates = self.control.as_ref().map(AgentRunControl::subscribe);
 
         self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunStarted))
             .await;
@@ -184,8 +252,6 @@ impl LoopEngine {
         loop {
             if cancel.is_cancelled() {
                 running.abort_all();
-                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCancelled))
-                    .await;
                 return LoopReport::terminal(
                     run_id,
                     LoopStatus::Cancelled,
@@ -197,8 +263,6 @@ impl LoopEngine {
             }
             if completed.len() == nodes.len() {
                 decisions.push(LoopDecision::Complete);
-                self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunCompleted))
-                    .await;
                 return LoopReport::terminal(
                     run_id,
                     LoopStatus::Completed,
@@ -209,7 +273,22 @@ impl LoopEngine {
                 );
             }
 
+            if running.is_empty() {
+                if let Err(status) = self
+                    .wait_until_running(&*budget.lock().await, &cancel)
+                    .await
+                {
+                    return stopped_report(run_id, status, outputs, attempts, decisions);
+                }
+            }
             while running.len() < max_parallel {
+                if self
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.state() != AgentControlState::Running)
+                {
+                    break;
+                }
                 let ready = pending
                     .iter()
                     .find(|id| {
@@ -277,6 +356,13 @@ impl LoopEngine {
             }
 
             if running.is_empty() {
+                if self
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.state() != AgentControlState::Running)
+                {
+                    continue;
+                }
                 return LoopReport::terminal(
                     run_id,
                     LoopStatus::Failed,
@@ -295,6 +381,12 @@ impl LoopEngine {
                 }
             };
             let joined = tokio::select! {
+                _ = async {
+                    match control_updates.as_mut() {
+                        Some(changes) => { let _ = changes.changed().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => continue,
                 _ = cancel.cancelled() => {
                     running.abort_all();
                     continue;
@@ -378,8 +470,6 @@ impl LoopEngine {
                             .payload(json!({"attempt": attempt, "error": error.to_string()})),
                     )
                     .await;
-                    self.emit(AgentEventDraft::new(&run_id, AgentEventKind::RunFailed))
-                        .await;
                     return LoopReport::terminal(
                         run_id,
                         LoopStatus::Failed,
@@ -389,6 +479,38 @@ impl LoopEngine {
                         Some(error.to_string()),
                     );
                 }
+            }
+        }
+    }
+
+    async fn wait_until_running(
+        &self,
+        budget: &AgentBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), LoopStatus> {
+        let Some(control) = &self.control else {
+            return Ok(());
+        };
+        let mut changes = control.subscribe();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(LoopStatus::Cancelled);
+            }
+            match control.state() {
+                AgentControlState::Running => return Ok(()),
+                AgentControlState::Cancelled => return Err(LoopStatus::Cancelled),
+                AgentControlState::Completed | AgentControlState::Failed => {
+                    return Err(LoopStatus::Failed)
+                }
+                AgentControlState::Paused | AgentControlState::WaitingApproval => {}
+            }
+            let remaining = budget
+                .remaining_runtime()
+                .map_err(|_| LoopStatus::BudgetExceeded)?;
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(LoopStatus::Cancelled),
+                _ = tokio::time::sleep(remaining) => return Err(LoopStatus::BudgetExceeded),
+                _ = changes.changed() => {}
             }
         }
     }
@@ -417,5 +539,27 @@ fn budget_report(
         attempts,
         decisions,
         Some(error.to_string()),
+    )
+}
+
+fn stopped_report(
+    run_id: String,
+    status: LoopStatus,
+    outputs: BTreeMap<String, InvocationResult>,
+    attempts: BTreeMap<String, u32>,
+    decisions: Vec<LoopDecision>,
+) -> LoopReport {
+    let error = match status {
+        LoopStatus::BudgetExceeded => "runtime budget exhausted while awaiting approval or resume",
+        LoopStatus::Cancelled => "cancelled",
+        _ => "execution control ended",
+    };
+    LoopReport::terminal(
+        run_id,
+        status,
+        outputs,
+        attempts,
+        decisions,
+        Some(error.into()),
     )
 }

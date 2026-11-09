@@ -318,7 +318,7 @@ async fn process_leased_job(app: &AppHandle, repo: &Repo, worker_id: &str, job: 
             return;
         }
     };
-    let execution = match service.start(input).await {
+    let execution = match service.start_background(input).await {
         Ok(execution) => execution,
         Err(error) => {
             let _ = repo.retry_job(

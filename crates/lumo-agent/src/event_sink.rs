@@ -12,9 +12,8 @@ pub trait AgentEventRepository: Send + Sync {
 
 impl AgentEventRepository for lumo_storage::Repo {
     fn last_sequence(&self, run_id: &str) -> Result<i64, String> {
-        self.list_agent_events(run_id, -1)
+        self.last_agent_event_sequence(run_id)
             .map_err(|error| error.to_string())
-            .map(|events| events.last().map(|event| event.seq).unwrap_or(0))
     }
 
     fn append_agent_event(&self, event: &AgentEvent) -> Result<(), String> {

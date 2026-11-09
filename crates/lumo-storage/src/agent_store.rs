@@ -73,6 +73,18 @@ impl Repo {
         Ok(())
     }
 
+    /// Read only the indexed sequence key; publishing an event must not decode
+    /// and allocate the complete run history on every append.
+    pub fn last_agent_event_sequence(&self, run_id: &str) -> Result<i64, StorageError> {
+        let conn = self.inner.lock();
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM agent_events WHERE run_id=?",
+            [run_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn list_agent_events(
         &self,
         run_id: &str,

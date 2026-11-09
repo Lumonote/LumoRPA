@@ -9,10 +9,11 @@ use std::{
 
 use async_trait::async_trait;
 use lumo_agent::{
-    AdapterRegistry, AgentBudget, AgentPlan, AgentProfile, AgentProfileDraft, CapabilityCatalog,
-    CapabilityDescriptor, CapabilityKind, CapabilitySource, InvocationAdapter, InvocationContext,
-    InvocationError, InvocationRequest, InvocationResult, LoopEngine, LoopStatus, PlanNode,
-    RiskLevel,
+    AdapterRegistry, AgentBudget, AgentControlState, AgentEventDraft, AgentEventKind,
+    AgentEventPublisher, AgentPlan, AgentProfile, AgentProfileDraft, AgentRunControl,
+    CapabilityCatalog, CapabilityDescriptor, CapabilityKind, CapabilitySource, InvocationAdapter,
+    InvocationContext, InvocationError, InvocationRequest, InvocationResult, LoopEngine,
+    LoopStatus, PlanNode, RiskLevel,
 };
 use lumo_core::CancelToken;
 use serde_json::json;
@@ -234,4 +235,279 @@ async fn budget_exhaustion_stops_before_an_unreserved_transition() {
         .await;
     assert_eq!(report.status, LoopStatus::BudgetExceeded);
     assert_eq!(*adapter.starts.lock().unwrap(), vec!["a"]);
+}
+
+#[tokio::test]
+async fn approval_waits_for_the_matching_plan_and_strengthened_confirmation() {
+    let adapter = Arc::new(TestAdapter {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        starts: Mutex::new(vec![]),
+        delay_ms: 1,
+        fail_first: false,
+    });
+    let mut descriptor = capability("send");
+    descriptor.risk = RiskLevel::L3;
+    descriptor.refresh_version_hash();
+    let catalog = CapabilityCatalog::new(vec![descriptor]).unwrap();
+    let profile = AgentProfile::validate(AgentProfileDraft::default(), &catalog).unwrap();
+    let mut adapters = AdapterRegistry::default();
+    adapters.register(adapter.clone());
+    let control = AgentRunControl::default();
+    let mut send = node("send", &[], 0, 100);
+    send.risk = RiskLevel::L3;
+    let plan = AgentPlan::new("approval", "send after approval", vec![send]);
+    let hash = plan.stable_hash();
+    let engine = LoopEngine::new(catalog, profile, adapters).with_run_control(control.clone());
+    let task = tokio::spawn(async move {
+        engine
+            .execute(
+                plan,
+                AgentBudget::new(5, 2_000, 100, 100),
+                CancelToken::new(),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "approval must retain a live execution to continue"
+    );
+    assert!(adapter.starts.lock().unwrap().is_empty());
+    assert_eq!(control.state(), AgentControlState::WaitingApproval);
+    assert!(control
+        .resolve_approval("stale", &["send".into()], true, true)
+        .is_err());
+    assert!(control
+        .resolve_approval(&hash, &["unknown".into()], true, true)
+        .is_err());
+    assert!(control
+        .resolve_approval(&hash, &["send".into()], true, false)
+        .is_err());
+    control
+        .resolve_approval(&hash, &["send".into()], true, true)
+        .unwrap();
+    assert_eq!(task.await.unwrap().status, LoopStatus::Completed);
+    assert_eq!(*adapter.starts.lock().unwrap(), ["send"]);
+    assert_eq!(control.state(), AgentControlState::Completed);
+    assert!(
+        control.pause().is_err(),
+        "completed sessions cannot be paused"
+    );
+}
+
+#[tokio::test]
+async fn paused_dispatch_is_bounded_by_runtime_and_cancellable() {
+    let adapter = Arc::new(TestAdapter {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        starts: Mutex::new(vec![]),
+        delay_ms: 1,
+        fail_first: false,
+    });
+    let control = AgentRunControl::default();
+    control.pause().unwrap();
+    let engine = engine(&["a"], adapter.clone()).with_run_control(control.clone());
+    let task = tokio::spawn(async move {
+        engine
+            .execute(
+                AgentPlan::new("pause", "pause", vec![node("a", &[], 0, 100)]),
+                AgentBudget::new(5, 30, 100, 100),
+                CancelToken::new(),
+            )
+            .await
+    });
+    assert_eq!(task.await.unwrap().status, LoopStatus::BudgetExceeded);
+    assert!(adapter.starts.lock().unwrap().is_empty());
+    assert_eq!(control.state(), AgentControlState::Failed);
+
+    let control = AgentRunControl::default();
+    control.pause().unwrap();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let report = self::engine(&["a"], adapter)
+        .with_run_control(control.clone())
+        .execute(
+            AgentPlan::new("cancel", "cancel", vec![node("a", &[], 0, 100)]),
+            AgentBudget::new(5, 2_000, 100, 100),
+            cancel,
+        )
+        .await;
+    assert_eq!(report.status, LoopStatus::Cancelled);
+    assert_eq!(control.state(), AgentControlState::Cancelled);
+}
+
+#[derive(Default)]
+struct RecordedEvents(Mutex<Vec<AgentEventDraft>>);
+
+#[async_trait]
+impl AgentEventPublisher for RecordedEvents {
+    async fn publish(&self, draft: AgentEventDraft) -> Result<(), String> {
+        self.0.lock().unwrap().push(draft);
+        Ok(())
+    }
+}
+
+async fn wait_for(mut predicate: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !predicate() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("execution reached expected state");
+}
+
+#[tokio::test]
+async fn pause_records_inflight_completion_and_resume_dispatches_dependents() {
+    let adapter = Arc::new(TestAdapter {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        starts: Mutex::new(vec![]),
+        delay_ms: 20,
+        fail_first: false,
+    });
+    let control = AgentRunControl::default();
+    let events = Arc::new(RecordedEvents::default());
+    let engine = engine(&["a", "b"], adapter.clone())
+        .with_run_control(control.clone())
+        .with_event_publisher(events.clone());
+    let task = tokio::spawn(async move {
+        engine
+            .execute(
+                AgentPlan::new(
+                    "pause-active",
+                    "pause active",
+                    vec![node("a", &[], 0, 500), node("b", &["a"], 0, 500)],
+                ),
+                AgentBudget::new(5, 2_000, 100, 100),
+                CancelToken::new(),
+            )
+            .await
+    });
+    wait_for(|| !adapter.starts.lock().unwrap().is_empty()).await;
+    control.pause().unwrap();
+    wait_for(|| {
+        events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == AgentEventKind::NodeCompleted)
+    })
+    .await;
+    assert_eq!(*adapter.starts.lock().unwrap(), ["a"]);
+    assert!(!task.is_finished());
+    assert_eq!(control.state(), AgentControlState::Paused);
+    control.resume().unwrap();
+    let report = task.await.unwrap();
+    assert_eq!(report.status, LoopStatus::Completed);
+    assert_eq!(*adapter.starts.lock().unwrap(), ["a", "b"]);
+    assert_eq!(
+        events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == AgentEventKind::RunCompleted)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn approval_persistence_failure_keeps_execution_blocked_and_decisions_atomic() {
+    let control = AgentRunControl::default();
+    let plan = AgentPlan::new("approval-atomic", "approval", vec![node("a", &[], 0, 100)]);
+    control.prepare(
+        &plan,
+        &[],
+        [("a".into(), RiskLevel::L2)].into_iter().collect(),
+    );
+    let hash = plan.stable_hash();
+    assert!(control
+        .resolve_approval_persisted(&hash, &["a".into()], true, false, |_| Err(
+            "disk full".into()
+        ))
+        .is_err());
+    assert_eq!(control.state(), AgentControlState::WaitingApproval);
+    assert!(control
+        .approval_snapshot()
+        .unwrap()
+        .approved_nodes
+        .is_empty());
+    control
+        .resolve_approval_persisted(&hash, &["a".into()], true, false, |snapshot| {
+            assert!(snapshot.approved_nodes.contains("a"));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(control.state(), AgentControlState::Running);
+    assert!(control
+        .resolve_approval_persisted(&hash, &["a".into()], true, false, |_| panic!(
+            "duplicate decision must not persist"
+        ))
+        .is_err());
+}
+
+#[tokio::test]
+async fn approval_rejection_and_expiration_emit_terminal_events_without_dispatch() {
+    for reject in [true, false] {
+        let adapter = Arc::new(TestAdapter {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            starts: Mutex::new(vec![]),
+            delay_ms: 1,
+            fail_first: false,
+        });
+        let control = AgentRunControl::default();
+        let events = Arc::new(RecordedEvents::default());
+        let engine = engine(&["a"], adapter.clone())
+            .with_run_control(control.clone())
+            .with_event_publisher(events.clone());
+        let mut pending = node("a", &[], 0, 100);
+        pending.risk = RiskLevel::L2;
+        let plan = AgentPlan::new("approval-terminal", "approval", vec![pending]);
+        let hash = plan.stable_hash();
+        let task = tokio::spawn(async move {
+            engine
+                .execute(
+                    plan,
+                    AgentBudget::new(5, if reject { 2_000 } else { 30 }, 100, 100),
+                    CancelToken::new(),
+                )
+                .await
+        });
+        wait_for(|| control.state() == AgentControlState::WaitingApproval).await;
+        if reject {
+            control
+                .resolve_approval(&hash, &["a".into()], false, false)
+                .unwrap();
+        }
+        let report = task.await.unwrap();
+        assert_eq!(
+            report.status,
+            if reject {
+                LoopStatus::Cancelled
+            } else {
+                LoopStatus::BudgetExceeded
+            }
+        );
+        assert!(adapter.starts.lock().unwrap().is_empty());
+        let terminal = if reject {
+            AgentEventKind::RunCancelled
+        } else {
+            AgentEventKind::RunFailed
+        };
+        assert_eq!(
+            events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == terminal)
+                .count(),
+            1
+        );
+    }
 }

@@ -189,40 +189,69 @@ export function renderFlowList() {
   renderFlowConfigCard();
 }
 
+let loadSequence = 0;
+
 export async function loadFlow(path = state.flowPath) {
   if (!path) return;
+  const request = ++loadSequence;
   if (path !== state.flowPath && state.flowPath && state.source !== state.savedSource) {
     const keep = confirm("当前流程有未保存修改。保存后再切换吗？\n\n确定 = 保存并切换\n取消 = 放弃修改并切换");
-    if (keep) await saveFlowSource();
+    if (keep) {
+      try { await saveFlowSource(); }
+      catch (error) {
+        if (request === loadSequence) reportError(error);
+        return;
+      }
+      if (request !== loadSequence) return;
+      if (state.source !== state.savedSource) {
+        setStatus("载入已停止：当前流程有新编辑", "warn");
+        return;
+      }
+    }
   }
-  state.flowPath = path;
-  renderFlowConfigCard();
+  if (request !== loadSequence) return;
+  const previousPath = state.flowPath;
+  const previousSource = state.source;
   setStatus("载入中…", "warn");
   try {
     const [flow, source] = await Promise.all([
       call("inspect_flow", { path }),
-      call("read_flow_source", { path }).catch((e) => `# ${e}`),
+      call("read_flow_source", { path }),
     ]);
-    state.flow = flow;
+    if (request !== loadSequence) return;
+    if (state.flowPath !== previousPath || state.source !== previousSource) {
+      setStatus("载入已停止：当前流程有新编辑", "warn");
+      return;
+    }
+    let ast = null;
+    try { ast = parseYaml(source); }
+    catch (error) { flow.valid = false; flow.error = String(error); }
+    if (path !== previousPath) {
+      state.breakpoints.clear();
+      state.debugRunId = null;
+      state.debugPausedAt = null;
+      const bar = $("debugBar");
+      if (bar) bar.style.display = "none";
+    }
+    state.flowPath = path;
+    state.flow = { ...flow, source: state.examples.find((f) => f.path === path)?.source || flow.source };
     state.source = source;
     state.savedSource = source;
-    state.ast = parseYaml(source);
+    state.ast = ast;
     state.selectedStepId = null;
     state.selectedStepPath = null;
     state.selectedStepPaths?.clear();
     resetHistory();
     $("flowTitle").textContent = flow.name || flow.id || flow.fileName || "未选择流程";
-    $("flowSubtitle").textContent = `${displayFlowSource(flow.source)} · ${flow.fileName} · ${flow.stepCount} 步 · ${flow.valid ? "校验通过" : "校验异常: " + flow.error}`;
-    if (flow.valid) {
-      $("inputsJson").value = pretty(defaultInputs(flow));
-    }
+    $("flowSubtitle").textContent = `${displayFlowSource(state.flow.source)} · ${flow.fileName} · ${flow.stepCount} 步 · ${flow.valid ? "校验通过" : "校验异常: " + flow.error}`;
+    $("inputsJson").value = pretty(flow.valid ? defaultInputs(flow) : {});
     renderFlowList();
     renderFlowConfigCard();
     renderActiveView();
     renderInspector();
     setStatus(flow.valid ? "已载入" : "校验异常", flow.valid ? "ok" : "bad");
   } catch (error) {
-    reportError(error);
+    if (request === loadSequence) reportError(error);
   }
 }
 
@@ -292,14 +321,41 @@ export async function ensureCurrentFlowSaved() {
   return persistFlowSource(path, source);
 }
 
+const pendingSaves = new Map();
+
 async function persistFlowSource(path, source) {
+  let pending = pendingSaves.get(path);
+  if (!pending) {
+    pending = {
+      path, tail: null, savedPath: null,
+      example: state.flow?.source === "example"
+        || state.examples.some((flow) => flow.path === path && flow.source === "example"),
+    };
+    pendingSaves.set(path, pending);
+  }
+  // An older disk write must finish before a newer snapshot is saved. Example
+  // copies share the same queue while their original path is still in flight.
+  const persist = () => writeFlowSource(pending, source);
+  const saving = pending.tail ? pending.tail.catch(() => {}).then(persist) : persist();
+  pending.tail = saving;
+  try { return await saving; }
+  finally {
+    if (pending.tail === saving) {
+      if (pendingSaves.get(pending.path) === pending) pendingSaves.delete(pending.path);
+      if (pendingSaves.get(pending.savedPath) === pending) pendingSaves.delete(pending.savedPath);
+    }
+  }
+}
+
+async function writeFlowSource(pending, source) {
   // Bundled examples are read-only. Keep the operator's edits in a user copy
   // and return its path so validate/run reads exactly the document just saved.
-  const example = state.flow?.source === "example"
-    || state.examples.some((flow) => flow.path === path && flow.source === "example");
-  const savedPath = example ? await call("duplicate_flow", { path }) : path;
+  const { path, example } = pending;
+  const savedPath = pending.savedPath || (example ? await call("duplicate_flow", { path }) : path);
+  pending.savedPath = savedPath;
+  pendingSaves.set(savedPath, pending);
   await call("save_flow_source", { path: savedPath, source });
-  if (state.flowPath === path) {
+  if (state.flowPath === path || state.flowPath === savedPath) {
     state.flowPath = savedPath;
     state.savedSource = source;
     if (example) state.flow = { ...state.flow, path: savedPath, source: "user", fileName: savedPath.split(/[\\/]/).pop() };

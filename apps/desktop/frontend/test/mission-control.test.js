@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { URL } from "node:url";
 import { mountMissionControl, updateMissionControl, renderTopology, renderNodeDetail, renderRunHistoryOptions, renderRunMetrics, renderVoiceHistory } from "../src/js/mission-control.js";
+import { createRunProjection, applyAgentEvent } from "../src/js/agent-events.js";
 
 const projection = {
   status: "running",
@@ -71,4 +72,59 @@ test("clicking a node after a live update uses the current projection", (context
   assert.match(boxes["[data-mc-detail]"].innerHTML, /fresh result/);
   assert.match(boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
   assert.doesNotMatch(boxes["[data-mc-topology]"].innerHTML, /is-running/);
+});
+
+function missionRoot(context) {
+  const previousDocument = globalThis.document;
+  context.after(() => { globalThis.document = previousDocument; });
+  const handlers = {};
+  const boxes = Object.fromEntries(["[data-mc-topology]", "[data-mc-detail]", "[data-mc-metrics]", "[data-mc-log]", "[data-mc-control-error]"].map((name) => [name, { innerHTML: "", textContent: "" }]));
+  const root = {
+    dataset: {}, classList: { toggle() {} },
+    querySelector: (name) => boxes[name] || null,
+    addEventListener: (name, handler) => { handlers[name] = handler; },
+  };
+  globalThis.document = { createElement: () => ({ dataset: {}, setAttribute() {}, addEventListener() {} }) };
+  return { root, boxes, handlers };
+}
+
+test("resolved permissions and terminal runs do not leave actionable confirmation cards", (context) => {
+  const { root, boxes } = missionRoot(context);
+  let p = createRunProjection("r1");
+  p = applyAgentEvent(p, { seq: 1, kind: "permission.requested", node_id: "send", payload: { planHash: "hash", nodeIds: ["send"], capabilityId: "mcp:mail/send", risk: "L2", arguments: { body: "report" } } });
+  updateMissionControl(root, p);
+  assert.match(boxes["[data-mc-detail]"].innerHTML, /data-agent-action="approve"/);
+  p = applyAgentEvent(p, { seq: 2, kind: "permission.resolved", payload: { planHash: "hash", nodeIds: ["send"], approved: true } });
+  updateMissionControl(root, p);
+  assert.doesNotMatch(boxes["[data-mc-detail]"].innerHTML, /mc-confirmation/);
+  p = applyAgentEvent(p, { seq: 3, kind: "run.completed" });
+  updateMissionControl(root, p);
+  assert.doesNotMatch(boxes["[data-mc-detail]"].innerHTML, /data-agent-action/);
+});
+
+test("failed run controls restore the button and show the command error", async (context) => {
+  const { root, boxes, handlers } = missionRoot(context);
+  const control = { dataset: { agentAction: "pause", runId: "r1" }, disabled: false };
+  mountMissionControl(root, { ...projection, runId: "r1" }, async (command) => {
+    if (command === "agent_pause") throw new Error("connection unavailable");
+    return [];
+  });
+  await handlers.click({ target: { closest: (selector) => selector === "[data-agent-action]" ? control : null } });
+  assert.equal(control.disabled, false);
+  assert.match(boxes["[data-mc-control-error]"].textContent, /connection unavailable/);
+});
+
+test("a command error remains visible when progress rerenders the detail during IPC", async (context) => {
+  const { root, boxes, handlers } = missionRoot(context);
+  let rejectCommand;
+  const control = { dataset: { agentAction: "pause", runId: "r1" }, disabled: false };
+  mountMissionControl(root, { ...projection, runId: "r1" }, async (command) => {
+    if (command === "agent_pause") return new Promise((_resolve, reject) => { rejectCommand = reject; });
+    return [];
+  });
+  const request = handlers.click({ target: { closest: (selector) => selector === "[data-agent-action]" ? control : null } });
+  boxes["[data-mc-control-error]"] = { textContent: "" };
+  rejectCommand(new Error("pause unavailable"));
+  await request;
+  assert.match(boxes["[data-mc-control-error]"].textContent, /pause unavailable/);
 });

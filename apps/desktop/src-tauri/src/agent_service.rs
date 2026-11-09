@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use lumo_agent::{
     AdapterRegistry, AgentBudget, AgentEvent, AgentEventDraft, AgentEventKind, AgentEventPublisher,
-    AgentHarness, AgentPlan, AgentProfile, AgentProfileDraft, AiPlanModel, CapabilityCatalog,
-    CapabilityDescriptor, CapabilitySource, ContextualFlowVmFactory, EventSink, FlowAdapter,
-    InvocationError, LoopEngine, LoopReport, LoopStatus, McpAdapter, McpClientInvoker,
+    AgentHarness, AgentPlan, AgentProfile, AgentProfileDraft, AgentRunControl, AiPlanModel,
+    CapabilityCatalog, CapabilityDescriptor, CapabilitySource, ContextualFlowVmFactory, EventSink,
+    FlowAdapter, InvocationError, LoopEngine, LoopReport, LoopStatus, McpAdapter, McpClientInvoker,
     McpConnectionProfile, McpProfileResolver, Planner, PlannerBackend, RankedCandidate, RiskLevel,
     RouteOutcome, Router, SkillAdapter,
 };
@@ -90,20 +90,62 @@ impl DesktopAgentEventEmitter for TauriDesktopAgentEventEmitter {
     }
 }
 
-#[derive(Clone)]
 struct PersistingDesktopEventPublisher {
     sink: EventSink,
     emitter: Arc<dyn DesktopAgentEventEmitter>,
+    repo: Repo,
+    gate: tokio::sync::Mutex<()>,
 }
 
 #[async_trait]
 impl AgentEventPublisher for PersistingDesktopEventPublisher {
     async fn publish(&self, draft: AgentEventDraft) -> Result<(), String> {
+        let _guard = self.gate.lock().await;
         let event = self
             .sink
             .publish(draft)
             .await
             .map_err(|error| error.to_string())?;
+        let state = match event.kind {
+            AgentEventKind::PermissionRequested => Some(("waiting_approval", false)),
+            AgentEventKind::RunPaused => Some(("paused", false)),
+            AgentEventKind::RunStarted => Some(("running", false)),
+            AgentEventKind::RunResumed => Some((
+                if event.payload.get("state").and_then(Value::as_str) == Some("waitingApproval") {
+                    "waiting_approval"
+                } else {
+                    "running"
+                },
+                false,
+            )),
+            AgentEventKind::RunCompleted => Some(("completed", true)),
+            AgentEventKind::RunFailed => Some(("failed", true)),
+            AgentEventKind::RunCancelled => Some(("cancelled", true)),
+            _ => None,
+        };
+        if let Some((state, terminal)) = state {
+            if terminal {
+                self.repo
+                    .update_agent_run_state(
+                        &event.run_id,
+                        state,
+                        Some(Utc::now()),
+                        event.payload.get("error").and_then(Value::as_str),
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else {
+                // A control request may race with task completion. Never let a
+                // late pause/resume event reopen a finished run in history.
+                self.repo
+                    .with_raw(|connection| {
+                        connection.execute(
+                            "UPDATE agent_runs SET state=? WHERE id=? AND finished_at IS NULL",
+                            rusqlite::params![state, event.run_id],
+                        )
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         self.emitter.emit(&event);
         Ok(())
     }
@@ -113,7 +155,7 @@ impl AgentEventPublisher for PersistingDesktopEventPublisher {
 pub struct DesktopAgentService {
     factory: Arc<dyn DesktopAgentFactory>,
     repo: Repo,
-    events: Arc<dyn AgentEventPublisher>,
+    events: Arc<PersistingDesktopEventPublisher>,
 }
 
 impl DesktopAgentService {
@@ -125,6 +167,8 @@ impl DesktopAgentService {
         let events = Arc::new(PersistingDesktopEventPublisher {
             sink: EventSink::new(Arc::new(repo.clone()), 256),
             emitter,
+            repo: repo.clone(),
+            gate: tokio::sync::Mutex::new(()),
         });
         Self {
             factory,
@@ -134,6 +178,59 @@ impl DesktopAgentService {
     }
 
     pub async fn start(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
+        self.start_inner(input, true).await
+    }
+
+    pub async fn start_background(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
+        self.start_inner(input, false).await
+    }
+
+    pub(super) async fn publish_event(&self, draft: AgentEventDraft) -> Result<(), String> {
+        self.events.publish(draft).await
+    }
+
+    pub(super) async fn resolve_approval(
+        &self,
+        run_id: &str,
+        control: &AgentRunControl,
+        plan_hash: &str,
+        node_ids: &[String],
+        approved: bool,
+        strengthened: bool,
+    ) -> Result<(), String> {
+        let _guard = self.events.gate.lock().await;
+        let mut event = None;
+        control.resolve_approval_persisted(plan_hash, node_ids, approved, strengthened, |snapshot| {
+            let payload = json!({"planHash":plan_hash,"nodeIds":node_ids,"approved":approved,"strengthened":strengthened});
+            let encoded_snapshot = serde_json::to_string(snapshot).map_err(|error| error.to_string())?;
+            let encoded_payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+            let persisted = self.repo.with_raw(|connection| {
+                let transaction = connection.unchecked_transaction()?;
+                let last_sequence: i64 = transaction.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE run_id=?", [run_id], |row| row.get(0))?;
+                let seq = last_sequence.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+                let updated = transaction.execute("UPDATE agent_runs SET approval_json=? WHERE id=? AND finished_at IS NULL", rusqlite::params![encoded_snapshot, run_id])?;
+                if updated == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+                let timestamp = Utc::now();
+                transaction.execute("INSERT INTO agent_events(run_id,seq,kind,node_id,parent_node_id,payload,created_at) VALUES (?,?,?,NULL,NULL,?,?)", rusqlite::params![run_id,seq,AgentEventKind::PermissionResolved.as_str(),encoded_payload,timestamp.timestamp_millis()])?;
+                transaction.commit()?;
+                Ok(AgentEvent { session_id: run_id.into(), run_id: run_id.into(), seq, timestamp, kind: AgentEventKind::PermissionResolved, node_id: None, parent_node_id: None, payload })
+            }).map_err(|error| error.to_string())?;
+            event = Some(persisted);
+            Ok(())
+        })?;
+        // Execution can now continue, but its events must wait for this gate so
+        // live subscribers observe the decision before any resulting work.
+        self.events
+            .emitter
+            .emit(&event.expect("approval persistence produced an event"));
+        Ok(())
+    }
+
+    async fn start_inner(
+        &self,
+        input: AgentStartInput,
+        interactive: bool,
+    ) -> Result<AgentExecution, String> {
         let utterance = input.utterance.trim();
         if utterance.is_empty() {
             return Err("agent utterance must not be empty".into());
@@ -182,10 +279,13 @@ impl DesktopAgentService {
         }
 
         let cancel = CancelToken::new();
-        let harness = AgentHarness::new(
-            LoopEngine::new(catalog, profile.clone(), adapters)
-                .with_event_publisher(self.events.clone()),
-        );
+        let control = interactive.then(AgentRunControl::default);
+        let mut engine = LoopEngine::new(catalog, profile.clone(), adapters)
+            .with_event_publisher(self.events.clone());
+        if let Some(control) = &control {
+            engine = engine.with_run_control(control.clone());
+        }
+        let harness = AgentHarness::new(engine);
         let budget = AgentBudget::new(
             profile.max_steps,
             profile.max_runtime_ms,
@@ -214,6 +314,7 @@ impl DesktopAgentService {
             run_id,
             plan,
             cancel,
+            control,
             _completion: completion,
         })
     }
@@ -244,6 +345,7 @@ pub struct AgentExecution {
     run_id: String,
     pub plan: AgentPlan,
     pub cancel: CancelToken,
+    pub control: Option<AgentRunControl>,
     _completion: tokio::task::JoinHandle<Result<LoopReport, String>>,
 }
 
@@ -262,8 +364,8 @@ impl AgentExecution {
             .map_err(|error| format!("agent execution task failed: {error}"))?
     }
 
-    pub fn into_session_parts(self) -> (String, AgentPlan, CancelToken) {
-        (self.run_id, self.plan, self.cancel)
+    pub fn into_session_parts(self) -> (String, AgentPlan, CancelToken, Option<AgentRunControl>) {
+        (self.run_id, self.plan, self.cancel, self.control)
     }
 }
 
@@ -1038,5 +1140,308 @@ spec:
         assert_eq!(state, "completed");
         assert!(finished_at.is_some());
         assert!(error.is_none());
+    }
+
+    fn approval_input() -> AgentStartInput {
+        AgentStartInput {
+            utterance: "approval test".into(),
+            profile_id: None,
+            conversation_id: None,
+            conversation_context: Vec::new(),
+            supplied_plan: Some(AgentPlan::new(
+                "supplied",
+                "send with approval",
+                vec![PlanNode {
+                    id: "send".into(),
+                    depends_on: Vec::new(),
+                    capability_id: "flow:daily-report".into(),
+                    arguments: json!({}),
+                    risk: RiskLevel::L3,
+                    timeout_ms: 1_000,
+                    retry_limit: 0,
+                    expected_output_schema: None,
+                }],
+            )),
+        }
+    }
+
+    async fn wait_for_approval(execution: &AgentExecution) -> AgentRunControl {
+        let control = execution
+            .control
+            .clone()
+            .expect("interactive execution has control");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while control.state() != lumo_agent::AgentControlState::WaitingApproval {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        control
+    }
+
+    #[tokio::test]
+    async fn concurrent_approvals_persist_one_decision_before_dispatch_and_completion() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let execution = service.start(approval_input()).await.unwrap();
+        let control = wait_for_approval(&execution).await;
+        let run_id = execution.run_id().to_string();
+        let hash = execution.plan.stable_hash();
+        let ids = vec!["send".into()];
+        assert!(service
+            .resolve_approval(&run_id, &control, "stale", &ids, true, true)
+            .await
+            .is_err());
+        assert!(service
+            .resolve_approval(&run_id, &control, &hash, &ids, true, false)
+            .await
+            .is_err());
+        let (first, second) = tokio::join!(
+            service.resolve_approval(&run_id, &control, &hash, &ids, true, true),
+            service.resolve_approval(&run_id, &control, &hash, &ids, true, true),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::Completed
+        );
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        let resolved = events
+            .iter()
+            .filter(|event| event.kind == "permission.resolved")
+            .collect::<Vec<_>>();
+        assert_eq!(resolved.len(), 1);
+        let started = events
+            .iter()
+            .find(|event| event.kind == "node.started")
+            .unwrap();
+        assert!(resolved[0].seq < started.seq);
+        let snapshot: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT approval_json FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        let snapshot: lumo_agent::ApprovalSnapshot = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(snapshot.plan_hash, hash);
+        assert!(snapshot.approved_nodes.contains("send"));
+        assert!(service
+            .resolve_approval(&run_id, &control, &hash, &ids, true, true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_transaction_failure_keeps_waiting_without_partial_audit_or_snapshot() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let execution = service.start(approval_input()).await.unwrap();
+        let control = wait_for_approval(&execution).await;
+        let run_id = execution.run_id().to_string();
+        let hash = execution.plan.stable_hash();
+        repo.with_raw(|connection| connection.execute_batch("CREATE TRIGGER reject_approval BEFORE INSERT ON agent_events WHEN NEW.kind='permission.resolved' BEGIN SELECT RAISE(ABORT, 'approval write failed'); END")).unwrap();
+        assert!(service
+            .resolve_approval(&run_id, &control, &hash, &["send".into()], true, true)
+            .await
+            .is_err());
+        assert_eq!(
+            control.state(),
+            lumo_agent::AgentControlState::WaitingApproval
+        );
+        assert!(control
+            .approval_snapshot()
+            .unwrap()
+            .approved_nodes
+            .is_empty());
+        let persisted_snapshot: Option<String> = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT approval_json FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            persisted_snapshot.is_none(),
+            "approval update rolled back with the event"
+        );
+        assert!(!repo
+            .list_agent_events(&run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.kind.as_str(), "node.started" | "permission.resolved")));
+        repo.with_raw(|connection| connection.execute_batch("DROP TRIGGER reject_approval"))
+            .unwrap();
+        service
+            .resolve_approval(&run_id, &control, &hash, &["send".into()], false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::Cancelled
+        );
+        assert_eq!(control.state(), lumo_agent::AgentControlState::Cancelled);
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert!(!events.iter().any(|event| event.kind == "node.started"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "run.cancelled")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn background_approval_returns_promptly_without_retaining_interactive_wait() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let execution = service.start_background(approval_input()).await.unwrap();
+        assert!(execution.control.is_none());
+        let run_id = execution.run_id().to_string();
+        let report = tokio::time::timeout(Duration::from_secs(1), execution.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.status, LoopStatus::WaitingApproval);
+        let state: String = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT state FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(state, "waiting_approval");
+        assert!(!repo
+            .list_agent_events(&run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "node.started"));
+    }
+
+    #[tokio::test]
+    async fn late_control_events_preserve_persisted_terminal_state() {
+        let repo = Repo::open_in_memory().unwrap();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let execution = service
+            .start(AgentStartInput {
+                utterance: "运行日报".into(),
+                profile_id: None,
+                supplied_plan: None,
+                conversation_id: None,
+                conversation_context: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let run_id = execution.run_id().to_string();
+        execution.wait().await.unwrap();
+        for kind in [
+            AgentEventKind::RunPaused,
+            AgentEventKind::RunResumed,
+            AgentEventKind::PermissionRequested,
+        ] {
+            service
+                .publish_event(AgentEventDraft::new(&run_id, kind))
+                .await
+                .unwrap();
+        }
+        let (state, finished_at): (String, Option<i64>) = repo
+            .with_raw(|connection| {
+                connection.query_row(
+                    "SELECT state,finished_at FROM agent_runs WHERE id=?",
+                    [&run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(state, "completed");
+        assert!(finished_at.is_some());
+    }
+
+    #[derive(Default)]
+    struct RecordingEmitter(std::sync::Mutex<Vec<AgentEvent>>);
+
+    impl DesktopAgentEventEmitter for RecordingEmitter {
+        fn emit(&self, event: &AgentEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_publishers_emit_the_same_order_as_persisted_sequences() {
+        let repo = Repo::open_in_memory().unwrap();
+        let emitter = Arc::new(RecordingEmitter::default());
+        let service =
+            DesktopAgentService::new(Arc::new(FakeFactory::new()), repo.clone(), emitter.clone());
+        let execution = service.start(approval_input()).await.unwrap();
+        let control = wait_for_approval(&execution).await;
+        let run_id = execution.run_id().to_string();
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..16 {
+            let service = service.clone();
+            let run_id = run_id.clone();
+            tasks.spawn(async move {
+                service
+                    .publish_event(
+                        AgentEventDraft::new(run_id, AgentEventKind::ToolResult)
+                            .payload(json!({"index":index})),
+                    )
+                    .await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        service
+            .resolve_approval(
+                &run_id,
+                &control,
+                &execution.plan.stable_hash(),
+                &["send".into()],
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        execution.wait().await.unwrap();
+        let persisted = repo
+            .list_agent_events(&run_id, 0)
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>();
+        let emitted = emitter
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.run_id == run_id)
+            .map(|event| event.seq)
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, emitted);
+        assert_eq!(persisted, (1..=persisted.len() as i64).collect::<Vec<_>>());
     }
 }

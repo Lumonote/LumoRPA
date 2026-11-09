@@ -35,3 +35,48 @@ test("tracks retries replans and terminal node state", () => {
   assert.equal(p.nodes.a.attempt, 2);
   assert.equal(p.replans.length, 1);
 });
+
+test("pending approvals survive log truncation and clear only for the resolved node and plan", () => {
+  let p = createRunProjection("run-approval");
+  let seq = 0;
+  for (const nodeId of ["a", "b"]) {
+    p = applyAgentEvent(p, { seq: ++seq, kind: "permission.requested", node_id: nodeId, payload: { planHash: "hash", nodeIds: [nodeId], risk: "L2" } });
+  }
+  for (let i = 0; i < 310; i++) p = applyAgentEvent(p, { seq: ++seq, kind: "node.progress", nodeId: "c", payload: {} });
+  assert.equal(p.pendingApprovals.length, 2);
+  p = applyAgentEvent(p, { seq: ++seq, kind: "permission.resolved", payload: { planHash: "old", nodeIds: ["a"], approved: true } });
+  assert.equal(p.pendingApprovals.length, 2);
+  p = applyAgentEvent(p, { seq: ++seq, kind: "permission.resolved", payload: { planHash: "hash", nodeIds: ["a"], approved: true } });
+  assert.deepEqual(p.pendingApprovals.map((event) => event.node_id), ["b"]);
+  assert.equal(p.status, "waiting");
+  p = applyAgentEvent(p, { seq: ++seq, kind: "run.cancelled", payload: {} });
+  assert.deepEqual(p.pendingApprovals, []);
+});
+
+test("a paused run stays paused when an approval is resolved", () => {
+  let p = createRunProjection("paused-approval");
+  p = applyAgentEvent(p, { seq: 1, kind: "permission.requested", nodeId: "a", payload: { planHash: "hash" } });
+  p = applyAgentEvent(p, { seq: 2, kind: "run.paused" });
+  p = applyAgentEvent(p, { seq: 3, kind: "permission.resolved", payload: { planHash: "hash", nodeIds: ["a"], approved: true } });
+  assert.equal(p.status, "paused");
+});
+
+test("foreign run approvals cannot replace the active run projection", () => {
+  const p = createRunProjection("active");
+  const foreign = applyAgentEvent(p, { run_id: "background", seq: 1, kind: "permission.requested", node_id: "a", payload: { planHash: "hash" } });
+  assert.equal(foreign, p);
+});
+
+test("late pause and resume events cannot reopen a terminal run", () => {
+  let p = createRunProjection("terminal");
+  p = applyAgentEvent(p, { seq: 1, kind: "run.completed", payload: {} });
+  p = applyAgentEvent(p, { seq: 2, kind: "run.paused", payload: {} });
+  p = applyAgentEvent(p, { seq: 3, kind: "run.resumed", payload: {} });
+  p = applyAgentEvent(p, { seq: 4, kind: "node.started", nodeId: "late", payload: {} });
+  p = applyAgentEvent(p, { seq: 5, kind: "plan.revised", payload: { nodes: [] } });
+  assert.equal(p.status, "completed");
+  assert.equal(p.paused, false);
+  assert.equal(p.activeNodeId, null);
+  assert.equal(p.seq, 5);
+  assert.equal(p.events.length, 5);
+});
