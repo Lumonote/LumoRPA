@@ -3,21 +3,22 @@ use chrono::Utc;
 use lumo_agent::{
     AdapterRegistry, AgentBudget, AgentEvent, AgentEventDraft, AgentEventKind, AgentEventPublisher,
     AgentHarness, AgentPlan, AgentProfile, AgentProfileDraft, AiPlanModel, CapabilityCatalog,
-    CapabilityDescriptor, CapabilitySource, EventSink, FlowAdapter, InvocationError, LoopEngine,
-    LoopReport, LoopStatus, McpAdapter, McpClientInvoker, McpConnectionProfile, McpProfileResolver,
-    Planner, PlannerBackend, RankedCandidate, RiskLevel, RouteOutcome, Router, SkillAdapter,
+    CapabilityDescriptor, CapabilitySource, ContextualFlowVmFactory, EventSink, FlowAdapter,
+    InvocationError, LoopEngine, LoopReport, LoopStatus, McpAdapter, McpClientInvoker,
+    McpConnectionProfile, McpProfileResolver, Planner, PlannerBackend, RankedCandidate, RiskLevel,
+    RouteOutcome, Router, SkillAdapter,
 };
 use lumo_ai::{config::ProvidersConfig, AiRouter, ChatMessage, ChatRequest, Role};
-use lumo_core::{CancelToken, FlowVm};
+use lumo_core::{CancelToken, HumanPrompter};
 use lumo_storage::{AgentRunRow, Repo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
-use tauri::{Emitter, Wry};
+use tauri::{Emitter, Manager, Wry};
 
 use super::{
-    agent_management_commands::load_active_improvement_overlays, app_home, build_action_registry,
-    list_flow_library, load_skill_registry, mcp_commands, providers_path,
+    agent_management_commands::load_active_improvement_overlays, app_home, list_flow_library,
+    load_skill_registry, mcp_commands, providers_path,
 };
 
 type AppHandle = tauri::AppHandle<Wry>;
@@ -457,6 +458,16 @@ fn string_array(value: &Value) -> Option<Vec<String>> {
     })
 }
 
+fn desktop_vm_factory(
+    home: PathBuf,
+    repo: Repo,
+    prompter: Option<Arc<dyn HumanPrompter>>,
+) -> ContextualFlowVmFactory {
+    Arc::new(move |flow, path| {
+        super::execution::desktop_flow_vm(&home, path, flow, Some(repo.clone()), prompter.clone())
+    })
+}
+
 #[async_trait]
 impl DesktopAgentFactory for ProductionDesktopAgentFactory {
     async fn catalog(&self, _profile_id: Option<&str>) -> Result<CapabilityCatalog, String> {
@@ -470,13 +481,12 @@ impl DesktopAgentFactory for ProductionDesktopAgentFactory {
     }
 
     async fn adapters(&self, _profile: &AgentProfile) -> Result<AdapterRegistry, String> {
-        let home = self.home.clone();
-        let repo = self.repo.clone();
-        let vm_factory =
-            Arc::new(move || FlowVm::new(build_action_registry(&home, None), Some(repo.clone())));
+        let state = self.app.state::<super::DesktopState>();
+        let prompter = super::prompter::desktop_prompter(&self.app, &state);
+        let vm_factory = desktop_vm_factory(self.home.clone(), self.repo.clone(), Some(prompter));
         let mut adapters = AdapterRegistry::default();
-        adapters.register(Arc::new(FlowAdapter::new(vm_factory.clone())));
-        adapters.register(Arc::new(SkillAdapter::new(
+        adapters.register(Arc::new(FlowAdapter::new_contextual(vm_factory.clone())));
+        adapters.register(Arc::new(SkillAdapter::new_contextual(
             load_skill_registry(&self.home, None),
             vm_factory,
         )));
@@ -727,6 +737,146 @@ mod tests {
         };
         descriptor.refresh_version_hash();
         descriptor
+    }
+
+    struct TestHumanPrompter;
+
+    #[async_trait]
+    impl lumo_core::HumanPrompter for TestHumanPrompter {
+        async fn prompt(
+            &self,
+            _request: lumo_core::HumanPromptRequest,
+        ) -> Result<lumo_core::HumanResponse, lumo_core::StepError> {
+            Ok(lumo_core::HumanResponse {
+                value: json!("human-result"),
+                by: None,
+                comment: None,
+            })
+        }
+    }
+
+    const CHILD_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: child-human }
+spec:
+  steps:
+    - id: ask
+      action: human.input
+      with: { message: "Enter a result" }
+"#;
+
+    const PARENT_FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: parent-flow }
+spec:
+  steps:
+    - id: child
+      action: flow.call
+      with: { path: child.lumoflow.yaml }
+"#;
+
+    async fn invoke_host_adapter(
+        adapter: &dyn InvocationAdapter,
+        source: CapabilitySource,
+        repo: &Repo,
+    ) {
+        let mut descriptor = capability("host-regression", "host-regression");
+        descriptor.source = source;
+        descriptor.refresh_version_hash();
+        let result = adapter
+            .invoke(
+                InvocationRequest {
+                    capability: descriptor,
+                    arguments: json!({}),
+                    attempt: 1,
+                    timeout_ms: 5_000,
+                },
+                InvocationContext::new("agent-parent", "agent-node"),
+            )
+            .await
+            .expect("Agent host must run sibling flow with human interaction");
+        assert_eq!(
+            result
+                .output
+                .pointer("/child/result/outputs/ask/result/value"),
+            Some(&json!("human-result")),
+            "relative child flow must inherit the desktop human prompter"
+        );
+        let runs = repo.list_runs(10).unwrap();
+        assert_eq!(
+            runs.len(),
+            2,
+            "parent and child remain independently inspectable"
+        );
+        assert!(runs.iter().all(|run| run.state == "ok"));
+        let child = runs
+            .iter()
+            .find(|run| run.flow_id == "child-human")
+            .unwrap();
+        let steps = repo.list_steps(&child.id).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "ask");
+        assert_eq!(steps[0].state, "ok");
+    }
+
+    #[tokio::test]
+    async fn agent_flow_uses_document_directory_and_desktop_human_prompter() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workflows = temp.path().join("workflows");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workflows).unwrap();
+        let path = workflows.join("parent.lumoflow.yaml");
+        std::fs::write(&path, PARENT_FLOW).unwrap();
+        std::fs::write(workflows.join("child.lumoflow.yaml"), CHILD_FLOW).unwrap();
+        let repo = Repo::open_in_memory().unwrap();
+        let adapter = FlowAdapter::new_contextual(desktop_vm_factory(
+            home,
+            repo.clone(),
+            Some(Arc::new(TestHumanPrompter)),
+        ));
+        invoke_host_adapter(
+            &adapter,
+            CapabilitySource::Flow {
+                path: path.display().to_string(),
+            },
+            &repo,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_skill_uses_skill_directory_and_desktop_human_prompter() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let skill_dir = temp.path().join("installed-skill");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            format!("---\nname: parent-skill\n---\n```yaml\n{PARENT_FLOW}\n```\n"),
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("child.lumoflow.yaml"), CHILD_FLOW).unwrap();
+        let skills = Arc::new(lumo_skills::SkillRegistry::new());
+        skills.insert(lumo_skills::loader::load_skill_file(&path).unwrap());
+        let repo = Repo::open_in_memory().unwrap();
+        let adapter = SkillAdapter::new_contextual(
+            skills,
+            desktop_vm_factory(home, repo.clone(), Some(Arc::new(TestHumanPrompter))),
+        );
+        invoke_host_adapter(
+            &adapter,
+            CapabilitySource::Skill {
+                name: "parent-skill".into(),
+                source: path.display().to_string(),
+            },
+            &repo,
+        )
+        .await;
     }
 
     struct FakeAdapter;

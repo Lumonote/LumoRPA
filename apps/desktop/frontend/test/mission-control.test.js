@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { URL } from "node:url";
-import { renderTopology, renderNodeDetail, renderRunHistoryOptions, renderRunMetrics, renderVoiceHistory } from "../src/js/mission-control.js";
+import { mountMissionControl, updateMissionControl, renderTopology, renderNodeDetail, renderRunHistoryOptions, renderRunMetrics, renderVoiceHistory } from "../src/js/mission-control.js";
 
 const projection = {
   status: "running",
@@ -51,4 +51,24 @@ test("renders recent voice command history with ok/error states", () => {
   assert.match(html, /is-bad/);
   assert.match(html, /打开任务中心/);
   assert.match(html, /没有找到名为「月报」的流程/);
+});
+
+test("clicking a node after a live update uses the current projection", (context) => {
+  const previousDocument = globalThis.document;
+  context.after(() => { globalThis.document = previousDocument; });
+  const handlers = {};
+  const boxes = Object.fromEntries(["[data-mc-topology]", "[data-mc-detail]", "[data-mc-metrics]", "[data-mc-log]"].map((name) => [name, { innerHTML: "" }]));
+  const root = {
+    dataset: {}, classList: { toggle() {} },
+    querySelector: (name) => boxes[name] || null,
+    addEventListener: (name, handler) => { handlers[name] = handler; },
+  };
+  globalThis.document = { createElement: () => ({ dataset: {}, setAttribute() {}, addEventListener() {} }) };
+  mountMissionControl(root, { ...projection, runId: "r1" });
+  const completed = { ...projection, runId: "r1", seq: 3, status: "completed", nodes: { n1: { ...projection.nodes.n1, status: "completed", payload: { result: "fresh result" } } } };
+  updateMissionControl(root, completed);
+  handlers.click({ target: { closest: (selector) => selector === "[data-node-id]" ? { dataset: { nodeId: "n1" } } : null } });
+  assert.match(boxes["[data-mc-detail]"].innerHTML, /fresh result/);
+  assert.match(boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.doesNotMatch(boxes["[data-mc-topology]"].innerHTML, /is-running/);
 });

@@ -33,9 +33,26 @@ The desktop host exposes commands for preview/apply import, list/test/delete/ena
 
 ```bash
 cd apps/desktop/frontend
+npm ci
 npm test
 npm run lint
 ```
+
+The frontend suite includes editor → save → run/step/debug → result regression
+tests. It covers edits during pending saves, execution targets, read-only example
+copies, cancellation, failed-step timelines, and delayed progress/artifact replies.
+These tests use a simulated IPC host; the Rust suites exercise the real runtime:
+
+```bash
+# From the repository root
+cargo test -p lumorpa-desktop --lib
+cargo test -p lumo-agent --test adapter_lifecycle
+```
+
+The desktop tests include Flow/Skill → relative child flow → human input →
+persisted output. Adapter lifecycle tests verify cleanup and terminal run records
+after timeouts, cancellation, and task aborts. Frontend tests and lint also run on
+every CI push and pull request.
 
 ### Production release gates
 

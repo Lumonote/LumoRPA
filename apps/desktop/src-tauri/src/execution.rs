@@ -18,40 +18,43 @@ pub(super) async fn execute_flow(
     debug: DebugOpts,
     cancels: &CancelMap,
     prompter: Option<Arc<dyn HumanPrompter>>,
+    requested_run_id: Option<String>,
 ) -> Result<RunResponse, String> {
-    let registry = build_action_registry(home, flow_path);
     let repo = if no_store {
         None
     } else {
         Some(Repo::open(home.join("lumo.db")).map_err(|e| e.to_string())?)
     };
-    let run_id = ulid::Ulid::new().to_string();
+    let run_id = match requested_run_id {
+        Some(id) => ulid::Ulid::from_string(&id)
+            .map_err(|_| "invalid run ID".to_string())?
+            .to_string(),
+        None => ulid::Ulid::new().to_string(),
+    };
+    if repo
+        .as_ref()
+        .map(|repo| repo.get_run(&run_id))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .is_some()
+    {
+        return Err("run ID already exists".into());
+    }
     let cancel = CancelToken::new();
-    cancels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(run_id.clone(), cancel.clone());
-    let vm = FlowVm::new(registry, repo.clone())
+    {
+        let mut active = cancels.lock().unwrap_or_else(|e| e.into_inner());
+        if active.contains_key(&run_id) {
+            return Err("run ID is already active".into());
+        }
+        active.insert(run_id.clone(), cancel.clone());
+    }
+    let vm = desktop_flow_vm(home, flow_path, &flow, repo.clone(), prompter)
         .with_run_id(Some(run_id.clone()))
         .with_cancel(cancel)
-        .with_step_timeout(step_timeout())
-        .with_artifacts_dir(Some(home.join("artifacts")))
-        .with_on_step(Some(Arc::new(|event| {
-            if let Some(app) = APP_HANDLE.get() {
-                let _ = app.emit("lumo://run-progress", run_progress::payload(event));
-            }
-        })))
-        .with_vault(load_vault_identity(home))
         .with_breakpoints(debug.breakpoints)
         .with_step_mode(debug.step_mode)
-        .with_resume_from(debug.resume_from)
-        .with_human_prompter(prompter);
-    let ai = flow.metadata.ai.clone().unwrap_or_default();
-    let ai_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
-    let vm = match lumo_ai::build_hook_provider(&ai_cfg, ai.enabled, ai.budget.max_calls_per_run) {
-        Some(provider) => vm.with_ai_provider(provider),
-        None => vm,
-    };
+        .with_resume_from(debug.resume_from);
     let result = vm
         .run(
             &flow,
@@ -84,6 +87,33 @@ pub(super) async fn execute_flow(
     })
 }
 
+/// Shared host environment for editor runs and Agent-invoked flows/skills.
+/// The invoked document determines relative flow paths and AI hook settings.
+pub(super) fn desktop_flow_vm(
+    home: &Path,
+    flow_path: Option<&Path>,
+    flow: &Flow,
+    repo: Option<Repo>,
+    prompter: Option<Arc<dyn HumanPrompter>>,
+) -> FlowVm {
+    let vm = FlowVm::new(build_action_registry(home, flow_path), repo)
+        .with_step_timeout(step_timeout())
+        .with_artifacts_dir(Some(home.join("artifacts")))
+        .with_on_step(Some(Arc::new(|event| {
+            if let Some(app) = APP_HANDLE.get() {
+                let _ = app.emit("lumo://run-progress", run_progress::payload(event));
+            }
+        })))
+        .with_vault(load_vault_identity(home))
+        .with_human_prompter(prompter);
+    let ai = flow.metadata.ai.clone().unwrap_or_default();
+    let ai_cfg = ProvidersConfig::load(providers_path(home)).unwrap_or_default();
+    match lumo_ai::build_hook_provider(&ai_cfg, ai.enabled, ai.budget.max_calls_per_run) {
+        Some(provider) => vm.with_ai_provider(provider),
+        None => vm,
+    }
+}
+
 fn step_timeout() -> std::time::Duration {
     const DEFAULT_MS: u64 = 600_000;
     let ms = std::env::var("LUMO_STEP_TIMEOUT_MS")
@@ -107,6 +137,126 @@ fn load_vault_identity(home: &Path) -> Option<Arc<lumo_storage::VaultIdentity>> 
             eprintln!("vault identity at {} unreadable: {e}", path.display());
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod editor_run_id_tests {
+    use super::*;
+
+    const FLOW: &str = r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: editor-run }
+spec:
+  steps:
+    - { id: edited, action: control.set_var, with: { name: message, value: edited } }
+"#;
+
+    #[tokio::test]
+    async fn editor_run_id_is_used_for_report_and_persisted_steps() {
+        let home = tempfile::tempdir().unwrap();
+        let id = ulid::Ulid::new().to_string();
+        let cancels = CancelMap::default();
+        let response = execute_flow(
+            home.path(),
+            None,
+            lumo_dsl::parse_str(FLOW).unwrap(),
+            serde_json::json!({}),
+            false,
+            DebugOpts::default(),
+            &cancels,
+            None,
+            Some(id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.report.run_id, id);
+        assert_eq!(response.run.unwrap().id, id);
+        let repo = Repo::open(home.path().join("lumo.db")).unwrap();
+        assert_eq!(repo.list_steps(&id).unwrap()[0].step_id, "edited");
+        assert_eq!(repo.get_run(&id).unwrap().unwrap().state, "ok");
+        assert!(cancels.lock().unwrap().is_empty());
+
+        // Reusing an identifier must leave the completed record untouched.
+        let duplicate = execute_flow(
+            home.path(),
+            None,
+            lumo_dsl::parse_str(FLOW).unwrap(),
+            serde_json::json!({}),
+            false,
+            DebugOpts::default(),
+            &cancels,
+            None,
+            Some(id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(duplicate.contains("already exists"));
+        assert_eq!(repo.get_run(&id).unwrap().unwrap().state, "ok");
+    }
+
+    #[tokio::test]
+    async fn invalid_or_active_editor_ids_cannot_replace_a_cancellation_handle() {
+        let home = tempfile::tempdir().unwrap();
+        let cancels = CancelMap::default();
+        let id = ulid::Ulid::new().to_string();
+        let active = CancelToken::new();
+        cancels.lock().unwrap().insert(id.clone(), active.clone());
+        for (id, message) in [
+            ("../../outside".to_string(), "invalid run ID"),
+            (id.clone(), "already active"),
+        ] {
+            let error = execute_flow(
+                home.path(),
+                None,
+                lumo_dsl::parse_str(FLOW).unwrap(),
+                serde_json::json!({}),
+                true,
+                DebugOpts::default(),
+                &cancels,
+                None,
+                Some(id),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        assert!(cancel_run_inner(&cancels, &id));
+        assert!(active.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn failed_editor_run_retains_its_id_and_step_error_for_result_recovery() {
+        let home = tempfile::tempdir().unwrap();
+        let id = ulid::Ulid::new().to_string();
+        let cancels = CancelMap::default();
+        let source = FLOW.replace("control.set_var", "control.fail").replace(
+            "name: message, value: edited",
+            "message: deliberate-failure",
+        );
+        let error = execute_flow(
+            home.path(),
+            None,
+            lumo_dsl::parse_str(&source).unwrap(),
+            serde_json::json!({}),
+            false,
+            DebugOpts::default(),
+            &cancels,
+            None,
+            Some(id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("deliberate-failure"), "{error}");
+        let repo = Repo::open(home.path().join("lumo.db")).unwrap();
+        assert_eq!(repo.get_run(&id).unwrap().unwrap().state, "failed");
+        assert!(repo.list_steps(&id).unwrap()[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("deliberate-failure"));
+        assert!(cancels.lock().unwrap().is_empty());
     }
 }
 
@@ -150,6 +300,7 @@ spec:
             false,
             debug,
             &cancels,
+            None,
             None,
         )
         .await
@@ -332,6 +483,7 @@ spec:
             DebugOpts::default(),
             &cancels,
             None,
+            None,
         )
         .await
     }
@@ -483,6 +635,7 @@ spec:
             false,
             DebugOpts::default(),
             &cancels,
+            None,
             None,
         )
         .await

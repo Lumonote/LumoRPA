@@ -28,9 +28,10 @@ mod trust;
 mod validator;
 
 pub use adapters::{
-    AdapterRegistry, CapabilityKind, FlowAdapter, FlowVmFactory, InvocationAdapter,
-    InvocationContext, InvocationError, InvocationRequest, InvocationResult, McpAdapter,
-    McpClientInvoker, McpConnectionProfile, McpProfileResolver, McpToolInvoker, SkillAdapter,
+    AdapterRegistry, CapabilityKind, ContextualFlowVmFactory, FlowAdapter, FlowVmFactory,
+    InvocationAdapter, InvocationContext, InvocationError, InvocationRequest, InvocationResult,
+    McpAdapter, McpClientInvoker, McpConnectionProfile, McpProfileResolver, McpToolInvoker,
+    SkillAdapter,
 };
 pub use budget::{AgentBudget, BudgetExceeded};
 pub use capability::{CapabilityDescriptor, CapabilitySource, RiskLevel};

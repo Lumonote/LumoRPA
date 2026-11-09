@@ -4,6 +4,7 @@ import { renderAgentLog } from "./agent-feedback.js";
 
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
+const projections = new WeakMap();
 
 function redact(value, key = "") {
   if (secretKey(key)) return "••••••••";
@@ -75,6 +76,7 @@ export async function refreshVoiceHistory(scope, call) {
 export function updateMissionControl(root, projection) {
   if (!root) return;
   if (root.dataset.selectedRun && root.dataset.selectedRun !== projection.runId) return;
+  projections.set(root, projection);
   const rawTopology = readyTopology(projection);
   const topology = virtualizeTopology(rawTopology, { startLane: Number(root.dataset.startLane || 0), laneCount: Number(root.dataset.laneCount || 12) });
   root.querySelector("[data-mc-topology]").innerHTML = renderTopology(topology);
@@ -88,7 +90,6 @@ export function updateMissionControl(root, projection) {
 
 export function mountMissionControl(root, projection, call = async () => {}) {
   if (!root) return;
-  let currentProjection = projection;
   const selector = document.createElement("select");
   selector.dataset.mcRunSelect = "";
   selector.setAttribute("aria-label", "选择 Agent 运行历史");
@@ -99,7 +100,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
   selector.addEventListener("change", async () => {
     root.dataset.selectedRun = selector.value;
     const events = await call("agent_events", { runId: selector.value, afterSeq: 0 });
-    currentProjection = createRunProjection(selector.value);
+    let currentProjection = createRunProjection(selector.value);
     for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
     updateMissionControl(root, currentProjection);
   });
@@ -125,7 +126,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     const node = event.target.closest("[data-node-id]");
     if (!node) return;
     root.dataset.selectedNode = node.dataset.nodeId;
-    updateMissionControl(root, currentProjection);
+    updateMissionControl(root, projections.get(root));
   });
   root.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
@@ -136,5 +137,5 @@ export function mountMissionControl(root, projection, call = async () => {}) {
     nodes[Math.min(nodes.length - 1, Math.max(0, index + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1)))]?.focus();
   });
   refreshVoiceHistory(root, call);
-  updateMissionControl(root, currentProjection);
+  updateMissionControl(root, projection);
 }

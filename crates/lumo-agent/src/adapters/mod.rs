@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{CapabilityDescriptor, CapabilitySource};
 
-pub use flow::{FlowAdapter, FlowVmFactory};
+pub use flow::{ContextualFlowVmFactory, FlowAdapter, FlowVmFactory};
 pub use mcp::{
     McpAdapter, McpClientInvoker, McpConnectionProfile, McpProfileResolver, McpToolInvoker,
 };

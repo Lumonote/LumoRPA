@@ -142,9 +142,6 @@ impl Action for ClickTextAction {
             ctx.ensure_desktop("mouse")?;
         }
         ctx.ensure_llm(model.as_deref().unwrap_or(""))?;
-        let provider = ctx.ai_provider().cloned().ok_or_else(|| {
-            StepError::msg("desktop.click_text requires AI provider configuration")
-        })?;
         if text.trim().is_empty() {
             return Err(StepError::msg(
                 "desktop.click_text: text must not be empty".to_string(),
@@ -157,6 +154,11 @@ impl Action for ClickTextAction {
                 ));
             }
         }
+        // Validate the request before requiring its OCR backend, so malformed
+        // input has the same actionable error with or without AI configured.
+        let provider = ctx.ai_provider().cloned().ok_or_else(|| {
+            StepError::msg("desktop.click_text requires AI provider configuration")
+        })?;
 
         // 1) 截屏(同 desktop.screenshot 的 xcap 阻塞路径;PNG 留内存不落盘)。
         let Capture {

@@ -39,6 +39,7 @@ mod element_library;
 mod execution;
 mod features_data;
 mod flow_history;
+mod flow_library;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
@@ -274,21 +275,8 @@ fn delete_flow(app: AppHandle, path: String) -> Result<(), String> {
 fn duplicate_flow(app: AppHandle, path: String) -> Result<String, String> {
     // P0-3: only duplicate from an allowed flow directory.
     let src = resolve_within(&path, &flow_read_roots(&app))?;
-    let bytes = std::fs::read(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("flow")
-        .trim_end_matches(".lumoflow")
-        .to_string();
     let dir = user_flows_dir(&app)?;
-    let mut candidate = dir.join(format!("{stem}-copy.lumoflow.yaml"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem}-copy-{n}.lumoflow.yaml"));
-        n += 1;
-    }
-    std::fs::write(&candidate, bytes).map_err(|e| format!("write {}: {e}", candidate.display()))?;
+    let candidate = flow_library::duplicate_flow_file(&src, &dir)?;
     Ok(candidate.display().to_string())
 }
 
@@ -577,6 +565,7 @@ async fn run_flow(
     path: String,
     inputs_json: String,
     no_store: bool,
+    run_id: Option<String>,
 ) -> Result<RunResponse, String> {
     let home = app_home(&app)?;
     let flow_path = Path::new(&path);
@@ -591,6 +580,7 @@ async fn run_flow(
         DebugOpts::default(),
         &state.cancels,
         Some(desktop_prompter(&app, &state)),
+        run_id,
     )
     .await
 }
@@ -609,6 +599,7 @@ async fn run_step(
     step_id: String,
     inputs_json: String,
     no_store: bool,
+    run_id: Option<String>,
 ) -> Result<RunResponse, String> {
     let home = app_home(&app)?;
     let flow_path = Path::new(&path);
@@ -629,6 +620,7 @@ async fn run_step(
         DebugOpts::default(),
         &state.cancels,
         Some(desktop_prompter(&app, &state)),
+        run_id,
     )
     .await
 }
@@ -643,6 +635,7 @@ async fn run_step(
 /// persists (debugging needs `step_runs` for resume), so `noStore` is implied
 /// false.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn debug_flow(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -651,6 +644,7 @@ async fn debug_flow(
     breakpoints: Vec<String>,
     step: bool,
     resume_from: Option<String>,
+    run_id: Option<String>,
 ) -> Result<RunResponse, String> {
     let home = app_home(&app)?;
     let flow_path = Path::new(&path);
@@ -669,6 +663,7 @@ async fn debug_flow(
         },
         &state.cancels,
         Some(desktop_prompter(&app, &state)),
+        run_id,
     )
     .await
 }

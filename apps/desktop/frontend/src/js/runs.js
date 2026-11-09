@@ -11,14 +11,29 @@ import {
 import { renderActiveView } from "./editor/render.js";
 import { snapshotSource } from "./editor/history.js";
 import { switchRightSection } from "./views.js";
-import { pickRunningRunIds } from "./prompt-utils.js";
 import { ensureCurrentFlowSaved } from "./flows.js";
+import { reduceRunProgress } from "./app-events.js";
 
-/// P0-1：取消按钮的可见性。run_flow/run_step/debug_flow 都是一次 await 到底
-/// 的 invoke，运行期间前端无事件流——发起时亮出「⏹ 取消」，settle 后隐藏。
+// Allocate a ULID before IPC so progress and cancellation always identify the
+// exact editor request, including the interval before the first step starts.
+function newRunId() {
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let time = Date.now();
+  let id = "";
+  for (let i = 0; i < 10; i++) {
+    id = alphabet[time % 32] + id;
+    time = Math.floor(time / 32);
+  }
+  return id + Array.from(crypto.getRandomValues(new Uint8Array(16)), (n) => alphabet[n & 31]).join("");
+}
+
+// Keep execution controls locked until the response and timeline are ready.
 export function setRunInFlight(on) {
   state.runInFlight = !!on;
-  if (on) state.inFlightRunId = null;
+  state.inFlightRunId = on ? newRunId() : null;
+  acceptingProgress = !!on;
+  preparingRun = !!on;
+  cancelRequested = false;
   const btn = $("cancelRunBtn");
   if (btn) btn.hidden = !on;
   for (const id of ["runBtn", "runStepBtn", "debugBtn"]) {
@@ -27,40 +42,65 @@ export function setRunInFlight(on) {
   }
 }
 
-/// P0-1：点按「取消运行」。后端不在运行开始时把 run_id 推给前端，先用进度
-/// 事件记住当前 run；事件尚未到达时再查一次 list_runs，选最近的 running run。
-/// ok=false（不存在/已结束）按后端约定只提示。
+export function updateRunProgress(event) {
+  if (!acceptingProgress || !state.runInFlight || !event?.runId || event.runId !== state.inFlightRunId) return;
+  if (cancelRequested) {
+    cancelRequested = false;
+    call("cancel_run", { runId: event.runId }).catch(() => {});
+  }
+  const progress = state.liveRunProgress = reduceRunProgress(state.liveRunProgress, event);
+  if (progress.currentStep) setStatus(`运行中 · ${progress.currentStep}`, "warn");
+  if (progress.logs.length) {
+    const dropped = progress.droppedLogs ? `\n… 已截断 ${progress.droppedLogs} 条较早日志` : "";
+    $("outputBox").textContent = `${progress.logs.join("\n")}${dropped}`;
+  }
+}
+
+// Always cancel the ID allocated for this editor request.
 export async function cancelActiveRun() {
+  if (!state.runInFlight) return;
+  cancelRequested = true;
+  if (preparingRun) {
+    toast("已请求取消", "保存完成后停止执行", "ok");
+    return;
+  }
   try {
-    const runs = await call("list_runs", { limit: 10 });
-    const ids = pickRunningRunIds(runs, state.inFlightRunId);
-    let cancelled = false;
-    for (const runId of ids) {
-      const r = await call("cancel_run", { runId });
-      cancelled = cancelled || !!r?.ok;
-    }
-    if (cancelled) toast("已请求取消", "运行将在当前步中断", "ok");
-    else toast("运行已结束", "没有可取消的进行中运行", "warn");
+    await call("cancel_run", { runId: state.inFlightRunId });
+    toast("已请求取消", "运行将在当前步中断", "ok");
   } catch (error) {
     toast("取消失败", String(error), "bad");
   }
 }
 
+export async function prepareEditorRun() {
+  const path = await ensureCurrentFlowSaved();
+  preparingRun = false;
+  if (!cancelRequested) return path;
+  setStatus("运行已取消", "warn");
+  $("outputBox").textContent = "运行已取消";
+  return null;
+}
+
 export async function runSelectedFlow() {
+  if (state.runInFlight) return;
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
+  const inputsJson = $("inputsJson").value || "{}";
   setStatus("运行中…", "warn");
   state.liveRunProgress = null;
   $("outputBox").textContent = "准备运行…";
   setRunInFlight(true);
   try {
-    await ensureCurrentFlowSaved();
+    const path = await prepareEditorRun();
+    if (!path) return;
     const response = await call("run_flow", {
-      path: state.flowPath,
-      inputsJson: $("inputsJson").value || "{}",
+      path,
+      inputsJson,
       noStore: false,
+      runId: state.inFlightRunId,
     });
-    onRunComplete(response);
+    await onRunComplete(response);
   } catch (error) {
+    await showRunFailure(error);
     setStatus("运行失败", "bad");
     handleRunError(error);
   } finally {
@@ -70,22 +110,27 @@ export async function runSelectedFlow() {
 }
 
 export async function runStep(stepId) {
+  if (state.runInFlight) return;
   if (!state.flowPath || !stepId) return;
+  const inputsJson = $("inputsJson").value || "{}";
   setStatus(`单步运行 ${stepId} …`, "warn");
   state.liveRunProgress = null;
   $("outputBox").textContent = "准备运行单步…";
   setRunInFlight(true);
   try {
-    await ensureCurrentFlowSaved();
+    const path = await prepareEditorRun();
+    if (!path) return;
     const response = await call("run_step", {
-      path: state.flowPath,
+      path,
       stepId,
-      inputsJson: $("inputsJson").value || "{}",
+      inputsJson,
       noStore: false,
+      runId: state.inFlightRunId,
     });
-    onRunComplete(response);
+    await onRunComplete(response);
     toast("单步完成", `${stepId} · ${response.report.success ? "成功" : "失败"}`, response.report.success ? "ok" : "bad");
   } catch (error) {
+    await showRunFailure(error);
     setStatus("单步失败", "bad");
     handleRunError(error);
   } finally {
@@ -140,10 +185,30 @@ function handleRunError(error) {
   node.querySelector("[data-dismiss]").addEventListener("click", dismiss);
 }
 
-function onRunComplete(response) {
-  state.inFlightRunId = null;
-  applyRunResponse(response);
+async function onRunComplete(response) {
+  await applyRunResponse(response);
   setStatus(response.report.success ? "运行完成" : "运行失败", response.report.success ? "ok" : "bad");
+  switchRightSection("outputs");
+}
+
+// Failed VMs reject the IPC call after persisting their steps. Recover that
+// trace so an error leaves useful output and a timeline instead of "准备运行".
+export async function showRunFailure(error) {
+  acceptingProgress = false;
+  const runId = state.inFlightRunId;
+  try {
+    const detail = runId && await call("show_run", { runId });
+    if (detail?.run) {
+      const steps = detail.steps || [];
+      await applyRunResponse({ ...detail, report: {
+        runId, success: false, outputs: detail.run.outputs,
+        durationMs: detail.run.durationMs || 0, stepsTotal: steps.length,
+        stepsOk: steps.filter((s) => s.state === "ok" || s.state === "ai_healed").length,
+        stepsFailed: steps.filter((s) => ["failed", "timeout", "cancelled"].includes(s.state)).length,
+      } });
+    }
+  } catch { /* A parse/save failure may not have created a stored run. */ }
+  $("outputBox").textContent = pretty({ runId, error: String(error), outputs: state.activeRun?.id === runId ? state.activeRun.outputs : null });
   switchRightSection("outputs");
 }
 
@@ -153,6 +218,7 @@ function onRunComplete(response) {
 /// for a paused run. Returns the artifact-load promise (resolves after the
 /// timeline first renders).
 export function applyRunResponse(response) {
+  acceptingProgress = false;
   state.activeRun = response.run;
   state.activeRunSteps = response.steps || [];
   // The run report's `outputs` is the full steps snapshot ({ "<id>": { result,
@@ -192,14 +258,22 @@ function aiTraceForStep(step) {
 // the scrubber can show what the screen looked like at each step. Tolerates the
 // IPC missing on older builds.
 async function loadArtifacts(runId) {
+  const request = {};
+  artifactRequest = request;
   state.activeArtifacts = [];
   state.artifactBlobCache = new Map();
   try {
-    state.activeArtifacts = (await call("list_artifacts", { runId })) || [];
+    const artifacts = (await call("list_artifacts", { runId })) || [];
+    if (artifactRequest === request) state.activeArtifacts = artifacts;
   } catch (_) {
-    state.activeArtifacts = [];
+    if (artifactRequest === request) state.activeArtifacts = [];
   }
 }
+
+let artifactRequest;
+let acceptingProgress = false;
+let preparingRun = false;
+let cancelRequested = false;
 
 // Find the artifact (preferring screenshots) attributed to a given step path /
 // id. step_runs.path and artifacts.step_id are matched loosely so loop-nested
@@ -344,6 +418,7 @@ function showStepDetail(idx) {
   `;
   if (art) {
     blobDataUrl(art.id).then((url) => {
+      if (state.activeStepRun !== step) return;
       const box = $("timelineShot");
       if (!box) return;
       if (!url) {

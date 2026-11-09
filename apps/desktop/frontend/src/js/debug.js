@@ -11,9 +11,8 @@
 import { $, html, toast, setStatus } from "./dom.js";
 import { call } from "./api.js";
 import { state } from "./state.js";
-import { applyRunResponse, setRunInFlight } from "./runs.js";
+import { applyRunResponse, setRunInFlight, showRunFailure, prepareEditorRun } from "./runs.js";
 import { switchRightSection } from "./views.js";
-import { ensureCurrentFlowSaved } from "./flows.js";
 
 export function isBreakpoint(stepId) {
   return !!stepId && state.breakpoints.has(stepId);
@@ -35,22 +34,28 @@ function breakpointList() {
 }
 
 async function runDebug({ step, resumeFrom }) {
+  if (state.runInFlight) return;
   if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
+  const inputsJson = $("inputsJson").value || "{}";
+  const breakpoints = breakpointList();
   setStatus("调试中…", "warn");
   state.liveRunProgress = null;
   $("outputBox").textContent = "准备调试…";
   setRunInFlight(true);
   try {
-    await ensureCurrentFlowSaved();
+    const path = await prepareEditorRun();
+    if (!path) return;
     const response = await call("debug_flow", {
-      path: state.flowPath,
-      inputsJson: $("inputsJson").value || "{}",
-      breakpoints: breakpointList(),
+      path,
+      inputsJson,
+      breakpoints,
       step,
       resumeFrom: resumeFrom || null,
+      runId: state.inFlightRunId,
     });
     await onDebugResponse(response);
   } catch (error) {
+    await showRunFailure(error);
     setStatus("调试失败", "bad");
     toast("调试失败", String(error), "bad");
   } finally {

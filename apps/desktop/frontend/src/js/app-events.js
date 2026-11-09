@@ -37,29 +37,79 @@ export function reduceRunProgress(previous, event = {}) {
 }
 
 export async function restoreAndSubscribeAgentEvents({ runId, call, listen, onProjection, schedule = (fn) => requestAnimationFrame(fn) }) {
+  const followLatest = runId === "latest";
   let projection = createRunProjection(runId);
   let renderQueued = false;
+  let disposed = false;
+  let ready = false;
+  let pending = Promise.resolve();
+  const buffered = [];
+  const seenRuns = new Set();
+  const eventRunId = (event) => event?.runId || event?.run_id;
   const publish = () => {
-    if (renderQueued) return;
+    if (renderQueued || disposed) return;
     renderQueued = true;
     schedule(() => {
       renderQueued = false;
-      onProjection(projection);
+      if (!disposed) onProjection(projection);
     });
   };
-  const loadAfter = async (afterSeq) => {
-    const events = await call("agent_events", { runId, afterSeq });
-    for (const event of events || []) projection = applyAgentEvent(projection, event);
+  const selectRun = (id) => {
+    if (!id || id === projection.runId) return;
+    if (projection.runId !== "latest") seenRuns.add(projection.runId);
+    projection = createRunProjection(id);
+  };
+  const loadAfter = async (id, afterSeq) => {
+    const events = await call("agent_events", { runId: id, afterSeq });
+    if (disposed) return;
+    for (const event of events || []) {
+      const actualId = eventRunId(event);
+      if (followLatest && projection.runId === "latest" && actualId) selectRun(actualId);
+      if (actualId && actualId !== projection.runId) continue;
+      projection = applyAgentEvent(projection, event);
+    }
     publish();
   };
-
-  await loadAfter(0);
-  const unlisten = await listen("lumo://agent-event", async ({ payload }) => {
-    const eventRunId = payload?.runId || payload?.run_id;
-    if (!payload || (eventRunId && eventRunId !== runId)) return;
-    if (payload.seq > projection.seq + 1) await loadAfter(projection.seq);
+  const receive = async (payload) => {
+    if (!payload || disposed) return;
+    const actualId = eventRunId(payload);
+    if (actualId && actualId !== projection.runId) {
+      if (!followLatest || seenRuns.has(actualId)) return;
+      // A buffered event may belong to a run older than the restored snapshot.
+      // Resolve the alias again before switching so it cannot rewind the view.
+      const latest = await call("agent_events", { runId: "latest", afterSeq: 0 });
+      const latestId = eventRunId(latest?.[0]);
+      if (latestId && latestId !== actualId) return;
+      selectRun(actualId);
+      for (const event of latest || []) projection = applyAgentEvent(projection, event);
+    } else if (payload.seq > projection.seq + 1) {
+      await loadAfter(projection.runId, projection.seq);
+    }
+    if (disposed) return;
     projection = applyAgentEvent(projection, payload);
     publish();
+  };
+  const enqueue = (payload) => {
+    // IPC handlers can overlap while filling a sequence gap. Preserve arrival
+    // order so two runs or out-of-order replies cannot overwrite each other.
+    const next = pending.then(() => receive(payload));
+    pending = next.catch(() => {});
+    return next;
+  };
+  // Listen first and buffer while restoring, closing the snapshot/subscribe
+  // gap where a fast run could otherwise finish without ever being displayed.
+  const stopListening = await listen("lumo://agent-event", ({ payload }) => {
+    if (!ready) { buffered.push(payload); return; }
+    return enqueue(payload);
   });
-  return { getProjection: () => projection, unlisten };
+  try {
+    await loadAfter(runId, 0);
+    ready = true;
+    for (const payload of buffered) await enqueue(payload);
+  } catch (error) {
+    disposed = true;
+    stopListening();
+    throw error;
+  }
+  return { getProjection: () => projection, unlisten: () => { disposed = true; stopListening(); } };
 }

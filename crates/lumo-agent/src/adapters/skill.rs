@@ -1,22 +1,26 @@
-use std::{sync::Arc, time::Duration, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use lumo_core::RunOptions;
 use lumo_skills::SkillRegistry;
 
 use super::{
-    CapabilityKind, FlowVmFactory, InvocationAdapter, InvocationContext, InvocationError,
-    InvocationRequest, InvocationResult,
+    flow::run_vm, CapabilityKind, ContextualFlowVmFactory, FlowVmFactory, InvocationAdapter,
+    InvocationContext, InvocationError, InvocationRequest, InvocationResult,
 };
 use crate::CapabilitySource;
 
 pub struct SkillAdapter {
     skills: Arc<SkillRegistry>,
-    vm_factory: FlowVmFactory,
+    vm_factory: ContextualFlowVmFactory,
 }
 
 impl SkillAdapter {
     pub fn new(skills: Arc<SkillRegistry>, vm_factory: FlowVmFactory) -> Self {
+        Self::new_contextual(skills, Arc::new(move |_, _| vm_factory()))
+    }
+
+    pub fn new_contextual(skills: Arc<SkillRegistry>, vm_factory: ContextualFlowVmFactory) -> Self {
         Self { skills, vm_factory }
     }
 }
@@ -40,25 +44,19 @@ impl InvocationAdapter for SkillAdapter {
             .get(name)
             .ok_or_else(|| InvocationError::Unavailable(format!("unknown skill `{name}`")))?;
         let started = Instant::now();
-        // The host factory is responsible for applying the active Agent
-        // Profile's capability clamp; cancellation is always shared here.
-        let vm = (self.vm_factory)().with_cancel(context.cancel.clone());
-        let run = vm.run(
-            &skill.flow,
+        // The host factory applies the active Agent Profile's capability
+        // clamp; run_vm preserves cleanup on cancellation or an outer abort.
+        let report = run_vm(
+            (self.vm_factory)(&skill.flow, Some(&skill.source)),
+            skill.flow.clone(),
             RunOptions {
                 inputs: request.arguments,
                 trigger_kind: format!("agent:skill:{name}"),
             },
-        );
-        let report = tokio::select! {
-            _ = context.cancel.cancelled() => return Err(InvocationError::Cancelled),
-            result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), run) => {
-                match result {
-                    Ok(result) => result.map_err(|error| InvocationError::Failed(error.to_string()))?,
-                    Err(_) => return Err(InvocationError::Timeout { duration_ms: request.timeout_ms }),
-                }
-            }
-        };
+            &context,
+            request.timeout_ms,
+        )
+        .await?;
         if !report.success {
             return Err(InvocationError::Failed(
                 "skill completed unsuccessfully".into(),

@@ -9,7 +9,7 @@ import { applyTheme, applyWindowAlpha, applyPanelAlpha, applyPreset } from "./th
 import { switchTopView, switchEditorMode, switchRightSection } from "./views.js";
 import {
   refreshFlows, createNewFlow, saveCurrentFlowAs, loadFlow, defaultInputs, saveFlowSource,
-  renderFlowList, importFlowFile, exportCurrentFlow, exportFlowAtPath, revealCurrentFlowFile,
+  renderFlowList, importFlowFile, exportCurrentFlow, exportFlowAtPath, revealCurrentFlowFile, ensureCurrentFlowSaved,
 } from "./flows.js";
 import { refreshActions, renderActions } from "./actions.js";
 import {
@@ -24,7 +24,7 @@ import {
 import { undoEdit, redoEdit, snapshotSource } from "./editor/history.js";
 import { clearMultiSelection } from "./editor/steps.js";
 import { syncGutter } from "./editor/code.js";
-import { runSelectedFlow, runStep, refreshRuns, cancelActiveRun } from "./runs.js";
+import { runSelectedFlow, runStep, refreshRuns, cancelActiveRun, updateRunProgress } from "./runs.js";
 import { startDebug } from "./debug.js";
 import { ensureHumanPromptListener } from "./human-prompt.js";
 import {
@@ -43,7 +43,7 @@ import { mountCapabilityHub } from "./capability-hub.js";
 import { applyStaticTranslations, subscribeLocale } from "./i18n.js";
 import { mountMissionControl, refreshVoiceHistory, updateMissionControl } from "./mission-control.js";
 import { mountVoiceLauncher } from "./voice-launcher.js";
-import { normalizeToastEvent, reduceRunProgress, restoreAndSubscribeAgentEvents } from "./app-events.js";
+import { normalizeToastEvent, restoreAndSubscribeAgentEvents } from "./app-events.js";
 
 let bootStarted = false;
 
@@ -66,14 +66,7 @@ async function bindAppEvents() {
       refreshVoiceHistory(document, call).catch(() => {});
     });
     await listen("lumo://run-progress", (event) => {
-      state.liveRunProgress = reduceRunProgress(state.liveRunProgress, event?.payload);
-      const progress = state.liveRunProgress;
-      if (state.runInFlight && progress.runId) state.inFlightRunId = progress.runId;
-      if (progress.currentStep) setStatus(`运行中 · ${progress.currentStep}`, "warn");
-      if (progress.logs.length) {
-        const dropped = progress.droppedLogs ? `\n… 已截断 ${progress.droppedLogs} 条较早日志` : "";
-        $("outputBox").textContent = `${progress.logs.join("\n")}${dropped}`;
-      }
+      updateRunProgress(event?.payload);
     });
     await listen("lumo://mcp-oauth-open", (event) => {
       const url = String(event?.payload?.url || "");
@@ -315,7 +308,8 @@ function bindEvents() {
   $("validateBtn").addEventListener("click", async () => {
     if (!state.flowPath) return;
     try {
-      const r = await call("validate_flow", { path: state.flowPath });
+      const path = await ensureCurrentFlowSaved();
+      const r = await call("validate_flow", { path });
       toast("校验通过", `${r.id} · ${r.stepCount} 步`, "ok");
       setStatus("校验通过");
     } catch (e) { toast("校验失败", String(e), "bad"); setStatus("校验失败", "bad"); }
@@ -323,7 +317,8 @@ function bindEvents() {
   $("lintBtn").addEventListener("click", async () => {
     if (!state.flowPath) { toast("先选择一个流程", "", "warn"); return; }
     try {
-      const issues = await call("lint_flow", { path: state.flowPath });
+      const path = await ensureCurrentFlowSaved();
+      const issues = await call("lint_flow", { path });
       if (!issues.length) {
         toast("Lint 通过", "未发现结构 / 权限 / 变量引用问题", "ok");
         setStatus("Lint 通过", "ok");

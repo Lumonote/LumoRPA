@@ -1,7 +1,8 @@
-use std::{sync::Arc, time::Duration, time::Instant};
+use std::{path::Path, sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
-use lumo_core::{FlowVm, RunOptions};
+use lumo_core::{CancelToken, FlowVm, RunOptions, RunReport};
+use lumo_dsl::Flow;
 
 use super::{
     CapabilityKind, InvocationAdapter, InvocationContext, InvocationError, InvocationRequest,
@@ -10,13 +11,55 @@ use super::{
 use crate::CapabilitySource;
 
 pub type FlowVmFactory = Arc<dyn Fn() -> FlowVm + Send + Sync>;
+/// Build the runtime using the invoked document's settings and directory.
+pub type ContextualFlowVmFactory = Arc<dyn Fn(&Flow, Option<&Path>) -> FlowVm + Send + Sync>;
+
+/// An outer agent deadline or task abort may drop the adapter at any await.
+/// Request cooperative cancellation while leaving the VM task alive to run
+/// its teardown hooks and persist the terminal state.
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+pub(super) async fn run_vm(
+    vm: FlowVm,
+    flow: Flow,
+    options: RunOptions,
+    context: &InvocationContext,
+    timeout_ms: u64,
+) -> Result<RunReport, InvocationError> {
+    // A private token prevents a single timed-out node from cancelling its
+    // siblings or making a retry inherit an already-cancelled parent token.
+    let cancel = CancelToken::new();
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let task = tokio::spawn(async move { vm.with_cancel(cancel).run(&flow, options).await });
+    tokio::select! {
+        biased;
+        _ = context.cancel.cancelled() => Err(InvocationError::Cancelled),
+        result = tokio::time::timeout(Duration::from_millis(timeout_ms), task) => {
+            match result {
+                Ok(Ok(result)) => result.map_err(|error| InvocationError::Failed(error.to_string())),
+                Ok(Err(error)) => Err(InvocationError::Failed(format!("flow task failed: {error}"))),
+                Err(_) => Err(InvocationError::Timeout { duration_ms: timeout_ms }),
+            }
+        }
+    }
+}
 
 pub struct FlowAdapter {
-    vm_factory: FlowVmFactory,
+    vm_factory: ContextualFlowVmFactory,
 }
 
 impl FlowAdapter {
     pub fn new(vm_factory: FlowVmFactory) -> Self {
+        Self::new_contextual(Arc::new(move |_, _| vm_factory()))
+    }
+
+    pub fn new_contextual(vm_factory: ContextualFlowVmFactory) -> Self {
         Self { vm_factory }
     }
 }
@@ -40,23 +83,17 @@ impl InvocationAdapter for FlowAdapter {
         lumo_dsl::validate(&flow)
             .map_err(|error| InvocationError::Unavailable(error.to_string()))?;
         let started = Instant::now();
-        let vm = (self.vm_factory)().with_cancel(context.cancel.clone());
-        let run = vm.run(
-            &flow,
+        let report = run_vm(
+            (self.vm_factory)(&flow, Some(Path::new(path))),
+            flow,
             RunOptions {
                 inputs: request.arguments,
                 trigger_kind: "agent:flow".into(),
             },
-        );
-        let report = tokio::select! {
-            _ = context.cancel.cancelled() => return Err(InvocationError::Cancelled),
-            result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), run) => {
-                match result {
-                    Ok(result) => result.map_err(|error| InvocationError::Failed(error.to_string()))?,
-                    Err(_) => return Err(InvocationError::Timeout { duration_ms: request.timeout_ms }),
-                }
-            }
-        };
+            &context,
+            request.timeout_ms,
+        )
+        .await?;
         if !report.success {
             return Err(InvocationError::Failed(
                 "flow completed unsuccessfully".into(),

@@ -6,7 +6,7 @@ export function createRunProjection(runId) {
 
 function projectPlan(projection, event, revised) {
   const nodes = { ...projection.nodes };
-  for (const item of event.payload?.nodes || []) {
+  for (const item of event.payload?.plan?.nodes || event.payload?.nodes || []) {
     const previous = nodes[item.id] || {};
     nodes[item.id] = {
       ...previous,

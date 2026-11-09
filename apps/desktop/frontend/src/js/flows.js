@@ -268,10 +268,12 @@ export function defaultInputs(flow) {
 
 export async function saveFlowSource() {
   if (!state.flowPath) return;
-  await call("save_flow_source", { path: state.flowPath, source: state.source });
-  state.ast = parseYaml(state.source);
-  state.savedSource = state.source;
-  toast("已保存", state.flowPath, "ok");
+  const path = state.flowPath;
+  const source = state.source;
+  parseYaml(source);
+  const savedPath = await persistFlowSource(path, source);
+  if (state.flowPath !== savedPath) return;
+  toast("已保存", savedPath, "ok");
   // Keep the current selection, history and execution timeline intact. A full
   // reload here made save feel like a navigation and broke rapid edit→run.
   renderActiveView();
@@ -281,12 +283,31 @@ export async function saveFlowSource() {
 
 /** Persist the editor buffer before an execution command reads the flow file. */
 export async function ensureCurrentFlowSaved() {
-  if (!state.flowPath || state.source === state.savedSource) return false;
+  if (!state.flowPath || state.source === state.savedSource) return state.flowPath;
   // Parse before writing so a malformed edit cannot replace the last runnable
   // version on disk with content that the backend will reject.
-  state.ast = parseYaml(state.source);
-  await call("save_flow_source", { path: state.flowPath, source: state.source });
-  state.savedSource = state.source;
-  renderFlowConfigCard();
-  return true;
+  const path = state.flowPath;
+  const source = state.source;
+  state.ast = parseYaml(source);
+  return persistFlowSource(path, source);
+}
+
+async function persistFlowSource(path, source) {
+  // Bundled examples are read-only. Keep the operator's edits in a user copy
+  // and return its path so validate/run reads exactly the document just saved.
+  const example = state.flow?.source === "example"
+    || state.examples.some((flow) => flow.path === path && flow.source === "example");
+  const savedPath = example ? await call("duplicate_flow", { path }) : path;
+  await call("save_flow_source", { path: savedPath, source });
+  if (state.flowPath === path) {
+    state.flowPath = savedPath;
+    state.savedSource = source;
+    if (example) state.flow = { ...state.flow, path: savedPath, source: "user", fileName: savedPath.split(/[\\/]/).pop() };
+    renderFlowConfigCard();
+  }
+  if (example) {
+    await refreshFlows().catch(() => {});
+    toast("已保存到我的流程", savedPath, "ok");
+  }
+  return savedPath;
 }

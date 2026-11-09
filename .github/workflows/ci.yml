@@ -11,6 +11,23 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  frontend:
+    name: desktop frontend
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/desktop/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+
   build-test:
     name: ${{ matrix.os }} / rust ${{ matrix.toolchain }}
     runs-on: ${{ matrix.os }}

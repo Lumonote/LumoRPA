@@ -1205,13 +1205,12 @@ fn normalize_path(path: &Path) -> PathBuf {
     // P0-2: lexically resolve `.` / `..` BEFORE prefix matching so a grant of
     // `/data/**` can't be escaped by `/data/../etc/passwd` (whose raw string
     // still starts with `/data/`).
-    let cleaned = lexical_clean(&abs);
     // Canonicalizing here was tried and reverted: a grant ends in `\**`, which
     // never exists, so the two sides of a comparison could not both be resolved
     // and the mismatch moved rather than closed. Normalisation now happens per
     // comparison in `spellings`, and only where a host actually has more than
     // one spelling for a directory.
-    cleaned
+    lexical_clean(&abs)
 }
 
 /// Resolve `.` and `..` components without touching the filesystem. `..` pops
