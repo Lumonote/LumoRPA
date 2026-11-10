@@ -14,10 +14,19 @@ import { renderFeatures } from "./features.js";
 import { refreshSettings } from "./settings.js";
 import { refreshRecorder } from "./recorder.js";
 
+function exitCanvasFocus() {
+  document.querySelector?.(".shell")?.classList.remove("is-canvas-focus");
+  const button = $("graphFocusMode");
+  button?.setAttribute?.("aria-pressed", "false");
+  if (button) button.textContent = "专注画布";
+  $("graphInspectorToggle")?.setAttribute?.("aria-expanded", "false");
+}
+
 export function switchTopView(view) {
   state.currentView = view;
   $$(".tabs .tab").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
   const isDesign = view === "design";
+  if (!isDesign) { exitCanvasFocus(); $("rightRail").classList.remove("is-graph-open"); }
   $("designView").style.display = isDesign ? "" : "none";
   $("rightRail").style.display = isDesign ? "" : "none";
   // The recorder uses the selected flow as its merge/run target, so keep the
@@ -42,6 +51,8 @@ export function switchTopView(view) {
 }
 
 export function switchEditorMode(mode) {
+  if (mode !== state.viewMode) state.selectedStepPaths?.clear();
+  if (mode !== "graph") { exitCanvasFocus(); $("rightRail").classList.remove("is-graph-open"); }
   state.viewMode = mode;
   $$("#viewSwitch button").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === mode));
   $$(".editor-body .view").forEach((v) => v.classList.toggle("is-active", v.id === `view-${mode}`));

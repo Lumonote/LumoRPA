@@ -7,7 +7,7 @@ import { loadSchema, renderSchemaFields } from "./schema.js";
 import { applyAdvancedValues, readAdvancedFields, renderAdvancedFields, wireAdvancedFields } from "./advanced-fields.js";
 import { ACTION_PRESETS } from "../constants.js";
 import { renderActiveView } from "./render.js";
-import { renderGraph } from "./graph.js";
+import { updateGraphSelection } from "./graph.js";
 import { renderTree } from "./tree.js";
 import { runStep } from "../runs.js";
 import { isBreakpoint, toggleBreakpoint } from "../debug.js";
@@ -15,13 +15,20 @@ import { snapshotSource } from "./history.js";
 
 let inspectorRenderToken = 0;
 
-export function selectStep(path) {
+export function selectStep(path, { preserveMulti = false } = {}) {
+  const sameSelection = pathKey(state.selectedStepPath || []) === pathKey(path || []);
+  if (!preserveMulti) state.selectedStepPaths?.clear();
   state.selectedStepPath = path;
   const step = path ? findStepByPath(extractSteps(state.ast), path) : null;
   state.selectedStepId = step?.id || null;
-  if (state.viewMode === "graph") renderGraph();
+  if (state.viewMode === "graph") {
+    updateGraphSelection();
+    if (path && (window.matchMedia?.("(max-width: 1080px)").matches || document.querySelector?.(".shell.is-canvas-focus"))) {
+      $("rightRail")?.classList.add("is-graph-open"); $("graphInspectorToggle")?.setAttribute("aria-expanded", "true");
+    }
+  }
   if (state.viewMode === "tree") renderTree();
-  renderInspector();
+  if (!sameSelection) return renderInspector();
 }
 
 export async function renderInspector() {

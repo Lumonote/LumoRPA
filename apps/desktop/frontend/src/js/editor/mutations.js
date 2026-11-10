@@ -13,33 +13,29 @@ import {
 import { renderActiveView } from "./render.js";
 import { renderInspector } from "./inspector.js";
 import { snapshotSource } from "./history.js";
+import { appendGraphStep, resolveSelectionAfterEdit, insertGraphStepAfter } from "./graph-editing.js";
 
 const EMPTY_FLOW_HEADER = "apiVersion: lumorpa.io/v1\nkind: Flow\nmetadata:\n  id: untitled\n  version: 0.1.0\nspec:\n  steps:\n";
 const STEP_CLIPBOARD_KEY = "lumo.stepClipboard";
 
 function commitSource(nextSource) {
+  const ast = parseYaml(nextSource);
+  const selection = resolveSelectionAfterEdit(state.ast, ast, state.selectedStepPath);
   state.source = nextSource;
-  state.ast = parseYaml(state.source);
+  state.ast = ast;
+  state.selectedStepPath = selection;
+  state.selectedStepId = selection ? findStepByPath(extractSteps(ast), selection)?.id || null : null;
   state.selectedStepPaths?.clear();
   state.draftController?.capture();
+  renderInspector();
 }
 
 export function insertStepAfterPath(path, actionId) {
-  const step = findStepByPath(extractSteps(state.ast), path);
-  if (!step) return;
-  const lines = state.source.split(/\r?\n/);
-  const range = findStepRange(lines, step.id);
-  if (!range) return;
   const useAction = actionId || "control.log";
-  const id = actionId
-    ? `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 999)}`
-    : `step_${Math.floor(Math.random() * 9999)}`;
-  const body = actionId ? { id, action: useAction, with: {} } : { id, action: useAction, with: { message: "TODO" } };
-  const block = emitStep(body, range.baseIndent).split("\n");
-  const newLines = lines.slice(0, range.endIdx).concat(block).concat(lines.slice(range.endIdx));
+  const next = insertGraphStepAfter(state.source, path, useAction);
   snapshotSource("insert");
-  commitSource(newLines.join("\n"));
-  toast("已插入步骤", `${id} (${useAction})`, "ok");
+  commitSource(next.source);
+  toast("已插入步骤", `${next.id} (${useAction})`, "ok");
   renderActiveView();
 }
 
@@ -95,15 +91,11 @@ export function moveStepBefore(srcPath, dstPath) {
 }
 
 export function appendStepToSource(actionId) {
+  const next = appendGraphStep(state.source || EMPTY_FLOW_HEADER, actionId);
   snapshotSource("append");
-  if (!state.source) {
-    state.source = EMPTY_FLOW_HEADER;
-  }
-  const id = `${actionId.replace(/\./g, "_")}_${Math.floor(Math.random() * 1000)}`;
-  // Append at end of file with 4-space indent (matches typical examples).
-  commitSource(state.source + `\n    - id: ${id}\n      action: ${actionId}\n      with: {}\n`);
+  commitSource(next.source);
   renderActiveView();
-  toast("已添加节点", `${id} (${actionId}) — 切到代码视图后点 💾 保存`, "ok");
+  toast("已添加节点", `${next.id} (${actionId}) — 保存后运行`, "ok");
 }
 
 export function appendStepWithSelector(actionId, element) {

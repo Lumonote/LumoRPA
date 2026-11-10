@@ -1,0 +1,1952 @@
+
+> lumorpa-desktop-frontend@0.1.0 test
+> node --test
+
+TAP version 13
+# Subtest: advanced policies preserve zero delays, JSON fallback and unrelated node fields
+ok 1 - advanced policies preserve zero delays, JSON fallback and unrelated node fields
+  ---
+  duration_ms: 2.90925
+  type: 'test'
+  ...
+# Subtest: advanced policy validation rejects lossy or invalid form values
+ok 2 - advanced policy validation rejects lossy or invalid form values
+  ---
+  duration_ms: 0.346625
+  type: 'test'
+  ...
+# Subtest: turning off retry and fallback clears policies while retaining other fields
+ok 3 - turning off retry and fallback clears policies while retaining other fields
+  ---
+  duration_ms: 0.106083
+  type: 'test'
+  ...
+# Subtest: failure outputs retain explicit null, false, zero, empty strings and string-like scalars
+ok 4 - failure outputs retain explicit null, false, zero, empty strings and string-like scalars
+  ---
+  duration_ms: 1.7415
+  type: 'test'
+  ...
+# Subtest: advanced form escapes source content and lists runtime retry categories
+ok 5 - advanced form escapes source content and lists runtime retry categories
+  ---
+  duration_ms: 0.621334
+  type: 'test'
+  ...
+# Subtest: path mutation edits only the selected duplicate ID within compact parallel branches
+ok 6 - path mutation edits only the selected duplicate ID within compact parallel branches
+  ---
+  duration_ms: 2.325041
+  type: 'test'
+  ...
+# Subtest: path mutation supports inline maps and non-id-first nodes without altering adjacent nodes
+ok 7 - path mutation supports inline maps and non-id-first nodes without altering adjacent nodes
+  ---
+  duration_ms: 0.913959
+  type: 'test'
+  ...
+# Subtest: path mutation refuses vanished nodes or shared YAML aliases
+ok 8 - path mutation refuses vanished nodes or shared YAML aliases
+  ---
+  duration_ms: 0.334666
+  type: 'test'
+  ...
+# Subtest: renders strengthened risk copy and redacts arguments
+ok 9 - renders strengthened risk copy and redacts arguments
+  ---
+  duration_ms: 0.590375
+  type: 'test'
+  ...
+# Subtest: binds approvals to the visible plan hash and rejects stale responses
+ok 10 - binds approvals to the visible plan hash and rejects stale responses
+  ---
+  duration_ms: 1.002917
+  type: 'test'
+  ...
+# Subtest: rejects stale rejection requests as well as stale approvals
+ok 11 - rejects stale rejection requests as well as stale approvals
+  ---
+  duration_ms: 0.858291
+  type: 'test'
+  ...
+# Subtest: strengthened approval requires a separate confirmation before IPC
+ok 12 - strengthened approval requires a separate confirmation before IPC
+  ---
+  duration_ms: 0.183542
+  type: 'test'
+  ...
+# Subtest: a plan changed during strengthened confirmation cannot be approved
+ok 13 - a plan changed during strengthened confirmation cannot be approved
+  ---
+  duration_ms: 0.163458
+  type: 'test'
+  ...
+# Subtest: run controls are unavailable for idle and finished runs
+ok 14 - run controls are unavailable for idle and finished runs
+  ---
+  duration_ms: 0.310791
+  type: 'test'
+  ...
+# Subtest: projects serial and parallel plan events deterministically
+ok 15 - projects serial and parallel plan events deterministically
+  ---
+  duration_ms: 9.0425
+  type: 'test'
+  ...
+# Subtest: ignores duplicate and out-of-order events
+ok 16 - ignores duplicate and out-of-order events
+  ---
+  duration_ms: 0.187459
+  type: 'test'
+  ...
+# Subtest: tracks retries replans and terminal node state
+ok 17 - tracks retries replans and terminal node state
+  ---
+  duration_ms: 0.203166
+  type: 'test'
+  ...
+# Subtest: pending approvals survive log truncation and clear only for the resolved node and plan
+ok 18 - pending approvals survive log truncation and clear only for the resolved node and plan
+  ---
+  duration_ms: 1.911125
+  type: 'test'
+  ...
+# Subtest: a paused run stays paused when an approval is resolved
+ok 19 - a paused run stays paused when an approval is resolved
+  ---
+  duration_ms: 0.100291
+  type: 'test'
+  ...
+# Subtest: foreign run approvals cannot replace the active run projection
+ok 20 - foreign run approvals cannot replace the active run projection
+  ---
+  duration_ms: 0.053709
+  type: 'test'
+  ...
+# Subtest: late pause and resume events cannot reopen a terminal run
+ok 21 - late pause and resume events cannot reopen a terminal run
+  ---
+  duration_ms: 0.108541
+  type: 'test'
+  ...
+# Subtest: selects concise safe feedback and honors quiet mode
+ok 22 - selects concise safe feedback and honors quiet mode
+  ---
+  duration_ms: 1.011958
+  type: 'test'
+  ...
+# Subtest: caps logs and reports dropped events with redaction
+ok 23 - caps logs and reports dropped events with redaction
+  ---
+  duration_ms: 0.504208
+  type: 'test'
+  ...
+# Subtest: subscribes before restoring persisted events and fills sequence gaps
+ok 24 - subscribes before restoring persisted events and fills sequence gaps
+  ---
+  duration_ms: 1.854917
+  type: 'test'
+  ...
+# Subtest: latest follows real run ids and restores the backend's nested plan payload
+ok 25 - latest follows real run ids and restores the backend's nested plan payload
+  ---
+  duration_ms: 1.031208
+  type: 'test'
+  ...
+# Subtest: buffers events during restore without switching back to an older run
+ok 26 - buffers events during restore without switching back to an older run
+  ---
+  duration_ms: 0.146916
+  type: 'test'
+  ...
+# Subtest: fixed run subscriptions ignore other runs and stop publishing after disposal
+ok 27 - fixed run subscriptions ignore other runs and stop publishing after disposal
+  ---
+  duration_ms: 0.104166
+  type: 'test'
+  ...
+# Subtest: capsule run navigation awaits opening the exact run and returns the listener disposer
+ok 28 - capsule run navigation awaits opening the exact run and returns the listener disposer
+  ---
+  duration_ms: 1.417625
+  type: 'test'
+  ...
+# Subtest: capsule run navigation ignores invalid run ids and reports navigation errors
+ok 29 - capsule run navigation ignores invalid run ids and reports navigation errors
+  ---
+  duration_ms: 0.533792
+  type: 'test'
+  ...
+# Subtest: normalizes backend toast payloads for the existing toast helper
+ok 30 - normalizes backend toast payloads for the existing toast helper
+  ---
+  duration_ms: 0.24325
+  type: 'test'
+  ...
+# Subtest: reduces step and log progress without requesting a persisted-run refresh
+ok 31 - reduces step and log progress without requesting a persisted-run refresh
+  ---
+  duration_ms: 0.211209
+  type: 'test'
+  ...
+# Subtest: maps error/unknown toast kinds onto the ok/warn/bad palette
+ok 32 - maps error/unknown toast kinds onto the ok/warn/bad palette
+  ---
+  duration_ms: 0.216917
+  type: 'test'
+  ...
+# Subtest: a failed step marks the run status and a new runId resets progress
+ok 33 - a failed step marks the run status and a new runId resets progress
+  ---
+  duration_ms: 0.1205
+  type: 'test'
+  ...
+# Subtest: caps buffered log lines and counts dropped ones
+ok 34 - caps buffered log lines and counts dropped ones
+  ---
+  duration_ms: 2.923667
+  type: 'test'
+  ...
+# Subtest: attaches exactly once per element+key across repeated calls
+ok 35 - attaches exactly once per element+key across repeated calls
+  ---
+  duration_ms: 0.370209
+  type: 'test'
+  ...
+# Subtest: a different key on the same element attaches again
+ok 36 - a different key on the same element attaches again
+  ---
+  duration_ms: 0.060125
+  type: 'test'
+  ...
+# Subtest: a fresh element with the same key attaches independently
+ok 37 - a fresh element with the same key attaches independently
+  ---
+  duration_ms: 0.046875
+  type: 'test'
+  ...
+# Subtest: null element is a safe no-op
+ok 38 - null element is a safe no-op
+  ---
+  duration_ms: 0.040875
+  type: 'test'
+  ...
+# Subtest: attach receives the element itself
+ok 39 - attach receives the element itself
+  ---
+  duration_ms: 0.6375
+  type: 'test'
+  ...
+# Subtest: server rows escape labels and expose transport and health
+ok 40 - server rows escape labels and expose transport and health
+  ---
+  duration_ms: 0.853625
+  type: 'test'
+  ...
+# Subtest: server and skill renderers provide useful empty states
+ok 41 - server and skill renderers provide useful empty states
+  ---
+  duration_ms: 0.110916
+  type: 'test'
+  ...
+# Subtest: import preview never leaks secret candidates or config values
+ok 42 - import preview never leaks secret candidates or config values
+  ---
+  duration_ms: 0.201
+  type: 'test'
+  ...
+# Subtest: tool schema is escaped and pretty printed
+ok 43 - tool schema is escaped and pretty printed
+  ---
+  duration_ms: 0.582291
+  type: 'test'
+  ...
+# Subtest: skill rows escape content
+ok 44 - skill rows escape content
+  ---
+  duration_ms: 0.789083
+  type: 'test'
+  ...
+# Subtest: agent profiles render tool and token budgets
+ok 45 - agent profiles render tool and token budgets
+  ---
+  duration_ms: 9.224667
+  type: 'test'
+  ...
+# Subtest: switching to en renders the English surface
+ok 46 - switching to en renders the English surface
+  ---
+  duration_ms: 0.193542
+  type: 'test'
+  ...
+# Subtest: zh-CN keeps the default surface after switching back
+ok 47 - zh-CN keeps the default surface after switching back
+  ---
+  duration_ms: 0.107
+  type: 'test'
+  ...
+# Subtest: host snapshots restore related task and reject late or malformed revisions
+ok 48 - host snapshots restore related task and reject late or malformed revisions
+  ---
+  duration_ms: 1.907584
+  type: 'test'
+  ...
+# Subtest: snapshot restoration subscribes first and does not overwrite a newer live task
+ok 49 - snapshot restoration subscribes first and does not overwrite a newer live task
+  ---
+  duration_ms: 4.329291
+  type: 'test'
+  ...
+# Subtest: live state and batched audio preserve input node, focus, draft, and safe result text
+ok 50 - live state and batched audio preserve input node, focus, draft, and safe result text
+  ---
+  duration_ms: 1.194125
+  type: 'test'
+  ...
+# Subtest: task output stays complete in its scroll region while the composer keeps stable nodes
+ok 51 - task output stays complete in its scroll region while the composer keeps stable nodes
+  ---
+  duration_ms: 0.944792
+  type: 'test'
+  ...
+# Subtest: text submit never opens microphone, prevents duplicates and preserves newer edits
+ok 52 - text submit never opens microphone, prevents duplicates and preserves newer edits
+  ---
+  duration_ms: 0.378041
+  type: 'test'
+  ...
+# Subtest: failed submissions retain draft, show an error, and allow retry
+ok 53 - failed submissions retain draft, show an error, and allow retry
+  ---
+  duration_ms: 0.258625
+  type: 'test'
+  ...
+# Subtest: a completed text task permits the next command while preserving genuine voice input
+ok 54 - a completed text task permits the next command while preserving genuine voice input
+  ---
+  duration_ms: 0.319209
+  type: 'test'
+  ...
+# Subtest: controls bind displayed run, catch stale errors, and expand after successful resize
+ok 55 - controls bind displayed run, catch stale errors, and expand after successful resize
+  ---
+  duration_ms: 0.276375
+  type: 'test'
+  ...
+# Subtest: panel keyboard focus moves after resize controls are reenabled and survives failed or disposed actions
+ok 56 - panel keyboard focus moves after resize controls are reenabled and survives failed or disposed actions
+  ---
+  duration_ms: 0.396458
+  type: 'test'
+  ...
+# Subtest: Escape during IME composition leaves the draft and panel open until ordinary Escape
+ok 57 - Escape during IME composition leaves the draft and panel open until ordinary Escape
+  ---
+  duration_ms: 0.928333
+  type: 'test'
+  ...
+# Subtest: remount and disposal release subscriptions including a listener still installing
+ok 58 - remount and disposal release subscriptions including a listener still installing
+  ---
+  duration_ms: 0.190584
+  type: 'test'
+  ...
+# Subtest: microphone mute still permits text, panel expansion restores, and initial output escapes markup
+ok 59 - microphone mute still permits text, panel expansion restores, and initial output escapes markup
+  ---
+  duration_ms: 0.120958
+  type: 'test'
+  ...
+# Subtest: categoryOf groups implemented but previously hidden action families
+ok 60 - categoryOf groups implemented but previously hidden action families
+  ---
+  duration_ms: 0.918666
+  type: 'test'
+  ...
+# Subtest: zhAction gives user-facing labels for advanced implemented actions
+ok 61 - zhAction gives user-facing labels for advanced implemented actions
+  ---
+  duration_ms: 0.956708
+  type: 'test'
+  ...
+# Subtest: identical inputs produce no adds or removes
+ok 62 - identical inputs produce no adds or removes
+  ---
+  duration_ms: 1.360542
+  type: 'test'
+  ...
+# Subtest: a changed line counts one del and one add in place
+ok 63 - a changed line counts one del and one add in place
+  ---
+  duration_ms: 0.2665
+  type: 'test'
+  ...
+# Subtest: pure insertion keeps surrounding lines as same
+ok 64 - pure insertion keeps surrounding lines as same
+  ---
+  duration_ms: 0.244417
+  type: 'test'
+  ...
+# Subtest: empty old text marks every line added
+ok 65 - empty old text marks every line added
+  ---
+  duration_ms: 0.879041
+  type: 'test'
+  ...
+# Subtest: oversized middles fall back to block replace but still count
+ok 66 - oversized middles fall back to block replace but still count
+  ---
+  duration_ms: 0.579375
+  type: 'test'
+  ...
+# Subtest: draft autosave preserves invalid YAML and serializes a newer edit after an old write
+ok 67 - draft autosave preserves invalid YAML and serializes a newer edit after an old write
+  ---
+  duration_ms: 0.811
+  type: 'test'
+  ...
+# Subtest: a save acknowledgement cannot delete the newer unsaved revision
+ok 68 - a save acknowledgement cannot delete the newer unsaved revision
+  ---
+  duration_ms: 0.766792
+  type: 'test'
+  ...
+# Subtest: draft storage failures reject flush and prevent exit confirmation
+ok 69 - draft storage failures reject flush and prevent exit confirmation
+  ---
+  duration_ms: 0.579666
+  type: 'test'
+  ...
+# Subtest: exit waits for durable draft flush, cancellation does not confirm, and save errors stop exit
+ok 70 - exit waits for durable draft flush, cancellation does not confirm, and save errors stop exit
+  ---
+  duration_ms: 0.447791
+  type: 'test'
+  ...
+# Subtest: recovery distinguishes changed disk content and leaves the disk baseline intact
+ok 71 - recovery distinguishes changed disk content and leaves the disk baseline intact
+  ---
+  duration_ms: 0.141167
+  type: 'test'
+  ...
+# Subtest: a failed draft listing followed by a clean disk load cannot delete unseen recovery data
+ok 72 - a failed draft listing followed by a clean disk load cannot delete unseen recovery data
+  ---
+  duration_ms: 0.457875
+  type: 'test'
+  ...
+# Subtest: rapid flow switching keeps the latest document when older reads finish late
+ok 73 - rapid flow switching keeps the latest document when older reads finish late
+  ---
+  duration_ms: 4.855208
+  type: 'test'
+  ...
+# Subtest: failed source reads preserve the current editor instead of loading an error comment
+ok 74 - failed source reads preserve the current editor instead of loading an error comment
+  ---
+  duration_ms: 0.421125
+  type: 'test'
+  ...
+# Subtest: edits made while another document is loading are preserved
+ok 75 - edits made while another document is loading are preserved
+  ---
+  duration_ms: 0.208792
+  type: 'test'
+  ...
+# Subtest: save-and-switch preserves edits made while the save is pending
+ok 76 - save-and-switch preserves edits made while the save is pending
+  ---
+  duration_ms: 1.287292
+  type: 'test'
+  ...
+# Subtest: switching documents clears the previous flow's debug resume and breakpoints
+ok 77 - switching documents clears the previous flow's debug resume and breakpoints
+  ---
+  duration_ms: 0.711542
+  type: 'test'
+  ...
+# Subtest: a malformed document remains editable without retaining the previous AST or inputs
+ok 78 - a malformed document remains editable without retaining the previous AST or inputs
+  ---
+  duration_ms: 0.816541
+  type: 'test'
+  ...
+# Subtest: save acknowledgement preserves edits made while disk write is pending
+ok 79 - save acknowledgement preserves edits made while disk write is pending
+  ---
+  duration_ms: 0.431833
+  type: 'test'
+  ...
+# Subtest: overlapping saves write in request order before switching documents
+ok 80 - overlapping saves write in request order before switching documents
+  ---
+  duration_ms: 0.836292
+  type: 'test'
+  ...
+# Subtest: editing a bundled example saves a user copy and executes that copy
+ok 81 - editing a bundled example saves a user copy and executes that copy
+  ---
+  duration_ms: 3.719208
+  type: 'test'
+  ...
+# Subtest: overlapping example saves reuse one user copy and retain the latest edit
+ok 82 - overlapping example saves reuse one user copy and retain the latest edit
+  ---
+  duration_ms: 0.525041
+  type: 'test'
+  ...
+# Subtest: cancelling while the editor saves prevents execution
+ok 83 - cancelling while the editor saves prevents execution
+  ---
+  duration_ms: 0.219125
+  type: 'test'
+  ...
+# Subtest: run_flow saves the edited snapshot before execution and retains its target
+ok 84 - run_flow saves the edited snapshot before execution and retains its target
+  ---
+  duration_ms: 0.290334
+  type: 'test'
+  ...
+# Subtest: run_step saves the edited snapshot before execution and retains its target
+ok 85 - run_step saves the edited snapshot before execution and retains its target
+  ---
+  duration_ms: 0.230959
+  type: 'test'
+  ...
+# Subtest: debug_flow saves the edited snapshot before execution and retains its target
+ok 86 - debug_flow saves the edited snapshot before execution and retains its target
+  ---
+  duration_ms: 0.2
+  type: 'test'
+  ...
+# Subtest: a failed execution shows its persisted step error and unlocks controls
+ok 87 - a failed execution shows its persisted step error and unlocks controls
+  ---
+  duration_ms: 0.505875
+  type: 'test'
+  ...
+# Subtest: a second execution request cannot overlap the active editor run
+ok 88 - a second execution request cannot overlap the active editor run
+  ---
+  duration_ms: 0.118208
+  type: 'test'
+  ...
+# Subtest: late artifact replies cannot replace the newer run's artifacts
+ok 89 - late artifact replies cannot replace the newer run's artifacts
+  ---
+  duration_ms: 0.138792
+  type: 'test'
+  ...
+# Subtest: progress arriving while final artifacts load cannot replace final output
+ok 90 - progress arriving while final artifacts load cannot replace final output
+  ---
+  duration_ms: 0.896375
+  type: 'test'
+  ...
+# Subtest: cancelling a known editor run never falls back to a background run
+ok 91 - cancelling a known editor run never falls back to a background run
+  ---
+  duration_ms: 0.59575
+  type: 'test'
+  ...
+# Subtest: background and delayed progress cannot overwrite the editor result
+ok 92 - background and delayed progress cannot overwrite the editor result
+  ---
+  duration_ms: 0.259375
+  type: 'test'
+  ...
+# Subtest: data link edits the target parameter while retaining policies, custom fields and surrounding YAML
+ok 93 - data link edits the target parameter while retaining policies, custom fields and surrounding YAML
+  ---
+  duration_ms: 4.249833
+  type: 'test'
+  ...
+# Subtest: replacement confirmation preserves false, zero and structured values as meaningful inputs
+ok 94 - replacement confirmation preserves false, zero and structured values as meaningful inputs
+  ---
+  duration_ms: 3.035333
+  type: 'test'
+  ...
+# Subtest: reconnecting an identical full reference is a byte-preserving no-op
+ok 95 - reconnecting an identical full reference is a byte-preserving no-op
+  ---
+  duration_ms: 0.270917
+  type: 'test'
+  ...
+# Subtest: disconnect removes only an exact source result parameter and retains all other fields
+ok 96 - disconnect removes only an exact source result parameter and retains all other fields
+  ---
+  duration_ms: 3.229833
+  type: 'test'
+  ...
+# Subtest: links reject self references, future dependencies and cross-branch scopes
+ok 97 - links reject self references, future dependencies and cross-branch scopes
+  ---
+  duration_ms: 0.784916
+  type: 'test'
+  ...
+# Subtest: ambiguous IDs, invalid paths and dangerous parameter names never produce an edit
+ok 98 - ambiguous IDs, invalid paths and dangerous parameter names never produce an edit
+  ---
+  duration_ms: 0.637458
+  type: 'test'
+  ...
+# Subtest: hyphenated step IDs use template bracket access rather than a subtraction expression
+ok 99 - hyphenated step IDs use template bracket access rather than a subtraction expression
+  ---
+  duration_ms: 0.650709
+  type: 'test'
+  ...
+# Subtest: shared target aliases fail before any source can be applied
+ok 100 - shared target aliases fail before any source can be applied
+  ---
+  duration_ms: 0.64825
+  type: 'test'
+  ...
+# Subtest: legacy parallel do entries are isolated branches, not sequential data sources
+ok 101 - legacy parallel do entries are isolated branches, not sequential data sources
+  ---
+  duration_ms: 0.660208
+  type: 'test'
+  ...
+# Subtest: canvas insertion stays inside steps before outputs and retains untouched source
+ok 102 - canvas insertion stays inside steps before outputs and retains untouched source
+  ---
+  duration_ms: 5.827208
+  type: 'test'
+  ...
+# Subtest: empty inline steps can receive a node without losing comments or outputs
+ok 103 - empty inline steps can receive a node without losing comments or outputs
+  ---
+  duration_ms: 0.43025
+  type: 'test'
+  ...
+# Subtest: new nodes have deterministic unique IDs including nested collisions
+ok 104 - new nodes have deterministic unique IDs including nested collisions
+  ---
+  duration_ms: 1.311291
+  type: 'test'
+  ...
+# Subtest: selection follows a stable node through insertion, reorder and deletion
+ok 105 - selection follows a stable node through insertion, reorder and deletion
+  ---
+  duration_ms: 2.219333
+  type: 'test'
+  ...
+# Subtest: selection distinguishes identical child IDs in do and else after insertion changes numeric paths
+ok 106 - selection distinguishes identical child IDs in do and else after insertion changes numeric paths
+  ---
+  duration_ms: 1.311416
+  type: 'test'
+  ...
+# Subtest: ambiguous sibling IDs and ancestors clear selection instead of guessing the old index
+ok 107 - ambiguous sibling IDs and ancestors clear selection instead of guessing the old index
+  ---
+  duration_ms: 0.435334
+  type: 'test'
+  ...
+# Subtest: empty null and inline steps retain configured input types and unknown fields
+ok 108 - empty null and inline steps retain configured input types and unknown fields
+  ---
+  duration_ms: 1.840042
+  type: 'test'
+  ...
+# Subtest: nonempty inline steps append inside the sequence without changing surrounding flow mappings
+ok 109 - nonempty inline steps append inside the sequence without changing surrounding flow mappings
+  ---
+  duration_ms: 0.682166
+  type: 'test'
+  ...
+# Subtest: append preserves a trailing literal block scalar and rejects invalid step structures
+ok 110 - append preserves a trailing literal block scalar and rejects invalid step structures
+  ---
+  duration_ms: 1.537375
+  type: 'test'
+  ...
+# Subtest: path insertion chooses the exact do or else sibling despite duplicate IDs
+ok 111 - path insertion chooses the exact do or else sibling despite duplicate IDs
+  ---
+  duration_ms: 2.992833
+  type: 'test'
+  ...
+# Subtest: path insertion supports inline nested lists and non-id-first mappings
+ok 112 - path insertion supports inline nested lists and non-id-first mappings
+  ---
+  duration_ms: 1.032917
+  type: 'test'
+  ...
+# Subtest: fit includes nodes in negative world space and centers their full bounds
+ok 113 - fit includes nodes in negative world space and centers their full bounds
+  ---
+  duration_ms: 0.176667
+  type: 'test'
+  ...
+# Subtest: layout-only movement and arrange undo/redo retain identical executable source and persisted coordinates
+ok 114 - layout-only movement and arrange undo/redo retain identical executable source and persisted coordinates
+  ---
+  duration_ms: 7.717917
+  type: 'test'
+  ...
+# Subtest: source insertion and layout coordinates undo together while branch selection follows its stable identity
+ok 115 - source insertion and layout coordinates undo together while branch selection follows its stable identity
+  ---
+  duration_ms: 3.484125
+  type: 'test'
+  ...
+# Subtest: history snapshots own deep layout copies across repeated restore and subsequent mutations
+ok 116 - history snapshots own deep layout copies across repeated restore and subsequent mutations
+  ---
+  duration_ms: 0.537208
+  type: 'test'
+  ...
+# Subtest: graph model arranges execution horizontally and retains every parameter port
+ok 117 - graph model arranges execution horizontally and retains every parameter port
+  ---
+  duration_ms: 1.367959
+  type: 'test'
+  ...
+# Subtest: nested control blocks have explicit branch labels and nonoverlapping lanes
+ok 118 - nested control blocks have explicit branch labels and nonoverlapping lanes
+  ---
+  duration_ms: 0.594459
+  type: 'test'
+  ...
+# Subtest: port geometry follows complete input and branch rows and result footer
+ok 119 - port geometry follows complete input and branch rows and result footer
+  ---
+  duration_ms: 0.180959
+  type: 'test'
+  ...
+# Subtest: saved positions follow stable IDs through insert, reorder and branch scopes
+ok 120 - saved positions follow stable IDs through insert, reorder and branch scopes
+  ---
+  duration_ms: 2.922083
+  type: 'test'
+  ...
+# Subtest: ambiguous sibling IDs and descendants cannot inherit an unrelated saved layout
+ok 121 - ambiguous sibling IDs and descendants cannot inherit an unrelated saved layout
+  ---
+  duration_ms: 0.12125
+  type: 'test'
+  ...
+# Subtest: data dependencies resolve unique IDs across nested input objects without inventing ports
+ok 122 - data dependencies resolve unique IDs across nested input objects without inventing ports
+  ---
+  duration_ms: 0.36475
+  type: 'test'
+  ...
+# Subtest: template subtraction and printed reference-like literals do not create false data links
+ok 123 - template subtraction and printed reference-like literals do not create false data links
+  ---
+  duration_ms: 0.133625
+  type: 'test'
+  ...
+# Subtest: schema input ports include missing properties, types and requirements without changing source values
+ok 124 - schema input ports include missing properties, types and requirements without changing source values
+  ---
+  duration_ms: 0.098833
+  type: 'test'
+  ...
+# Subtest: branch lane placement accounts for schema-only input height
+ok 125 - branch lane placement accounts for schema-only input height
+  ---
+  duration_ms: 0.33325
+  type: 'test'
+  ...
+# Subtest: runtime paths match conditional and try scopes while loop iterations remain canonical
+ok 126 - runtime paths match conditional and try scopes while loop iterations remain canonical
+  ---
+  duration_ms: 0.343084
+  type: 'test'
+  ...
+# Subtest: parallel branches and legacy do entries use independent VM branch paths
+ok 127 - parallel branches and legacy do entries use independent VM branch paths
+  ---
+  duration_ms: 0.160958
+  type: 'test'
+  ...
+# Subtest: data edges omit globally ambiguous IDs instead of choosing a wrong branch
+ok 128 - data edges omit globally ambiguous IDs instead of choosing a wrong branch
+  ---
+  duration_ms: 0.057458
+  type: 'test'
+  ...
+# Subtest: bounds include negative saved coordinates and reject invalid positions
+ok 129 - bounds include negative saved coordinates and reject invalid positions
+  ---
+  duration_ms: 0.055167
+  type: 'test'
+  ...
+# Subtest: recursive YAML step and parameter aliases project once without recursing forever
+ok 130 - recursive YAML step and parameter aliases project once without recursing forever
+  ---
+  duration_ms: 1.487042
+  type: 'test'
+  ...
+# Subtest: the same nonrecursive YAML alias expands independently in distinct branches
+ok 131 - the same nonrecursive YAML alias expands independently in distinct branches
+  ---
+  duration_ms: 0.80825
+  type: 'test'
+  ...
+# Subtest: canvas execution state is isolated by exact flow path and source snapshot
+ok 132 - canvas execution state is isolated by exact flow path and source snapshot
+  ---
+  duration_ms: 0.6985
+  type: 'test'
+  ...
+# Subtest: background events and late progress after a final response cannot recolor nodes
+ok 133 - background events and late progress after a final response cannot recolor nodes
+  ---
+  duration_ms: 7.111042
+  type: 'test'
+  ...
+# Subtest: runtime branch scopes keep identical child IDs from sharing execution colors
+ok 134 - runtime branch scopes keep identical child IDs from sharing execution colors
+  ---
+  duration_ms: 25.045958
+  type: 'test'
+  ...
+# Subtest: nested loop iterations aggregate without stripping semantic branch scopes
+ok 135 - nested loop iterations aggregate without stripping semantic branch scopes
+  ---
+  duration_ms: 2.065208
+  type: 'test'
+  ...
+# Subtest: literal indexed leaf IDs remain exact and are not treated as loop scopes
+ok 136 - literal indexed leaf IDs remain exact and are not treated as loop scopes
+  ---
+  duration_ms: 0.361333
+  type: 'test'
+  ...
+# Subtest: literal indexed parent IDs never normalize as an undeclared loop
+ok 137 - literal indexed parent IDs never normalize as an undeclared loop
+  ---
+  duration_ms: 0.409667
+  type: 'test'
+  ...
+# Subtest: a final response requires the captured run identity and preserves loop durations
+ok 138 - a final response requires the captured run identity and preserves loop durations
+  ---
+  duration_ms: 0.837708
+  type: 'test'
+  ...
+# Subtest: failed and cancelled exits terminate running ancestors without erasing completed steps
+ok 139 - failed and cancelled exits terminate running ancestors without erasing completed steps
+  ---
+  duration_ms: 0.277375
+  type: 'test'
+  ...
+# Subtest: paused debug responses clear running colors and invalid durations stay absent
+ok 140 - paused debug responses clear running colors and invalid durations stay absent
+  ---
+  duration_ms: 0.280959
+  type: 'test'
+  ...
+# Subtest: production editor run captures a new context and projects matching live/final steps
+ok 141 - production editor run captures a new context and projects matching live/final steps
+  ---
+  duration_ms: 4.04825
+  type: 'test'
+  ...
+# Subtest: production IPC failure clears live running nodes when no persisted trace exists
+ok 142 - production IPC failure clears live running nodes when no persisted trace exists
+  ---
+  duration_ms: 0.326125
+  type: 'test'
+  ...
+# Subtest: execution link moves the target subtree after its source and preserves unknown fields
+ok 143 - execution link moves the target subtree after its source and preserves unknown fields
+  ---
+  duration_ms: 3.196875
+  type: 'test'
+  ...
+# Subtest: upstream and downstream targets obey the same immediate-after semantics
+ok 144 - upstream and downstream targets obey the same immediate-after semantics
+  ---
+  duration_ms: 2.18625
+  type: 'test'
+  ...
+# Subtest: compact nested branches can be reordered without changing neighboring scopes
+ok 145 - compact nested branches can be reordered without changing neighboring scopes
+  ---
+  duration_ms: 1.126667
+  type: 'test'
+  ...
+# Subtest: literal block scalars retain exact parsed values after reordering
+ok 146 - literal block scalars retain exact parsed values after reordering
+  ---
+  duration_ms: 0.503208
+  type: 'test'
+  ...
+# Subtest: a reorder cannot move a result provider after its existing consumer
+ok 147 - a reorder cannot move a result provider after its existing consumer
+  ---
+  duration_ms: 0.630709
+  type: 'test'
+  ...
+# Subtest: dependencies inside a moved subtree and raw when conditions remain forward
+ok 148 - dependencies inside a moved subtree and raw when conditions remain forward
+  ---
+  duration_ms: 1.391459
+  type: 'test'
+  ...
+# Subtest: printed reference-like text does not invent dependencies
+ok 149 - printed reference-like text does not invent dependencies
+  ---
+  duration_ms: 0.49875
+  type: 'test'
+  ...
+# Subtest: ambiguous IDs, missing nodes, self links and crossed scopes fail without editing
+ok 150 - ambiguous IDs, missing nodes, self links and crossed scopes fail without editing
+  ---
+  duration_ms: 0.917792
+  type: 'test'
+  ...
+# Subtest: screenToWorld maps viewport pixels into graph world coordinates
+ok 151 - screenToWorld maps viewport pixels into graph world coordinates
+  ---
+  duration_ms: 0.624625
+  type: 'test'
+  ...
+# Subtest: zoomGraphAt keeps the world point under the cursor fixed
+ok 152 - zoomGraphAt keeps the world point under the cursor fixed
+  ---
+  duration_ms: 0.075708
+  type: 'test'
+  ...
+# Subtest: zoomGraphAt clamps scale while preserving cursor focus
+ok 153 - zoomGraphAt clamps scale while preserving cursor focus
+  ---
+  duration_ms: 0.059208
+  type: 'test'
+  ...
+# Subtest: moveNodeByScreenDelta converts drag pixels into world coordinates
+ok 154 - moveNodeByScreenDelta converts drag pixels into world coordinates
+  ---
+  duration_ms: 0.050667
+  type: 'test'
+  ...
+# Subtest: applyLayoutOverrides keeps auto layout unless a node has a saved position
+ok 155 - applyLayoutOverrides keeps auto layout unless a node has a saved position
+  ---
+  duration_ms: 0.3975
+  type: 'test'
+  ...
+# Subtest: push/undo/redo round-trips snapshots
+ok 156 - push/undo/redo round-trips snapshots
+  ---
+  duration_ms: 0.430625
+  type: 'test'
+  ...
+# Subtest: undo/redo on empty stacks return null
+ok 157 - undo/redo on empty stacks return null
+  ---
+  duration_ms: 0.082542
+  type: 'test'
+  ...
+# Subtest: a new push clears the redo stack
+ok 158 - a new push clears the redo stack
+  ---
+  duration_ms: 0.536709
+  type: 'test'
+  ...
+# Subtest: cap drops the oldest snapshot
+ok 159 - cap drops the oldest snapshot
+  ---
+  duration_ms: 0.2095
+  type: 'test'
+  ...
+# Subtest: coalesce keeps the earliest snapshot within the window
+ok 160 - coalesce keeps the earliest snapshot within the window
+  ---
+  duration_ms: 0.351959
+  type: 'test'
+  ...
+# Subtest: coalesce window expires and starts a new entry
+ok 161 - coalesce window expires and starts a new entry
+  ---
+  duration_ms: 0.141541
+  type: 'test'
+  ...
+# Subtest: coalesce only merges consecutive pushes with the same label
+ok 162 - coalesce only merges consecutive pushes with the same label
+  ---
+  duration_ms: 0.208417
+  type: 'test'
+  ...
+# Subtest: reset clears both stacks
+ok 163 - reset clears both stacks
+  ---
+  duration_ms: 0.108042
+  type: 'test'
+  ...
+# Subtest: defaults to zh-CN and resolves known keys
+ok 164 - defaults to zh-CN and resolves known keys
+  ---
+  duration_ms: 1.020125
+  type: 'test'
+  ...
+# Subtest: en locale resolves translated keys and falls back to zh-CN for missing ones
+ok 165 - en locale resolves translated keys and falls back to zh-CN for missing ones
+  ---
+  duration_ms: 0.270041
+  type: 'test'
+  ...
+# Subtest: unknown keys return the key itself (fail-visible, not blank)
+ok 166 - unknown keys return the key itself (fail-visible, not blank)
+  ---
+  duration_ms: 0.084459
+  type: 'test'
+  ...
+# Subtest: params interpolate {name} placeholders
+ok 167 - params interpolate {name} placeholders
+  ---
+  duration_ms: 0.249083
+  type: 'test'
+  ...
+# Subtest: unsupported locale falls back to zh-CN
+ok 168 - unsupported locale falls back to zh-CN
+  ---
+  duration_ms: 0.159417
+  type: 'test'
+  ...
+# Subtest: availableLocales lists zh-CN and en
+ok 169 - availableLocales lists zh-CN and en
+  ---
+  duration_ms: 0.658791
+  type: 'test'
+  ...
+# Subtest: applyStaticTranslations fills textContent, innerHTML and attributes
+ok 170 - applyStaticTranslations fills textContent, innerHTML and attributes
+  ---
+  duration_ms: 0.477458
+  type: 'test'
+  ...
+# Subtest: applyStaticTranslations re-renders the same nodes after a locale switch
+ok 171 - applyStaticTranslations re-renders the same nodes after a locale switch
+  ---
+  duration_ms: 0.234625
+  type: 'test'
+  ...
+# Subtest: applyStaticTranslations tolerates a missing root
+ok 172 - applyStaticTranslations tolerates a missing root
+  ---
+  duration_ms: 0.55475
+  type: 'test'
+  ...
+# Subtest: subscribeLocale fires only on actual changes and can unsubscribe
+ok 173 - subscribeLocale fires only on actual changes and can unsubscribe
+  ---
+  duration_ms: 0.618583
+  type: 'test'
+  ...
+# Subtest: a throwing subscriber does not block the others
+ok 174 - a throwing subscriber does not block the others
+  ---
+  duration_ms: 0.381083
+  type: 'test'
+  ...
+# Subtest: tEnum resolves known values and falls back to a readable one
+ok 175 - tEnum resolves known values and falls back to a readable one
+  ---
+  duration_ms: 0.249042
+  type: 'test'
+  ...
+# Subtest: renders redacted structured diffs and evaluation deltas
+ok 176 - renders redacted structured diffs and evaluation deltas
+  ---
+  duration_ms: 0.731
+  type: 'test'
+  ...
+# Subtest: maps approve reject evaluate and rollback to durable commands
+ok 177 - maps approve reject evaluate and rollback to durable commands
+  ---
+  duration_ms: 0.851167
+  type: 'test'
+  ...
+# Subtest: renders shadow control comparison and blocks approval below sample gate
+ok 178 - renders shadow control comparison and blocks approval below sample gate
+  ---
+  duration_ms: 0.305125
+  type: 'test'
+  ...
+# Subtest: failed structural evaluation exposes reasons and blocks approval
+ok 179 - failed structural evaluation exposes reasons and blocks approval
+  ---
+  duration_ms: 0.198
+  type: 'test'
+  ...
+# Subtest: inspector applies nested policies, captures drafts, and undo/redo restores exact source and selection
+ok 180 - inspector applies nested policies, captures drafts, and undo/redo restores exact source and selection
+  ---
+  duration_ms: 10.786416
+  type: 'test'
+  ...
+# Subtest: invalid values and stale inspector forms cannot change the buffer or create history
+ok 181 - invalid values and stale inspector forms cannot change the buffer or create history
+  ---
+  duration_ms: 0.664375
+  type: 'test'
+  ...
+# Subtest: late schema results cannot overwrite a newly selected node
+ok 182 - late schema results cannot overwrite a newly selected node
+  ---
+  duration_ms: 1.564833
+  type: 'test'
+  ...
+# Subtest: failed schema requests keep applying disabled and retain existing action parameters
+ok 183 - failed schema requests keep applying disabled and retain existing action parameters
+  ---
+  duration_ms: 0.971833
+  type: 'test'
+  ...
+# Subtest: action changes wait for their own schema and do not carry incompatible parameters
+ok 184 - action changes wait for their own schema and do not carry incompatible parameters
+  ---
+  duration_ms: 2.1155
+  type: 'test'
+  ...
+# Subtest: typed action parameters keep template expressions through policy edits
+ok 185 - typed action parameters keep template expressions through policy edits
+  ---
+  duration_ms: 0.825041
+  type: 'test'
+  ...
+# Subtest: ordinary node selection clears hidden multi-selection and repeated selection keeps form drafts
+ok 186 - ordinary node selection clears hidden multi-selection and repeated selection keeps form drafts
+  ---
+  duration_ms: 2.29425
+  type: 'test'
+  ...
+# Subtest: usage display distinguishes unknown totals, lower bounds and measured zero
+ok 187 - usage display distinguishes unknown totals, lower bounds and measured zero
+  ---
+  duration_ms: 0.445459
+  type: 'test'
+  ...
+# Subtest: billing resolution preserves revision and requires final totals above the known lower bound
+ok 188 - billing resolution preserves revision and requires final totals above the known lower bound
+  ---
+  duration_ms: 0.475167
+  type: 'test'
+  ...
+# Subtest: usage values and reviewer names cannot inject markup
+ok 189 - usage values and reviewer names cannot inject markup
+  ---
+  duration_ms: 0.074291
+  type: 'test'
+  ...
+# Subtest: renders durable job state and controls
+ok 190 - renders durable job state and controls
+  ---
+  duration_ms: 1.055583
+  type: 'test'
+  ...
+# Subtest: queued cron jobs show the next local fire time with timezone
+ok 191 - queued cron jobs show the next local fire time with timezone
+  ---
+  duration_ms: 9.783292
+  type: 'test'
+  ...
+# Subtest: maps job controls to backend commands
+ok 192 - maps job controls to backend commands
+  ---
+  duration_ms: 0.373084
+  type: 'test'
+  ...
+# Subtest: the next occurrence is displayed in the schedule timezone
+ok 193 - the next occurrence is displayed in the schedule timezone
+  ---
+  duration_ms: 0.149375
+  type: 'test'
+  ...
+# Subtest: waiting approvals and unknown results expose review without unsafe resume
+ok 194 - waiting approvals and unknown results expose review without unsafe resume
+  ---
+  duration_ms: 0.145333
+  type: 'test'
+  ...
+# Subtest: job approval review restores pending requests from durable events
+ok 195 - job approval review restores pending requests from durable events
+  ---
+  duration_ms: 0.427041
+  type: 'test'
+  ...
+# Subtest: a recurring job can open its previous result after the next occurrence is queued
+ok 196 - a recurring job can open its previous result after the next occurrence is queued
+  ---
+  duration_ms: 0.347041
+  type: 'test'
+  ...
+# Subtest: unknown retry requires explicit confirmation and completed output must parse
+ok 197 - unknown retry requires explicit confirmation and completed output must parse
+  ---
+  duration_ms: 0.3645
+  type: 'test'
+  ...
+# Subtest: review refresh keeps typed verification output and ignores a closed request
+ok 198 - review refresh keeps typed verification output and ignores a closed request
+  ---
+  duration_ms: 0.690167
+  type: 'test'
+  ...
+# Subtest: old review fetch and operation cannot overwrite a newly selected job
+ok 199 - old review fetch and operation cannot overwrite a newly selected job
+  ---
+  duration_ms: 0.338791
+  type: 'test'
+  ...
+# Subtest: automatic refresh cannot replace a pending selection with the previous job
+ok 200 - automatic refresh cannot replace a pending selection with the previous job
+  ---
+  duration_ms: 0.124042
+  type: 'test'
+  ...
+# Subtest: flow scheduling preserves timezone, inputs and retry settings
+ok 201 - flow scheduling preserves timezone, inputs and retry settings
+  ---
+  duration_ms: 14.73725
+  type: 'test'
+  ...
+# Subtest: invalid inputs, dates, timezones and retry budgets fail before IPC
+ok 202 - invalid inputs, dates, timezones and retry budgets fail before IPC
+  ---
+  duration_ms: 0.328166
+  type: 'test'
+  ...
+# Subtest: editing roundtrips stored schedule and only exposes untouched occurrences
+ok 203 - editing roundtrips stored schedule and only exposes untouched occurrences
+  ---
+  duration_ms: 0.28725
+  type: 'test'
+  ...
+# Subtest: an unchanged one-shot edit preserves its original seconds and milliseconds
+ok 204 - an unchanged one-shot edit preserves its original seconds and milliseconds
+  ---
+  duration_ms: 0.102208
+  type: 'test'
+  ...
+# Subtest: an unchanged one-shot edit preserves the second occurrence of a DST fallback
+ok 205 - an unchanged one-shot edit preserves the second occurrence of a DST fallback
+  ---
+  duration_ms: 37.688542
+  type: 'test'
+  ...
+# Subtest: rapid scheduling clicks share one pending save and open only one dialog
+ok 206 - rapid scheduling clicks share one pending save and open only one dialog
+  ---
+  duration_ms: 12.539708
+  type: 'test'
+  ...
+# Subtest: a rejected initial save releases the opening lock for a later attempt
+ok 207 - a rejected initial save releases the opening lock for a later attempt
+  ---
+  duration_ms: 0.49175
+  type: 'test'
+  ...
+# Subtest: switching flows while the initial save is pending cannot schedule the unsaved new target
+ok 208 - switching flows while the initial save is pending cannot schedule the unsaved new target
+  ---
+  duration_ms: 0.293542
+  type: 'test'
+  ...
+# Subtest: new same-file edits made during the initial save stop scheduling until saved
+ok 209 - new same-file edits made during the initial save stop scheduling until saved
+  ---
+  duration_ms: 0.26575
+  type: 'test'
+  ...
+# Subtest: schedule submission freezes the captured form, blocks duplicate submit and cannot close mid-save
+ok 210 - schedule submission freezes the captured form, blocks duplicate submit and cannot close mid-save
+  ---
+  duration_ms: 0.499167
+  type: 'test'
+  ...
+# Subtest: renders secret inputs without exposing imported values
+ok 211 - renders secret inputs without exposing imported values
+  ---
+  duration_ms: 0.413
+  type: 'test'
+  ...
+# Subtest: builds selected server and vault override request
+ok 212 - builds selected server and vault override request
+  ---
+  duration_ms: 0.294375
+  type: 'test'
+  ...
+# Subtest: renders OAuth health circuit and schema drift governance
+ok 213 - renders OAuth health circuit and schema drift governance
+  ---
+  duration_ms: 1.0815
+  type: 'test'
+  ...
+# Subtest: maps MCP OAuth reconnect and schema approval actions
+ok 214 - maps MCP OAuth reconnect and schema approval actions
+  ---
+  duration_ms: 0.130291
+  type: 'test'
+  ...
+# Subtest: renders MCP tool inputs from JSON Schema without leaking defaults
+ok 215 - renders MCP tool inputs from JSON Schema without leaking defaults
+  ---
+  duration_ms: 0.177292
+  type: 'test'
+  ...
+# Subtest: collects typed MCP tool arguments
+ok 216 - collects typed MCP tool arguments
+  ---
+  duration_ms: 0.09975
+  type: 'test'
+  ...
+# Subtest: virtualizes one thousand nodes while preserving the active lane
+ok 217 - virtualizes one thousand nodes while preserving the active lane
+  ---
+  duration_ms: 1.281625
+  type: 'test'
+  ...
+# Subtest: renders minimap zoom controls and keyboard navigable nodes
+ok 218 - renders minimap zoom controls and keyboard navigable nodes
+  ---
+  duration_ms: 2.384417
+  type: 'test'
+  ...
+# Subtest: summarizes serial and parallel execution accessibly
+ok 219 - summarizes serial and parallel execution accessibly
+  ---
+  duration_ms: 0.106833
+  type: 'test'
+  ...
+# Subtest: renders topology and detail without leaking secret-like fields
+ok 220 - renders topology and detail without leaking secret-like fields
+  ---
+  duration_ms: 1.492041
+  type: 'test'
+  ...
+# Subtest: escapes untrusted labels and renders metrics
+ok 221 - escapes untrusted labels and renders metrics
+  ---
+  duration_ms: 0.190042
+  type: 'test'
+  ...
+# Subtest: mission control CSS honors reduced motion
+ok 222 - mission control CSS honors reduced motion
+  ---
+  duration_ms: 0.301
+  type: 'test'
+  ...
+# Subtest: renders selectable Agent run history
+ok 223 - renders selectable Agent run history
+  ---
+  duration_ms: 0.089167
+  type: 'test'
+  ...
+# Subtest: renders recent voice command history with ok/error states
+ok 224 - renders recent voice command history with ok/error states
+  ---
+  duration_ms: 13.1835
+  type: 'test'
+  ...
+# Subtest: clicking a node after a live update uses the current projection
+ok 225 - clicking a node after a live update uses the current projection
+  ---
+  duration_ms: 0.912125
+  type: 'test'
+  ...
+# Subtest: history keeps an explicit follow-latest option even when no runs exist
+ok 226 - history keeps an explicit follow-latest option even when no runs exist
+  ---
+  duration_ms: 0.08
+  type: 'test'
+  ...
+# Subtest: programmatic selection opens an exact run missing from recent history
+ok 227 - programmatic selection opens an exact run missing from recent history
+  ---
+  duration_ms: 2.611541
+  type: 'test'
+  ...
+# Subtest: rapid capsule navigation keeps the last requested run when responses arrive late
+ok 228 - rapid capsule navigation keeps the last requested run when responses arrive late
+  ---
+  duration_ms: 8.378792
+  type: 'test'
+  ...
+# Subtest: repeated programmatic selection of one run discards earlier snapshots
+ok 229 - repeated programmatic selection of one run discards earlier snapshots
+  ---
+  duration_ms: 1.705875
+  type: 'test'
+  ...
+# Subtest: one native subscription keeps a selected companion run live after another run becomes latest
+ok 230 - one native subscription keeps a selected companion run live after another run becomes latest
+  ---
+  duration_ms: 1.9775
+  type: 'test'
+  ...
+# Subtest: selected-run restoration buffers live events and ignores late gap replies after switching
+ok 231 - selected-run restoration buffers live events and ignores late gap replies after switching
+  ---
+  duration_ms: 1.855792
+  type: 'test'
+  ...
+# Subtest: selected-run gap errors are visible and a later event can recover in order
+ok 232 - selected-run gap errors are visible and a later event can recover in order
+  ---
+  duration_ms: 1.251959
+  type: 'test'
+  ...
+# Subtest: a pinned history run retains live updates and returning to latest renders immediately
+ok 233 - a pinned history run retains live updates and returning to latest renders immediately
+  ---
+  duration_ms: 0.32775
+  type: 'test'
+  ...
+# Subtest: out-of-order history responses cannot replace a newer selection or follow-latest
+ok 234 - out-of-order history responses cannot replace a newer selection or follow-latest
+  ---
+  duration_ms: 2.076
+  type: 'test'
+  ...
+# Subtest: live progress cannot move backward while a selected live history request resolves
+ok 235 - live progress cannot move backward while a selected live history request resolves
+  ---
+  duration_ms: 0.227791
+  type: 'test'
+  ...
+# Subtest: a fresher history snapshot of the latest run survives returning to live
+ok 236 - a fresher history snapshot of the latest run survives returning to live
+  ---
+  duration_ms: 0.180541
+  type: 'test'
+  ...
+# Subtest: a lagging live event switches latest to its fresher cached history run
+ok 237 - a lagging live event switches latest to its fresher cached history run
+  ---
+  duration_ms: 0.133959
+  type: 'test'
+  ...
+# Subtest: new runs and terminal transitions coalesce history refresh and preserve a missing pinned option
+ok 238 - new runs and terminal transitions coalesce history refresh and preserve a missing pinned option
+  ---
+  duration_ms: 5.571042
+  type: 'test'
+  ...
+# Subtest: history IPC failures are visible without preventing a return to live
+ok 239 - history IPC failures are visible without preventing a return to live
+  ---
+  duration_ms: 3.197916
+  type: 'test'
+  ...
+# Subtest: resolved permissions and terminal runs do not leave actionable confirmation cards
+ok 240 - resolved permissions and terminal runs do not leave actionable confirmation cards
+  ---
+  duration_ms: 0.667917
+  type: 'test'
+  ...
+# Subtest: failed run controls restore the button and show the command error
+ok 241 - failed run controls restore the button and show the command error
+  ---
+  duration_ms: 6.921709
+  type: 'test'
+  ...
+# Subtest: a command error remains visible when progress rerenders the detail during IPC
+ok 242 - a command error remains visible when progress rerenders the detail during IPC
+  ---
+  duration_ms: 0.262792
+  type: 'test'
+  ...
+# Subtest: a step with no control metadata has no footer
+ok 243 - a step with no control metadata has no footer
+  ---
+  duration_ms: 0.626292
+  type: 'test'
+  ...
+# Subtest: retry policy is badged with its attempt count
+ok 244 - retry policy is badged with its attempt count
+  ---
+  duration_ms: 3.774708
+  type: 'test'
+  ...
+# Subtest: retry defaults to one attempt when times is absent
+ok 245 - retry defaults to one attempt when times is absent
+  ---
+  duration_ms: 0.144833
+  type: 'test'
+  ...
+# Subtest: an explicit interrupt is not badged
+ok 246 - an explicit interrupt is not badged
+  ---
+  duration_ms: 0.208166
+  type: 'test'
+  ...
+# Subtest: continue mode is badged as ignoring errors
+ok 247 - continue mode is badged as ignoring errors
+  ---
+  duration_ms: 0.276666
+  type: 'test'
+  ...
+# Subtest: retry mode is badged with its retry count
+ok 248 - retry mode is badged with its retry count
+  ---
+  duration_ms: 0.21925
+  type: 'test'
+  ...
+# Subtest: retry mode without an explicit count reads as zero
+ok 249 - retry mode without an explicit count reads as zero
+  ---
+  duration_ms: 0.286875
+  type: 'test'
+  ...
+# Subtest: a step can carry both a retry policy and failure handling
+ok 250 - a step can carry both a retry policy and failure handling
+  ---
+  duration_ms: 0.253833
+  type: 'test'
+  ...
+# Subtest: badge markup escapes values so a mode cannot inject markup
+ok 251 - badge markup escapes values so a mode cannot inject markup
+  ---
+  duration_ms: 0.302458
+  type: 'test'
+  ...
+# Subtest: footer markup wraps badges in the expected container
+ok 252 - footer markup wraps badges in the expected container
+  ---
+  duration_ms: 0.2695
+  type: 'test'
+  ...
+# Subtest: non-object input yields no badges rather than throwing
+ok 253 - non-object input yields no badges rather than throwing
+  ---
+  duration_ms: 0.096625
+  type: 'test'
+  ...
+# Subtest: normalizeHumanValue: input coerces to string, confirm/approve to bool
+ok 254 - normalizeHumanValue: input coerces to string, confirm/approve to bool
+  ---
+  duration_ms: 0.408916
+  type: 'test'
+  ...
+# Subtest: pickRunningRunIds filters running runs with ids
+ok 255 - pickRunningRunIds filters running runs with ids
+  ---
+  duration_ms: 0.373916
+  type: 'test'
+  ...
+# Subtest: formatCountdown clamps negatives and formats minutes
+ok 256 - formatCountdown clamps negatives and formats minutes
+  ---
+  duration_ms: 0.062041
+  type: 'test'
+  ...
+# Subtest: complete OCR files still show unchecked runtime and unverified inference
+ok 257 - complete OCR files still show unchecked runtime and unverified inference
+  ---
+  duration_ms: 0.58825
+  type: 'test'
+  ...
+# Subtest: partial files can be redownloaded but cannot be used for an inference test
+ok 258 - partial files can be redownloaded but cannot be used for an inference test
+  ---
+  duration_ms: 0.17075
+  type: 'test'
+  ...
+# Subtest: runtime and inference failures are distinct and untrusted reasons are escaped
+ok 259 - runtime and inference failures are distinct and untrusted reasons are escaped
+  ---
+  duration_ms: 0.07875
+  type: 'test'
+  ...
+# Subtest: verified inference is explicit and unsupported models cannot run a local inference test
+ok 260 - verified inference is explicit and unsupported models cannot run a local inference test
+  ---
+  duration_ms: 0.091416
+  type: 'test'
+  ...
+# Subtest: legacy downloaded flags do not claim verified readiness and an empty list can be refreshed
+ok 261 - legacy downloaded flags do not claim verified readiness and an empty list can be refreshed
+  ---
+  duration_ms: 0.116292
+  type: 'test'
+  ...
+# Subtest: runtime checks use the local IPC contract, preserve edits and prevent duplicate requests
+ok 262 - runtime checks use the local IPC contract, preserve edits and prevent duplicate requests
+  ---
+  duration_ms: 0.859625
+  type: 'test'
+  ...
+# Subtest: inference tests require complete runnable files and surface IPC failures
+ok 263 - inference tests require complete runnable files and surface IPC failures
+  ---
+  duration_ms: 0.438208
+  type: 'test'
+  ...
+# Subtest: a stale list response cannot overwrite newer local inference diagnostics
+ok 264 - a stale list response cannot overwrite newer local inference diagnostics
+  ---
+  duration_ms: 2.060125
+  type: 'test'
+  ...
+# Subtest: desktop merge adds exact categories and preserves unrelated source
+ok 265 - desktop merge adds exact categories and preserves unrelated source
+  ---
+  duration_ms: 7.987042
+  type: 'test'
+  ...
+# Subtest: desktop merge supports inline capabilities and steps and avoids duplicate ids
+ok 266 - desktop merge supports inline capabilities and steps and avoids duplicate ids
+  ---
+  duration_ms: 0.909375
+  type: 'test'
+  ...
+# Subtest: desktop merge inserts missing capabilities and handles an empty inline steps list
+ok 267 - desktop merge inserts missing capabilities and handles an empty inline steps list
+  ---
+  duration_ms: 2.939708
+  type: 'test'
+  ...
+# Subtest: desktop merge keeps existing wildcard and does not grant screen or network
+ok 268 - desktop merge keeps existing wildcard and does not grant screen or network
+  ---
+  duration_ms: 0.462625
+  type: 'test'
+  ...
+# Subtest: browser-only merge leaves capability formatting intact
+ok 269 - browser-only merge leaves capability formatting intact
+  ---
+  duration_ms: 0.359667
+  type: 'test'
+  ...
+# Subtest: renders grants revocations and L3 biometric boundary without secrets
+ok 270 - renders grants revocations and L3 biometric boundary without secrets
+  ---
+  duration_ms: 0.672292
+  type: 'test'
+  ...
+# Subtest: maps revoke export and biometric challenge commands
+ok 271 - maps revoke export and biometric challenge commands
+  ---
+  duration_ms: 0.382166
+  type: 'test'
+  ...
+# Subtest: migrates legacy voice shortcut into the shortcut center
+ok 272 - migrates legacy voice shortcut into the shortcut center
+  ---
+  duration_ms: 0.567708
+  type: 'test'
+  ...
+# Subtest: captures desktop accelerator combinations
+ok 273 - captures desktop accelerator combinations
+  ---
+  duration_ms: 0.084125
+  type: 'test'
+  ...
+# Subtest: renders action choices and recording controls
+ok 274 - renders action choices and recording controls
+  ---
+  duration_ms: 0.191291
+  type: 'test'
+  ...
+# Subtest: collectStepIds walks nested step ids
+ok 275 - collectStepIds walks nested step ids
+  ---
+  duration_ms: 4.465958
+  type: 'test'
+  ...
+# Subtest: extractStepBlock returns the dedented block including children
+ok 276 - extractStepBlock returns the dedented block including children
+  ---
+  duration_ms: 0.886333
+  type: 'test'
+  ...
+# Subtest: uniquifyStepIds renames colliding ids (nested too) and rewrites steps.<id> refs inside the block
+ok 277 - uniquifyStepIds renames colliding ids (nested too) and rewrites steps.<id> refs inside the block
+  ---
+  duration_ms: 0.91725
+  type: 'test'
+  ...
+# Subtest: uniquifyStepIds keeps ids untouched when there is no collision
+ok 278 - uniquifyStepIds keeps ids untouched when there is no collision
+  ---
+  duration_ms: 0.158125
+  type: 'test'
+  ...
+# Subtest: uniquifyStepIds sanitizes quoted ids when renaming
+ok 279 - uniquifyStepIds sanitizes quoted ids when renaming
+  ---
+  duration_ms: 0.151209
+  type: 'test'
+  ...
+# Subtest: insertStepBlockAfter inserts a sibling after the target with matching indent
+ok 280 - insertStepBlockAfter inserts a sibling after the target with matching indent
+  ---
+  duration_ms: 0.399583
+  type: 'test'
+  ...
+# Subtest: insertStepBlockAfter after a nested step inserts inside the same child block
+ok 281 - insertStepBlockAfter after a nested step inserts inside the same child block
+  ---
+  duration_ms: 0.303166
+  type: 'test'
+  ...
+# Subtest: insertStepBlocks pastes multiple blocks in order after the target, re-iding collisions
+ok 282 - insertStepBlocks pastes multiple blocks in order after the target, re-iding collisions
+  ---
+  duration_ms: 3.079125
+  type: 'test'
+  ...
+# Subtest: insertStepBlocks with null target appends at the end of top-level steps
+ok 283 - insertStepBlocks with null target appends at the end of top-level steps
+  ---
+  duration_ms: 0.5445
+  type: 'test'
+  ...
+# Subtest: removeStepBlocks deletes top-level and nested steps by id
+ok 284 - removeStepBlocks deletes top-level and nested steps by id
+  ---
+  duration_ms: 0.339958
+  type: 'test'
+  ...
+# Subtest: orderPathKeysByDocument returns ids and keys in walk order
+ok 285 - orderPathKeysByDocument returns ids and keys in walk order
+  ---
+  duration_ms: 0.190084
+  type: 'test'
+  ...
+# Subtest: renders signed updater configuration and channels
+ok 286 - renders signed updater configuration and channels
+  ---
+  duration_ms: 0.378833
+  type: 'test'
+  ...
+# Subtest: clamps updater download progress
+ok 287 - clamps updater download progress
+  ---
+  duration_ms: 0.072834
+  type: 'test'
+  ...
+# Subtest: renders every voice lifecycle state with accessible controls
+ok 288 - renders every voice lifecycle state with accessible controls
+  ---
+  duration_ms: 2.122333
+  type: 'test'
+  ...
+# Subtest: projects quick command feedback into success and error states
+ok 289 - projects quick command feedback into success and error states
+  ---
+  duration_ms: 0.263125
+  type: 'test'
+  ...
+# Subtest: follow-up window honors persona message with default fallback
+ok 290 - follow-up window honors persona message with default fallback
+  ---
+  duration_ms: 0.06475
+  type: 'test'
+  ...
+# Subtest: projects transcript and agent events into capsule state
+ok 291 - projects transcript and agent events into capsule state
+  ---
+  duration_ms: 0.335666
+  type: 'test'
+  ...
+# Subtest: capsule motion honors reduced motion
+ok 292 - capsule motion honors reduced motion
+  ---
+  duration_ms: 0.451083
+  type: 'test'
+  ...
+# Subtest: capsule is draggable and says how to get it back
+ok 293 - capsule is draggable and says how to get it back
+  ---
+  duration_ms: 0.105667
+  type: 'test'
+  ...
+# Subtest: capsule drag region covers the whole capsule except its buttons
+ok 294 - capsule drag region covers the whole capsule except its buttons
+  ---
+  duration_ms: 0.163708
+  type: 'test'
+  ...
+# Subtest: picks the enabled voice_toggle binding over the legacy shortcut field
+ok 295 - picks the enabled voice_toggle binding over the legacy shortcut field
+  ---
+  duration_ms: 0.457875
+  type: 'test'
+  ...
+# Subtest: formats accelerators per platform
+ok 296 - formats accelerators per platform
+  ---
+  duration_ms: 0.279209
+  type: 'test'
+  ...
+# Subtest: launcher describes text input and marks the displayed shortcut as voice input
+ok 297 - launcher describes text input and marks the displayed shortcut as voice input
+  ---
+  duration_ms: 0.30625
+  type: 'test'
+  ...
+# Subtest: applies launcher state onto the topbar button
+ok 298 - applies launcher state onto the topbar button
+  ---
+  duration_ms: 0.106791
+  type: 'test'
+  ...
+# Subtest: clicking the launcher opens the text panel and follows capsule expansion events
+ok 299 - clicking the launcher opens the text panel and follows capsule expansion events
+  ---
+  duration_ms: 1.345583
+  type: 'test'
+  ...
+# Subtest: text launcher works with voice idle and enabled=false
+ok 300 - text launcher works with voice idle and enabled=false
+  ---
+  duration_ms: 0.249916
+  type: 'test'
+  ...
+# Subtest: text launcher works with voice error and enabled=true
+ok 301 - text launcher works with voice error and enabled=true
+  ---
+  duration_ms: 0.747
+  type: 'test'
+  ...
+# Subtest: text launcher works with voice muted and enabled=false
+ok 302 - text launcher works with voice muted and enabled=false
+  ---
+  duration_ms: 1.329625
+  type: 'test'
+  ...
+# Subtest: failed status reads leave the text launcher usable without voice commands
+ok 303 - failed status reads leave the text launcher usable without voice commands
+  ---
+  duration_ms: 0.636583
+  type: 'test'
+  ...
+# Subtest: launcher reports an opening failure with task-assistant context
+ok 304 - launcher reports an opening failure with task-assistant context
+  ---
+  duration_ms: 0.699917
+  type: 'test'
+  ...
+# Subtest: launcher suppresses repeated clicks and stale status snapshots
+ok 305 - launcher suppresses repeated clicks and stale status snapshots
+  ---
+  duration_ms: 0.409291
+  type: 'test'
+  ...
+# Subtest: pagehide disposes the launcher and releases a late listener subscription once
+ok 306 - pagehide disposes the launcher and releases a late listener subscription once
+  ---
+  duration_ms: 0.20375
+  type: 'test'
+  ...
+# Subtest: launcher text follows locale updates until disposed
+ok 307 - launcher text follows locale updates until disposed
+  ---
+  duration_ms: 0.333125
+  type: 'test'
+  ...
+# Subtest: renders privacy-first voice defaults and model health
+ok 308 - renders privacy-first voice defaults and model health
+  ---
+  duration_ms: 1.935625
+  type: 'test'
+  ...
+# Subtest: renders local lumo voice pack selector and quick command editor
+ok 309 - renders local lumo voice pack selector and quick command editor
+  ---
+  duration_ms: 0.702
+  type: 'test'
+  ...
+# Subtest: serializes settings without inventing audio retention
+ok 310 - serializes settings without inventing audio retention
+  ---
+  duration_ms: 0.742833
+  type: 'test'
+  ...
+# Subtest: normalizes nested backend status and separately loaded models and devices
+ok 311 - normalizes nested backend status and separately loaded models and devices
+  ---
+  duration_ms: 0.366167
+  type: 'test'
+  ...
+# Subtest: collects quick command rows from editor DOM
+ok 312 - collects quick command rows from editor DOM
+  ---
+  duration_ms: 0.660333
+  type: 'test'
+  ...
+# Subtest: exports and merges quick commands with imported phrases winning
+ok 313 - exports and merges quick commands with imported phrases winning
+  ---
+  duration_ms: 0.401
+  type: 'test'
+  ...
+# Subtest: voice settings lead with the three ways to summon the capsule
+ok 314 - voice settings lead with the three ways to summon the capsule
+  ---
+  duration_ms: 0.271625
+  type: 'test'
+  ...
+# Subtest: summon guide renders the bound accelerator per platform
+ok 315 - summon guide renders the bound accelerator per platform
+  ---
+  duration_ms: 0.116959
+  type: 'test'
+  ...
+# Subtest: parseYaml preserves control.parallel branches as nested step lists
+ok 316 - parseYaml preserves control.parallel branches as nested step lists
+  ---
+  duration_ms: 1.925167
+  type: 'test'
+  ...
+# Subtest: walkSteps, findStepByPath, and stepIdChain understand branch paths
+ok 317 - walkSteps, findStepByPath, and stepIdChain understand branch paths
+  ---
+  duration_ms: 0.626791
+  type: 'test'
+  ...
+# Subtest: emitStep round-trips a continue fallback with its default output
+ok 318 - emitStep round-trips a continue fallback with its default output
+  ---
+  duration_ms: 0.394709
+  type: 'test'
+  ...
+# Subtest: emitStep round-trips retry mode with its count and interval
+ok 319 - emitStep round-trips retry mode with its count and interval
+  ---
+  duration_ms: 0.223417
+  type: 'test'
+  ...
+# Subtest: emitStep omits an on_error block that changes nothing
+ok 320 - emitStep omits an on_error block that changes nothing
+  ---
+  duration_ms: 0.085625
+  type: 'test'
+  ...
+# Subtest: emitStep keeps an explicit default mode when it carries an output
+ok 321 - emitStep keeps an explicit default mode when it carries an output
+  ---
+  duration_ms: 0.118417
+  type: 'test'
+  ...
+# Subtest: emitStep keeps both a retry policy and failure handling
+ok 322 - emitStep keeps both a retry policy and failure handling
+  ---
+  duration_ms: 0.247459
+  type: 'test'
+  ...
+# Subtest: emitStep writes branches that parse back to the same branch shape
+ok 323 - emitStep writes branches that parse back to the same branch shape
+  ---
+  duration_ms: 0.154167
+  type: 'test'
+  ...
+1..323
+# tests 323
+# suites 0
+# pass 323
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5950.652875

@@ -13,6 +13,8 @@ import { snapshotSource } from "./editor/history.js";
 import { switchRightSection } from "./views.js";
 import { ensureCurrentFlowSaved } from "./flows.js";
 import { reduceRunProgress } from "./app-events.js";
+import { refreshGraphRunState } from "./editor/graph.js";
+import { applyGraphRunResponse, createGraphRunContext, finishGraphRunContext, recordGraphRunProgress } from "./editor/graph-run-state.js";
 
 // Allocate a ULID before IPC so progress and cancellation always identify the
 // exact editor request, including the interval before the first step starts.
@@ -31,6 +33,10 @@ function newRunId() {
 export function setRunInFlight(on) {
   state.runInFlight = !!on;
   state.inFlightRunId = on ? newRunId() : null;
+  state.editorRunContext = on
+    ? createGraphRunContext({ flowPath: state.flowPath, source: state.source, runId: state.inFlightRunId })
+    : finishGraphRunContext(state.editorRunContext, state.editorRunContext?.terminal || "cancelled");
+  refreshGraphRunState();
   acceptingProgress = !!on;
   preparingRun = !!on;
   cancelRequested = false;
@@ -44,6 +50,11 @@ export function setRunInFlight(on) {
 
 export function updateRunProgress(event) {
   if (!acceptingProgress || !state.runInFlight || !event?.runId || event.runId !== state.inFlightRunId) return;
+  const nextGraphState = recordGraphRunProgress(state.editorRunContext, event);
+  if (nextGraphState !== state.editorRunContext) {
+    state.editorRunContext = nextGraphState;
+    refreshGraphRunState();
+  }
   if (cancelRequested) {
     cancelRequested = false;
     call("cancel_run", { runId: event.runId }).catch(() => {});
@@ -74,10 +85,15 @@ export async function cancelActiveRun() {
 
 export async function prepareEditorRun() {
   const path = await ensureCurrentFlowSaved();
+  if (state.editorRunContext?.runId === state.inFlightRunId) {
+    state.editorRunContext = { ...state.editorRunContext, flowPath: path };
+  }
   preparingRun = false;
   if (!cancelRequested) return path;
   setStatus("运行已取消", "warn");
   $("outputBox").textContent = "运行已取消";
+  state.editorRunContext = finishGraphRunContext(state.editorRunContext, "cancelled");
+  refreshGraphRunState();
   return null;
 }
 
@@ -208,6 +224,10 @@ export async function showRunFailure(error) {
       } });
     }
   } catch { /* A parse/save failure may not have created a stored run. */ }
+  if (state.editorRunContext?.runId === runId) {
+    state.editorRunContext = finishGraphRunContext(state.editorRunContext, state.liveRunProgress?.status === "cancelled" ? "cancelled" : "failed");
+    refreshGraphRunState();
+  }
   $("outputBox").textContent = pretty({ runId, error: String(error), outputs: state.activeRun?.id === runId ? state.activeRun.outputs : null });
   switchRightSection("outputs");
 }
@@ -219,6 +239,8 @@ export async function showRunFailure(error) {
 /// timeline first renders).
 export function applyRunResponse(response) {
   acceptingProgress = false;
+  state.editorRunContext = applyGraphRunResponse(state.editorRunContext, response);
+  refreshGraphRunState();
   state.activeRun = response.run;
   state.activeRunSteps = response.steps || [];
   // The run report's `outputs` is the full steps snapshot ({ "<id>": { result,

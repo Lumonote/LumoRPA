@@ -17,6 +17,7 @@ function currentSnapshot() {
     source: state.source,
     selectedKey: pathKey(state.selectedStepPath || []),
     selectedId: state.selectedStepId,
+    graphLayouts: structuredClone(state.graphLayouts || {}),
   };
 }
 
@@ -36,6 +37,10 @@ function applySnapshot(snap) {
   state.ast = parseYaml(state.source);
   state.selectedStepPath = snap.selectedKey ? parsePathKey(snap.selectedKey) : null;
   state.selectedStepId = snap.selectedId ?? null;
+  if (snap.graphLayouts) {
+    state.graphLayouts = structuredClone(snap.graphLayouts);
+    try { localStorage.setItem("lumo.graphLayouts", JSON.stringify(state.graphLayouts)); } catch { /* Optional presentation state. */ }
+  }
   state.draftController?.capture();
   state.selectedStepPaths?.clear();
   renderActiveView();

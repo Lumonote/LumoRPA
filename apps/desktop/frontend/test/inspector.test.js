@@ -197,3 +197,20 @@ test("typed action parameters keep template expressions through policy edits", a
   view.apply();
   assert.deepEqual(extractSteps(state.ast)[0].with, { count: "{{ inputs.count }}", enabled: "{{ inputs.enabled }}", config: "{{ inputs.config }}" });
 });
+
+test("ordinary node selection clears hidden multi-selection and repeated selection keeps form drafts", async (context) => {
+  const view = ui(context);
+  view.flow('spec:\n  steps:\n    - {id: a, action: control.log, with: {message: original}}\n    - {id: b, action: control.log, with: {message: second}}\n');
+  invoke = async () => ({ properties: { message: { type: "string" } } });
+  await renderInspector();
+  const { selectStep } = await import("../src/js/editor/inspector.js");
+  const form = view.form();
+  form.querySelector('[data-with-key="message"]').value = "unsaved property draft";
+  state.selectedStepPaths = new Set(["0", "1"]);
+  selectStep([0]);
+  assert.equal(state.selectedStepPaths.size, 0);
+  assert.equal(view.form(), form);
+  assert.equal(form.querySelector('[data-with-key="message"]').value, "unsaved property draft");
+  await selectStep([1]);
+  assert.equal(state.selectedStepId, "b");
+});

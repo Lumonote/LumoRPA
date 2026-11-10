@@ -444,7 +444,7 @@ function bindEvents() {
 
   // Editor keyboard: undo/redo + step clipboard + batch delete (design view)
   document.addEventListener("keydown", (e) => {
-    if (state.currentView !== "design") return;
+    if (state.currentView !== "design" || e.defaultPrevented || e.isComposing || e.target.closest?.('[role="dialog"]')) return;
     const mod = e.metaKey || e.ctrlKey;
     const t = e.target;
     const editable = !!t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));

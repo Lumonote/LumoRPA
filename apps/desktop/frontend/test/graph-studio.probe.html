@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><title>画布验收</title></head><body><script type="module">
+const source = await (await fetch('../src/index.html')).text();
+const parsed = new DOMParser().parseFromString(source, 'text/html');
+parsed.querySelector('script[src="./js/main.js"]').remove();
+const base = document.createElement('base'); base.href = new URL('../src/', location.href);
+document.head.replaceChildren(base, ...parsed.head.childNodes);
+document.body.replaceChildren(...parsed.body.childNodes);
+await import('../fixtures/graph-studio.probe.js');
+</script></body></html>

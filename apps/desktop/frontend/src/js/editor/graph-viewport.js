@@ -1,4 +1,4 @@
-export const GRAPH_MIN_SCALE = 0.25;
+export const GRAPH_MIN_SCALE = 0.02;
 export const GRAPH_MAX_SCALE = 3.5;
 
 export function screenToWorld(transform, screenX, screenY) {
@@ -42,4 +42,11 @@ export function applyLayoutOverrides(positions, overrides = {}) {
     positions.set(key, { ...pos, x: saved.x, y: saved.y });
   }
   return positions;
+}
+
+// Fit the complete world bounds, including nodes dragged left/up of the origin.
+export function fitGraphBounds(bounds, width, height, padding = 56) {
+  if (!bounds || width <= 0 || height <= 0) return { tx: 24, ty: 24, scale: 1 };
+  const scale = Math.min(1, Math.max(GRAPH_MIN_SCALE, Math.min((width - padding * 2) / Math.max(1, bounds.width), (height - padding * 2) / Math.max(1, bounds.height))));
+  return { scale, tx: width / 2 - (bounds.x + bounds.width / 2) * scale, ty: height / 2 - (bounds.y + bounds.height / 2) * scale };
 }

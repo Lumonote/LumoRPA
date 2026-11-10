@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-10",
+  "narrow": {
+    "direction": "column",
+    "display": "flex",
+    "drawer": {
+      "bottom": 862,
+      "left": 644,
+      "right": 984,
+      "top": 80
+    },
+    "height": 900,
+    "inputCount": 21,
+    "width": 1000
+  },
+  "scale": {
+    "allFit": true,
+    "count": 80,
+    "status": "80 节点 · 0 数据连接",
+    "zoom": "4%"
+  },
+  "screenshots": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "node": {
+      "width": 260,
+      "height": 170
+    },
+    "lightDataPortColor": "#a36714"
+  },
+  "interface": "real frontend components with simulated APIs and execution"
+}

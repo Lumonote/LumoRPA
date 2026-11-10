@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="./styles/improvements.css" />
     <link rel="stylesheet" href="./styles/voice-settings.css" />
     <link rel="stylesheet" href="./styles/security-center.css" />
+    <link rel="stylesheet" href="./styles/graph-studio.css" />
   </head>
   <body>
     <div class="shell">
@@ -104,7 +105,7 @@
             </div>
             <div class="view-switch" id="viewSwitch">
               <button class="is-active" data-mode="steps">步骤</button>
-              <button data-mode="graph">图</button>
+              <button data-mode="graph">画布</button>
               <button data-mode="tree">树</button>
               <button data-mode="code">代码</button>
             </div>
@@ -138,12 +139,17 @@
             <!-- Graph view -->
             <div class="view" id="view-graph">
               <div class="graph-wrap">
-                <div class="graph-controls" aria-label="Graph zoom controls">
-                  <button class="icon ghost" id="graphZoomOut" title="缩小">−</button>
-                  <button class="ghost" id="graphZoomReset" title="重置视图">1:1</button>
-                  <button class="icon ghost" id="graphZoomIn" title="放大">＋</button>
+                <div class="graph-studio-topbar">
+                  <div class="graph-studio-label"><span aria-hidden="true"></span>流程画布<em>NODE STUDIO</em></div>
+                  <div class="graph-studio-actions" role="toolbar" aria-label="画布编辑工具">
+                    <button class="graph-add-button" id="graphAddNode" type="button" title="搜索并添加节点"><span aria-hidden="true">＋</span> 添加节点</button>
+                    <button id="graphArrange" type="button" title="重新排列节点，保留流程与参数">整理布局</button>
+                    <button id="graphFocus" type="button" title="将选中节点移到视图中央">聚焦选中</button>
+                    <button id="graphFocusMode" type="button" aria-pressed="false" title="展开画布，暂时收起流程库、属性和素材库">专注画布</button>
+                    <button id="graphInspectorToggle" type="button" aria-expanded="false" aria-controls="rightRail">节点属性</button>
+                  </div>
                 </div>
-                <svg class="graph-svg" id="graphSvg">
+                <svg class="graph-svg" id="graphSvg" tabindex="0" role="application" aria-label="流程节点画布" aria-describedby="graphKeyboardHelp">
                   <defs>
                     <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="strokeWidth" markerWidth="7" markerHeight="7" orient="auto">
                       <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
@@ -151,6 +157,38 @@
                   </defs>
                   <g id="graphRoot"></g>
                 </svg>
+                <div class="graph-empty" id="graphEmpty" hidden>
+                  <div class="graph-empty-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+                  <span class="graph-eyebrow">BUILD YOUR WORKFLOW</span>
+                  <h3>从一个节点开始</h3>
+                  <p>添加指令，编排执行顺序与数据，<br />把想法编排成可运行的流程。</p>
+                  <button class="graph-add-button" type="button" data-graph-add>＋ 添加第一个节点</button>
+                  <small>也可以从左侧指令集拖入</small>
+                </div>
+                <div class="graph-palette" id="graphPalette" role="dialog" aria-modal="false" aria-label="添加流程节点" hidden>
+                  <header><span>添加节点</span><kbd>Esc 关闭</kbd></header>
+                  <label class="graph-palette-search"><span aria-hidden="true">⌕</span><input id="graphActionSearch" type="search" autocomplete="off" spellcheck="false" placeholder="搜索名称、动作或分类" aria-label="搜索画布节点" /></label>
+                  <div class="graph-palette-results" id="graphActionResults" role="group" aria-label="匹配的流程节点"></div>
+                  <footer>选择节点后添加到当前画布</footer>
+                </div>
+                <div class="graph-connect-confirm" id="graphConnectConfirm" role="dialog" aria-label="确认流程连接" hidden>
+                  <span class="graph-eyebrow">CONNECT NODES</span>
+                  <p id="graphConnectMessage"></p>
+                  <div><button type="button" id="graphConnectCancel">取消</button><button type="button" class="graph-add-button" id="graphConnectApply">确认连接</button></div>
+                </div>
+                <div class="graph-studio-bottom">
+                  <div class="graph-canvas-status"><span id="graphStatus" role="status" aria-live="polite">画布就绪</span><span id="graphNodeCount"></span><span class="graph-legend"><i class="is-execution"></i>执行流<i class="is-data"></i>数据</span></div>
+                  <div class="graph-navigation">
+                    <details class="graph-help"><summary title="查看画布快捷操作" aria-label="画布操作帮助">?</summary><div id="graphKeyboardHelp"><strong>画布操作</strong><span>拖动空白处 · 平移画布</span><span>Ctrl / ⌘ + 滚轮 · 缩放</span><span>点击节点 · 查看属性</span><span>拖动端口 · 建立连接</span><span>Esc · 取消当前操作</span></div></details>
+                    <div class="graph-controls" role="toolbar" aria-label="画布视图工具">
+                      <button class="icon ghost" id="graphZoomOut" type="button" title="缩小" aria-label="缩小画布">−</button>
+                      <button class="ghost graph-zoom-value" id="graphZoomReset" type="button" title="恢复 100% 缩放">100%</button>
+                      <button class="icon ghost" id="graphZoomIn" type="button" title="放大" aria-label="放大画布">＋</button>
+                      <span class="graph-control-divider" aria-hidden="true"></span>
+                      <button class="ghost" id="graphFit" type="button" title="显示全部节点">适应</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 

@@ -39,6 +39,7 @@ export const state = {
   activeRun: null,
   activeRunSteps: [],
   liveRunProgress: null,
+  editorRunContext: null, // exact flow/source/run snapshot for canvas execution states
   runInFlight: false,
   inFlightRunId: null,
   activeStepRun: null,
