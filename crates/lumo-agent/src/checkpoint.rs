@@ -18,6 +18,10 @@ pub(crate) struct RestoredCheckpoint {
 }
 
 impl JobCheckpointStore {
+    pub(crate) fn repo(&self) -> Repo {
+        self.repo.clone()
+    }
+
     pub fn new(repo: Repo, job_id: impl Into<String>, worker_id: impl Into<String>) -> Self {
         Self {
             repo,

@@ -1,0 +1,29 @@
+name: Linux native recorder acceptance
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  x11-atspi:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/linux-deps
+      - name: Install isolated desktop and native recorder prerequisites
+        run: sudo apt-get install -y xvfb dbus-x11 xinput xdotool python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0 at-spi2-core libatk-adaptor
+      - name: Build native recorder acceptance harness
+        run: cargo build -p lumo-recorder --locked --example desktop_capture
+      - name: Run native capture in an isolated virtual desktop
+        run: dbus-run-session -- xvfb-run -a /usr/bin/python3 scripts/linux-recorder-e2e.py --capture-binary "$PWD/target/debug/examples/desktop_capture"

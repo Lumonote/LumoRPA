@@ -15,8 +15,9 @@ CARGO_INCREMENTAL=0 cargo test -p lumo-actions --locked \
 
 The suite serves temporary pages on localhost and runs the production Flow VM
 and browser actions. It verifies form typing, select changes, cookies, file
-upload, clicks, iframe typing/clicking and persisted outputs. Both clicks must
-be trusted browser input. Missing Chrome or a blocked localhost port fails the
+upload, clicks, iframe typing/clicking and persisted outputs. Clicks and typed input must
+be trusted browser input. A second fixture exercises cross-site, nested
+out-of-process frames with Unicode input, scrolling and scaled frame owners. Missing Chrome or a blocked localhost port fails the
 test. This suite does not use the `LUMO_SKIP_BROWSER_TESTS` escape hatch.
 
 ## Tauri webview
@@ -63,3 +64,13 @@ Chrome. The Python script passed syntax and CLI checks, and the workflow passed
 YAML parsing and the runner-label guard. The full Tauri/WebKit acceptance suite
 could not run on that macOS host; its first Linux CI execution is still needed
 to establish the desktop end-to-end result.
+
+## Verification recorded on 2026-11-10
+
+Real Chrome passed both workflow cases on macOS, including cross-site nested
+out-of-process frames, Unicode typing and trusted input events. Native Linux
+recording has a separate Xvfb/AT-SPI acceptance workflow and fixture documented
+in [the recorder README](../../crates/lumo-recorder/README.md). Linux Tauri and
+Linux native recorder execution still require a Linux runner; no pass is
+inferred from the macOS regression suite. Representative local OCR devices can
+run [the offline accuracy and memory acceptance tool](local-ocr.md).

@@ -336,6 +336,9 @@ pub struct StepCtx {
     /// per-`(run_id, name)` storage, never here (keeps `!Send` handles like a CDP
     /// `Page` out of the fork-able context).
     resources: Arc<BTreeMap<String, ResourceDecl>>,
+    sources: Option<Arc<crate::SourceSnapshot>>,
+    usage_observer: Option<crate::RunUsageObserver>,
+    usage_unknown: Arc<AtomicBool>,
     repo: Option<Repo>,
     /// Root directory for blob artifacts (screenshots, DOM snapshots, ...).
     /// When unset, `attach_artifact` is a no-op so headless smoke tests don't
@@ -454,6 +457,9 @@ impl StepCtx {
             capabilities,
             vault_names,
             resources: Arc::new(BTreeMap::new()),
+            sources: None,
+            usage_observer: None,
+            usage_unknown: Arc::new(AtomicBool::new(false)),
             repo,
             artifacts_dir: None,
             ai_provider: None,
@@ -484,6 +490,36 @@ impl StepCtx {
                 step_interrupt: Arc::new(AtomicBool::new(false)),
             })),
         }
+    }
+
+    pub fn with_source_snapshot(mut self, sources: Option<Arc<crate::SourceSnapshot>>) -> Self {
+        self.sources = sources;
+        self
+    }
+
+    pub fn source_snapshot(&self) -> Option<&Arc<crate::SourceSnapshot>> {
+        self.sources.as_ref()
+    }
+
+    pub fn with_usage_observer(mut self, observer: Option<crate::RunUsageObserver>) -> Self {
+        self.usage_observer = observer;
+        self
+    }
+
+    pub fn usage_observer(&self) -> Option<crate::RunUsageObserver> {
+        self.usage_observer.clone()
+    }
+
+    pub fn begin_usage_call(&self) -> crate::UsageCallGuard {
+        crate::UsageCallGuard::new(self.usage_unknown.clone())
+    }
+
+    pub fn mark_usage_unknown(&self) {
+        self.usage_unknown.store(true, Ordering::Relaxed);
+    }
+
+    pub fn usage_unknown(&self) -> bool {
+        self.usage_unknown.load(Ordering::Relaxed)
     }
 
     /// Attach the AI hook provider and flow-level AI policy. Called by
@@ -884,6 +920,9 @@ impl StepCtx {
             capabilities: self.capabilities.clone(),
             vault_names: self.vault_names.clone(),
             resources: self.resources.clone(),
+            sources: self.sources.clone(),
+            usage_observer: self.usage_observer.clone(),
+            usage_unknown: self.usage_unknown.clone(),
             repo: self.repo.clone(),
             artifacts_dir: self.artifacts_dir.clone(),
             ai_provider: self.ai_provider.clone(),

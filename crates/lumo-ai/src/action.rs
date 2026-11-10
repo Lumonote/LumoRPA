@@ -140,6 +140,7 @@ impl Action for ChatAction {
         // the resolved model lands on the X-10 cost row below.
         let req_model = req.model.clone();
         let t0 = Instant::now();
+        let usage_guard = ctx.begin_usage_call();
         let resp = self
             .router
             .chat(req)
@@ -153,6 +154,7 @@ impl Action for ChatAction {
             .await
             .map_err(|e| StepError::msg(format!("ai.chat: {e}")))?;
         let latency_ms = t0.elapsed().as_millis() as i64;
+        usage_guard.finish(resp.input_tokens > 0 || resp.output_tokens > 0);
         let cost = cost_micro(
             &resp.provider,
             &resp.model,
@@ -165,17 +167,24 @@ impl Action for ChatAction {
         // flow.
         if let Some(repo) = ctx.repo() {
             let step_id = ctx.current_step_id();
-            let _ = repo.record_ai_call(AiCallInsert {
-                flow_run_id: ctx.run_id(),
-                step_id: step_id.as_deref(),
-                helper: "chat",
-                provider: &resp.provider,
-                model: &resp.model,
-                input_tokens: resp.input_tokens as i64,
-                output_tokens: resp.output_tokens as i64,
-                latency_ms,
-                cost_usd_micro: cost,
-            });
+            if repo
+                .record_ai_call(AiCallInsert {
+                    flow_run_id: ctx.run_id(),
+                    step_id: step_id.as_deref(),
+                    helper: "chat",
+                    provider: &resp.provider,
+                    model: &resp.model,
+                    input_tokens: resp.input_tokens as i64,
+                    output_tokens: resp.output_tokens as i64,
+                    latency_ms,
+                    cost_usd_micro: cost,
+                })
+                .is_err()
+            {
+                ctx.mark_usage_unknown();
+            }
+        } else {
+            ctx.mark_usage_unknown();
         }
 
         Ok(ActionResult::from(serde_json::json!({

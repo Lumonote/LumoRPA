@@ -1,7 +1,7 @@
 // YAML parser + textual mutation helpers. The Code view remains the source of
 // truth; js-yaml gives the editor the same YAML semantics as the Rust runtime
 // (quoted strings, block scalars, nested branches and flow-style collections).
-import { load as loadYaml } from "./vendor/js-yaml.mjs";
+import { load as loadYaml, dump as dumpYaml } from "./vendor/js-yaml.mjs";
 
 export function parseYaml(text) {
   const value = loadYaml(String(text ?? ""));
@@ -288,6 +288,53 @@ export function mutateStepInSource(source, originalId, patch) {
   return lines.slice(0, startIdx).concat(replacement.split("\n")).concat(lines.slice(endIdx)).join("\n");
 }
 
+/** Replace exactly the selected node, including compact/flow-style branches.
+ * Parser spans avoid matching a similar id inside another branch or a string.
+ * Regions outside the mapping remain byte-for-byte intact.
+ */
+export function mutateStepAtPath(source, path, patch) {
+  const opened = [];
+  const spans = new WeakMap();
+  const ast = loadYaml(source, { listener(event, state) {
+    if (event === "open") opened.push(state.position);
+    else {
+      const start = opened.pop();
+      if (state.kind === "mapping" && state.result) spans.set(state.result, { start, end: Math.min(state.position, source.length) });
+    }
+  } });
+  const steps = extractSteps(ast);
+  const step = findStepByPath(steps, path);
+  if (!step) throw new Error("选中的节点已不存在，请重新选择");
+  let references = 0;
+  walkSteps(steps, (candidate) => { if (candidate === step) references++; });
+  if (references !== 1) throw new Error("该节点使用 YAML 共享引用，请先在代码中展开后编辑");
+  const span = spans.get(step);
+  if (!span) throw new Error("无法定位节点，请先在代码中展开 YAML 引用");
+  let start = span.start;
+  while (start < span.end && /\s/.test(source[start])) start++;
+  if (source[start] === "&" || source[start] === "*") throw new Error("该节点使用 YAML 共享引用，请先在代码中展开后编辑");
+  const column = start - source.lastIndexOf("\n", start - 1) - 1;
+  let end = span.end;
+  while (end > start && /\s/.test(source[end - 1])) end--;
+  // The parser consumes separator comments while looking for a sibling.
+  // Keep these outside the replacement, even when they were attached to the
+  // preceding mapping span by the loader.
+  while (end > start) {
+    const lineStart = source.lastIndexOf("\n", end - 1) + 1;
+    const comment = /^( *)#/.exec(source.slice(lineStart, end));
+    if (!comment || comment[1].length >= column) break;
+    end = lineStart;
+    while (end > start && /\s/.test(source[end - 1])) end--;
+  }
+  const inline = source[start] === "{";
+  const serialized = dumpYaml(patch, { noRefs: true, lineWidth: -1, indent: 2, ...(inline ? { flowLevel: 0 } : {}) }).replace(/\n$/, "");
+  const replacement = inline ? serialized : serialized.replace(/\n/g, `\n${" ".repeat(column)}`);
+  const result = source.slice(0, start) + replacement + source.slice(end);
+  // Unsupported YAML layouts must fail before changing the editor buffer.
+  loadYaml(result);
+  return result;
+}
+
 export function emitStep(step, baseIndent) {
   const pad = " ".repeat(baseIndent);
   const cIndent = " ".repeat(baseIndent + 2);
@@ -296,6 +343,7 @@ export function emitStep(step, baseIndent) {
     out += emitYamlField("when", step.when, baseIndent + 2);
   }
   if (step.bind) out += emitYamlField("bind", step.bind, baseIndent + 2);
+  if (step.resource != null) out += emitYamlField("resource", step.resource, baseIndent + 2);
   if (step.with && Object.keys(step.with).length) {
     out += `${cIndent}with:\n`;
     out += emitYamlMapEntries(step.with, baseIndent + 4);
@@ -309,20 +357,13 @@ export function emitStep(step, baseIndent) {
   // `output` is the reason this has to round-trip at all: drop it and a
   // downstream `{{ steps.x.result.* }}` silently becomes undefined.
   const oe = step.on_error;
-  if (oe && Object.keys(oe).length && (oe.mode !== "interrupt" || oe.output !== undefined)) {
+  if (oe && Object.keys(oe).length && (oe.mode !== "interrupt" || Object.keys(oe).some((key) => key !== "mode"))) {
     out += `${cIndent}on_error:\n`;
-    if (oe.mode) out += emitYamlField("mode", oe.mode, baseIndent + 4);
-    if (oe.retry_count) out += emitYamlField("retry_count", oe.retry_count, baseIndent + 4);
-    if (oe.retry_interval_ms) {
-      out += emitYamlField("retry_interval_ms", oe.retry_interval_ms, baseIndent + 4);
-    }
-    if (oe.output !== undefined) out += emitYamlField("output", oe.output, baseIndent + 4);
+    out += emitYamlMapEntries(oe, baseIndent + 4);
   }
-  if (step.ai && (step.ai.mode || step.ai.model || step.ai.prompt)) {
+  if (step.ai && Object.keys(step.ai).length) {
     out += `${cIndent}ai:\n`;
-    if (step.ai.mode) out += emitYamlField("mode", step.ai.mode, baseIndent + 4);
-    if (step.ai.model) out += emitYamlField("model", step.ai.model, baseIndent + 4);
-    if (step.ai.prompt) out += emitYamlField("prompt", step.ai.prompt, baseIndent + 4);
+    out += emitYamlMapEntries(step.ai, baseIndent + 4);
   }
   for (const kind of ["do", "else", "catch", "finally"]) {
     const arr = step[kind];
@@ -347,6 +388,10 @@ export function emitStep(step, baseIndent) {
         out += emitStep(child, branchIndent + 2) + "\n";
       }
     }
+  }
+  const known = new Set(["id", "action", "when", "bind", "resource", "with", "retry", "on_error", "ai", "do", "else", "catch", "finally", "branches"]);
+  for (const [key, value] of Object.entries(step)) {
+    if (!known.has(key) && value !== undefined) out += emitYamlField(key, value, baseIndent + 2);
   }
   return out.replace(/\n$/, "");
 }
@@ -406,7 +451,7 @@ function yamlKey(key) {
 
 export function yamlScalar(s) {
   if (typeof s !== "string") return JSON.stringify(s);
-  if (/^[\w.\-/]+$/.test(s)) return s;
+  if (/^[\w.\-/]+$/.test(s) && loadYaml(s) === s) return s;
   return JSON.stringify(s);
 }
 
@@ -415,7 +460,8 @@ export function yamlInline(v) {
   if (typeof v === "string") {
     if (v.includes("\n")) return `|\n      ${v.split("\n").join("\n      ")}`;
     if (/[:#{}[\]&*!|<>='"%@`,]/.test(v) || /^\s|\s$/.test(v)) return JSON.stringify(v);
-    return v;
+    try { if (loadYaml(v) === v) return v; } catch {}
+    return JSON.stringify(v);
   }
   if (typeof v === "boolean" || typeof v === "number") return String(v);
   return JSON.stringify(v);

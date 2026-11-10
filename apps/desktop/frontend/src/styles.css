@@ -3191,3 +3191,8 @@ button.bp-on {
   font-size: 12px;
   padding: 12px;
 }
+/* Invocation billing review */
+.usage-dialog { max-width: min(900px, 94vw); max-height: 85vh; overflow: auto; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+.usage-dialog table { width: 100%; border-collapse: collapse; }
+.usage-dialog td, .usage-dialog th { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.usage-dialog label { display: grid; gap: 5px; margin: 10px 0; }

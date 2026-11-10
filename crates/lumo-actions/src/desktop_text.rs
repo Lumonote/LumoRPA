@@ -26,13 +26,12 @@
 //! CI/headless 无显示器:闸门 / 入参 / provider 检查全部先于 xcap 截屏,纯函数
 //! (解析 / 匹配 / 换算)单测不触屏;真截屏 + 真点击路径不进测试(需授权 + 会动鼠标)。
 
-use crate::desktop::{send, ClickButton};
+use crate::desktop::{guarded_click, ClickButton};
 use crate::desktop_screen::{select_monitor, Region};
 use async_trait::async_trait;
 use lumo_core::error::StepError;
 use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
 use once_cell::sync::Lazy;
-use rdev::EventType;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -205,14 +204,9 @@ impl Action for ClickTextAction {
 
         // 4) 点击(dry_run 跳过):复用 desktop.click 的 move + press/release 序列。
         if !dry_run {
+            let interrupt = ctx.step_interrupt();
             tokio::task::spawn_blocking(move || {
-                send(EventType::MouseMove { x: sx, y: sy })?;
-                let clicks = if double { 2 } else { 1 };
-                for _ in 0..clicks {
-                    send(EventType::ButtonPress(button.to_rdev()))?;
-                    send(EventType::ButtonRelease(button.to_rdev()))?;
-                }
-                Ok::<(), StepError>(())
+                guarded_click(interrupt, Some((sx, sy)), button, double)
             })
             .await
             .map_err(|e| StepError::msg(format!("desktop.click_text join: {e}")))??;

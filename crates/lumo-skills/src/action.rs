@@ -63,10 +63,21 @@ impl Action for InvokeAction {
         let InvokeIn { name, inputs } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("skill.invoke input invalid: {e}")))?;
 
-        let skill = self
-            .skills
-            .get(&name)
-            .ok_or_else(|| StepError::msg(format!("unknown skill `{name}`")))?;
+        let flow = if let Some(snapshot) = ctx.source_snapshot() {
+            let (path, text) = snapshot.skill_source(&name).map_err(StepError::msg)?;
+            let skill = crate::loader::load_skill_text(path, text)
+                .map_err(|e| StepError::msg(e.to_string()))?;
+            if skill.name() != name {
+                return Err(StepError::msg("snapshot skill identity mismatch"));
+            }
+            skill.flow
+        } else {
+            self.skills
+                .get(&name)
+                .ok_or_else(|| StepError::msg(format!("unknown skill `{name}`")))?
+                .flow
+                .clone()
+        };
 
         // P0-5: bound recursion so a self-invoking / cyclic skill can't overflow
         // the stack. `skill_depth` is seeded into each sub-flow's context.
@@ -80,8 +91,7 @@ impl Action for InvokeAction {
         // P0-5: clamp the skill's declared capabilities to the caller's sandbox
         // so an invoked skill can never perform actions the calling flow was not
         // itself permitted to perform.
-        let clamped =
-            lumo_core::clamp_capabilities(&skill.flow.spec.capabilities, ctx.capabilities());
+        let clamped = lumo_core::clamp_capabilities(&flow.spec.capabilities, ctx.capabilities());
 
         // Run the skill's flow with the *same* action registry — so any
         // built-in / ai / skill actions stay available recursively.
@@ -91,7 +101,6 @@ impl Action for InvokeAction {
         let vm = FlowVm::child_of(ctx).with_capability_override(clamped);
         // 同 flow.call:spawn 隔离父级取消的 future drop,子任务经共享 cancel
         // 令牌自行判死并完成 teardown,子流程资源不泄漏。
-        let flow = skill.flow.clone();
         let trigger_kind = format!("skill:{}", name);
         let handle = tokio::spawn(async move {
             vm.run(

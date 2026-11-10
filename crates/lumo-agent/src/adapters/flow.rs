@@ -14,6 +14,26 @@ pub type FlowVmFactory = Arc<dyn Fn() -> FlowVm + Send + Sync>;
 /// Build the runtime using the invoked document's settings and directory.
 pub type ContextualFlowVmFactory = Arc<dyn Fn(&Flow, Option<&Path>) -> FlowVm + Send + Sync>;
 
+pub(super) fn source_snapshot(
+    context: &InvocationContext,
+) -> Result<Option<Arc<lumo_core::SourceSnapshot>>, InvocationError> {
+    context
+        .metadata
+        .get(crate::SOURCE_SNAPSHOTS_KEY)
+        .map(|value| {
+            let snapshot: lumo_core::SourceSnapshot = serde_json::from_value(value.clone())
+                .map_err(|e| {
+                    InvocationError::Unavailable(format!("invalid source snapshot: {e}"))
+                })?;
+            snapshot.validate().map_err(InvocationError::Unavailable)?;
+            snapshot
+                .verify_dependencies()
+                .map_err(InvocationError::Unavailable)?;
+            Ok(Arc::new(snapshot))
+        })
+        .transpose()
+}
+
 /// An outer agent deadline or task abort may drop the adapter at any await.
 /// Request cooperative cancellation while leaving the VM task alive to run
 /// its teardown hooks and persist the terminal state.
@@ -26,12 +46,20 @@ impl Drop for CancelOnDrop {
 }
 
 pub(super) async fn run_vm(
-    vm: FlowVm,
+    mut vm: FlowVm,
     flow: Flow,
     options: RunOptions,
     context: &InvocationContext,
     timeout_ms: u64,
 ) -> Result<RunReport, InvocationError> {
+    if let Some(usage) = &context.usage {
+        usage
+            .set_budget_sensitive(flow_may_spend(&flow))
+            .map_err(InvocationError::Unavailable)?;
+        vm = vm
+            .with_run_id(usage.flow_run_id())
+            .with_usage_observer(Some(usage.observer()));
+    }
     // A private token prevents a single timed-out node from cancelling its
     // siblings or making a retry inherit an already-cancelled parent token.
     let cancel = CancelToken::new();
@@ -57,7 +85,30 @@ pub(super) fn invocation_result(report: RunReport, started: Instant) -> Invocati
     result
         .metadata
         .insert("flowRunId".into(), report.run_id.into());
+    result.metadata.insert(
+        "usageState".into(),
+        if report.usage_unknown {
+            "unknown"
+        } else {
+            "recorded"
+        }
+        .into(),
+    );
     result
+}
+
+fn flow_may_spend(flow: &Flow) -> bool {
+    fn metered(steps: &[lumo_dsl::Step]) -> bool {
+        steps.iter().any(|step| {
+            step.action.starts_with("ai.")
+                || matches!(
+                    step.action.as_str(),
+                    "image.ocr" | "doc.ocr" | "doc.parse" | "desktop.click_text"
+                )
+                || step.children().iter().any(|children| metered(children))
+        })
+    }
+    !flow.spec.capabilities.llm.is_empty() || metered(&flow.spec.steps)
 }
 
 pub struct FlowAdapter {
@@ -88,8 +139,16 @@ impl InvocationAdapter for FlowAdapter {
         let CapabilitySource::Flow { path } = &request.capability.source else {
             return Err(InvocationError::InvalidSource);
         };
-        let content =
-            std::fs::read(path).map_err(|error| InvocationError::Unavailable(error.to_string()))?;
+        let snapshot = source_snapshot(&context)?;
+        let content = if let Some(snapshot) = &snapshot {
+            snapshot
+                .source(Path::new(path))
+                .map_err(InvocationError::Unavailable)?
+                .as_bytes()
+                .to_vec()
+        } else {
+            std::fs::read(path).map_err(|error| InvocationError::Unavailable(error.to_string()))?
+        };
         if !request.capability.source_content_matches(&content) {
             return Err(InvocationError::Unavailable(
                 "flow source changed after planning; create a new plan".into(),
@@ -103,7 +162,7 @@ impl InvocationAdapter for FlowAdapter {
             .map_err(|error| InvocationError::Unavailable(error.to_string()))?;
         let started = Instant::now();
         let report = run_vm(
-            (self.vm_factory)(&flow, Some(Path::new(path))),
+            (self.vm_factory)(&flow, Some(Path::new(path))).with_source_snapshot(snapshot),
             flow,
             RunOptions {
                 inputs: request.arguments,

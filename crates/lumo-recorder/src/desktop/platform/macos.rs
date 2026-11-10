@@ -75,7 +75,9 @@ tell application "System Events"
         end try
       end if
       try
-        set focusValue to value of focused as text
+        -- Text changes are captured separately by the native listener after
+        -- checking the control role/subrole. Never copy values into metadata.
+        set focusValue to ""
       end try
     end try
   end try
@@ -93,6 +95,7 @@ impl Backend for MacOsBackend {
     }
     async fn poll(&self) -> anyhow::Result<FocusSnapshot> {
         let out = Command::new("osascript")
+            .kill_on_drop(true)
             .arg("-s")
             .arg("s")
             .arg("-e")
@@ -111,6 +114,12 @@ impl Backend for MacOsBackend {
         }
         let line = String::from_utf8_lossy(&out.stdout);
         Ok(parse_focus_line(&line))
+    }
+    fn start_input(
+        &self,
+        emitter: crate::desktop::input::InputEmitter,
+    ) -> anyhow::Result<Option<crate::desktop::input::CaptureGuard>> {
+        super::macos_input::start(emitter).map(Some)
     }
 }
 

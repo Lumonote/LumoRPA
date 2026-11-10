@@ -11,6 +11,7 @@ import { runSelectedFlow } from "./runs.js";
 import { switchTopView } from "./views.js";
 import { refreshElementLibrary } from "./elements.js";
 import { snapshotSource } from "./editor/history.js";
+import { load as loadYaml, dump as dumpYaml } from "./vendor/js-yaml.mjs";
 
 let recorderTick = null;
 let recorderStartedAt = 0;
@@ -73,7 +74,7 @@ function recorderStreamReset(target, backend) {
   if (!box) return;
   box.innerHTML = `<div class="head">▶ live event stream · target=${html(target)} · backend=${html(backend || "—")}</div>`;
   recorderStreamAppend("muted", `[init] session 已启动 · 等待事件…`);
-  recorderStreamAppend("muted", `[note] CDP Runtime.addBinding 已注入 · click/input/change/keydown 实时透传 · ActionBuffer 在 stop 时合并 · Alt+点击 抓取同款`);
+  recorderStreamAppend("muted", "[note] 操作会实时显示，停止后生成流程草稿。密码与无法确认安全的文本不会录入；混合录制会合并重复操作。");
 }
 
 function recorderStreamAppend(cls, text) {
@@ -102,6 +103,13 @@ function onLiveRecorderEvent(evt) {
     if (kind === "launched") return payload.msg || "browser launched";
     if (kind === "heartbeat") return `tick #${payload.n ?? "?"}`;
     if (kind === "binding_ready") return `binding ready @ ${payload.url || ""}`;
+    if (source === "desktop") {
+      if (kind === "click") return `🖱 点击 (${payload.x}, ${payload.y}) · ${payload.button || "left"}`;
+      if (kind === "drag") return `🖱 拖动 (${payload.from_x}, ${payload.from_y}) → (${payload.to_x}, ${payload.to_y})`;
+      if (kind === "scroll") return `滚动 (${payload.dx}, ${payload.dy})`;
+      if (kind === "key") return `⌨️ ${payload.keys || payload.key || ""}`;
+      if (kind === "text") return "⌨️ 已记录安全控件中的文本变更";
+    }
     // R-02 desktop lane (DesktopRecorder AX backend).
     if (kind === "app_changed") return `🪟 切换应用 → ${payload.app || "?"}${payload.window_title ? "  ·  " + payload.window_title : ""}`;
     if (kind === "focus_changed") return `🪟 切换窗口 → ${payload.window_title || payload.app || "?"}`;
@@ -186,7 +194,7 @@ function renderRecorderPatch(yaml) {
   const stripped = (yaml || "").trim();
   const hasSteps = stripped && !stripped.includes("no actionable events were captured");
   if (!hasSteps) {
-    box.innerHTML = `<div class="muted" style="padding:8px 10px">本次录制没有产生可合并的步骤。继续操作浏览器，或检查 Chromium 是否已正确启动。</div>`;
+    box.innerHTML = `<div class="muted" style="padding:8px 10px">本次没有可回放步骤。请检查录制目标、浏览器连接和系统输入权限；密码及无法确认安全的文本会被忽略。</div>`;
     return;
   }
   box.innerHTML = `
@@ -284,7 +292,13 @@ async function insertRecorderPatchIntoFlow() {
     toast("请先打开流程", "录制结果会追加到当前编辑的流程末尾", "bad");
     return;
   }
-  const nextSource = mergeRecorderPatchIntoSource(state.source || "", pendingRecorderPatch);
+  let nextSource;
+  try {
+    nextSource = mergeRecorderPatchIntoSource(state.source || "", pendingRecorderPatch);
+  } catch (error) {
+    toast("无法合并录制", String(error), "bad");
+    return;
+  }
   if (!nextSource) {
     toast("没有可插入步骤", "本次录制没有产生可合并的 browser/desktop 动作", "bad");
     return;
@@ -317,9 +331,26 @@ async function insertRecorderPatchIntoFlow() {
 export function mergeRecorderPatchIntoSource(source, patch) {
   const patchSteps = recorderPatchSteps(patch);
   if (!patchSteps.length) return "";
+  source = grantRecorderDesktopCapabilities(source, patchSteps);
   const sourceLines = source.split(/\r?\n/);
   const ast = parseYaml(source || "spec:\n  steps:\n");
   const steps = extractSteps(ast);
+  const seen = new Set();
+  const collectIds = (nodes) => (Array.isArray(nodes) ? nodes : []).forEach((step) => {
+    if (step?.id) seen.add(step.id);
+    for (const key of ["do", "else", "catch", "finally"]) collectIds(step?.[key]);
+    (step?.branches || []).forEach(collectIds);
+  });
+  collectIds(steps);
+  for (const step of patchSteps) step.id = uniqueStepId(step.id, seen);
+  const parsed = sourceSpans(source);
+  const sequenceSpan = parsed.spans.get(parsed.ast?.spec?.steps);
+  if (sequenceSpan && source[sequenceSpan.start] === "[") {
+    const replacement = dumpYaml([...steps, ...patchSteps], { flowLevel: 0, noRefs: true, lineWidth: -1 }).trimEnd();
+    const result = source.slice(0, sequenceSpan.start) + replacement + source.slice(sequenceSpan.end);
+    parseYaml(result);
+    return result;
+  }
   let baseIndent = 4;
   let insertIdx = sourceLines.length;
 
@@ -344,11 +375,78 @@ export function mergeRecorderPatchIntoSource(source, patch) {
     `${indent}# === recorder patch (auto-merged) ===`,
     ...patchSteps.flatMap((step) => emitStep(step, baseIndent).split("\n")),
   ];
-  return [
+  const result = [
     ...sourceLines.slice(0, insertIdx),
     ...inserted,
     ...sourceLines.slice(insertIdx),
   ].join("\n").replace(/\s*$/, "\n");
+  parseYaml(result);
+  return result;
+}
+
+function sourceSpans(source) {
+  const opened = [];
+  const spans = new WeakMap();
+  const ast = loadYaml(source, { listener(event, state) {
+    if (event === "open") opened.push(state.position);
+    else {
+      let start = opened.pop();
+      let end = Math.min(state.position, source.length);
+      if (state.result && typeof state.result === "object") {
+        while (start < end && /\s/.test(source[start])) start++;
+        while (end > start && /\s/.test(source[end - 1])) end--;
+        spans.set(state.result, { start, end });
+      }
+    }
+  } });
+  return { ast, spans };
+}
+
+/** Add only the input categories present in the reviewed recording patch. */
+function grantRecorderDesktopCapabilities(source, patchSteps) {
+  const required = new Set();
+  for (const step of patchSteps) {
+    if (["desktop.click", "desktop.drag", "desktop.move", "desktop.scroll"].includes(step.action)) required.add("mouse");
+    if (["desktop.key", "desktop.type"].includes(step.action)) required.add("keyboard");
+  }
+  if (!required.size) return source;
+  const { ast, spans } = sourceSpans(source);
+  if (!isPlainObject(ast?.spec)) throw new Error("请先创建有效的 spec 流程结构，再合并桌面录制");
+  const existing = ast.spec.capabilities;
+  if (existing != null && !isPlainObject(existing)) throw new Error("capabilities 必须是映射，请先在代码中修正");
+  const desktop = existing?.desktop || [];
+  if (!Array.isArray(desktop)) throw new Error("desktop 权限必须是列表，请先在代码中修正");
+  if (desktop.includes("*") || [...required].every((category) => desktop.includes(category))) return source;
+  const capabilities = { ...(existing || {}), desktop: [...new Set([...desktop, ...required])] };
+  const span = spans.get(existing);
+  if (span) {
+    if (["&", "*"].includes(source[span.start])) throw new Error("请先展开 capabilities 的 YAML 引用，再合并录制");
+    const column = span.start - source.lastIndexOf("\n", span.start - 1) - 1;
+    const inline = source[span.start] === "{";
+    const serialized = dumpYaml(capabilities, { noRefs: true, lineWidth: -1, ...(inline ? { flowLevel: 0 } : {}) }).trimEnd();
+    const replacement = inline ? serialized : serialized.replace(/\n/g, `\n${" ".repeat(column)}`);
+    const result = source.slice(0, span.start) + replacement + source.slice(span.end);
+    parseYaml(result);
+    return result;
+  }
+  const specSpan = spans.get(ast.spec);
+  if (!specSpan || ["&", "*"].includes(source[specSpan.start])) throw new Error("请先展开 spec 的 YAML 引用，再合并录制");
+  const inlineCapabilities = dumpYaml(capabilities, { noRefs: true, flowLevel: 0, lineWidth: -1 }).trimEnd();
+  if (source[specSpan.start] === "{") {
+    if (Object.hasOwn(ast.spec, "capabilities")) {
+      const spec = { ...ast.spec, capabilities };
+      return source.slice(0, specSpan.start) + dumpYaml(spec, { noRefs: true, flowLevel: 0, lineWidth: -1 }).trimEnd() + source.slice(specSpan.end);
+    }
+    return source.slice(0, specSpan.start + 1) + ` capabilities: ${inlineCapabilities}, ` + source.slice(specSpan.start + 1);
+  }
+  const column = specSpan.start - source.lastIndexOf("\n", specSpan.start - 1) - 1;
+  if (Object.hasOwn(ast.spec, "capabilities")) {
+    const before = source.slice(0, specSpan.start);
+    const after = source.slice(specSpan.start);
+    const nullLine = new RegExp(`(^|\\n)( {${column}})(?:["']?capabilities["']?)\\s*:\\s*(?:null|~)?(?:[ \\t]*#.*)?(?=\\n|$)`);
+    return before + after.replace(nullLine, (_match, separator, padding) => `${separator}${padding}capabilities: ${inlineCapabilities}`);
+  }
+  return source.slice(0, specSpan.start) + `capabilities: ${inlineCapabilities}\n${" ".repeat(column)}` + source.slice(specSpan.start);
 }
 
 function recorderPatchSteps(patch) {

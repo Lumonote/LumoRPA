@@ -281,7 +281,7 @@ fn recorder_injected_script() -> String {
       }}
       const placeholder = el.getAttribute && el.getAttribute("placeholder");
       if (placeholder) return placeholder;
-      const txt = el.innerText || el.value;
+      const txt = el.innerText || (el.type === "password" ? null : el.value);
       return txt ? String(txt).trim().slice(0, 80) : null;
     }} catch (_) {{ return null; }}
   }};
@@ -335,7 +335,7 @@ fn recorder_injected_script() -> String {
         return;
       }}
     }}
-    fire("click", e.target, {{ button: e.button }});
+    fire("click", e.target, {{ button: e.button, screen_x: e.screenX, screen_y: e.screenY }});
   }}, true);
 
   document.addEventListener("change", (e) => {{
@@ -344,7 +344,7 @@ fn recorder_injected_script() -> String {
     const tag = (t.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select") {{
       const value = t.type === "password" ? "(redacted)" : String((tag === "select" ? t.value : t.value) || "").slice(0, 256);
-      fire("change", t, {{ value }});
+      fire("change", t, {{ value, redacted: t.type === "password" }});
     }}
   }}, true);
 
@@ -354,7 +354,7 @@ fn recorder_injected_script() -> String {
     if (!t) return;
     const tag = (t.tagName || "").toLowerCase();
     if (tag === "select") return;
-    if (t.type === "password") {{ fire("input", t, {{ value: "(redacted)" }}); return; }}
+    if (t.type === "password") {{ fire("input", t, {{ value: "(redacted)", redacted: true }}); return; }}
     // Coalesce IME / fast-typing in 100ms before crossing CDP.
     if (inputTimers.has(t)) clearTimeout(inputTimers.get(t));
     inputTimers.set(t, setTimeout(() => {{
@@ -733,13 +733,64 @@ const DUP_CLICK_MS: i64 = 60;
 /// - collapse near-duplicate clicks on the same selector (dblclick artifact)
 /// - keep everything else verbatim, preserving order
 pub fn condense_events(events: &[RawEvent]) -> Vec<RawEvent> {
-    let merged = merge_inputs(events);
+    // Mixed sessions observe the same browser gesture in both lanes. Prefer
+    // selector-based DOM steps when correlation is unambiguous; retain native
+    // actions outside Chromium (including its toolbar and file chooser).
+    let events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            if event.source != "desktop" {
+                return true;
+            }
+            !events.iter().any(|dom| {
+                if dom.source != "dom" || (dom.at_ms - event.at_ms).abs() > 400 {
+                    return false;
+                }
+                match (event.kind.as_str(), dom.kind.as_str()) {
+                    ("click", "click") => ["x", "y"].iter().all(|axis| {
+                        let dom_axis = format!("screen_{axis}");
+                        match (
+                            event.payload[*axis].as_f64(),
+                            dom.payload[&dom_axis].as_f64(),
+                        ) {
+                            (Some(a), Some(b)) => (a - b).abs() <= 4.0,
+                            _ => false,
+                        }
+                    }),
+                    ("text", "input" | "change") => {
+                        dom.payload["redacted"].as_bool() != Some(true)
+                            && dom.payload["value"].as_str().is_some()
+                            && dom.payload["value"] == event.payload["text"]
+                    }
+                    ("key", "keydown") => {
+                        let key = dom.payload["key"].as_str().unwrap_or("").to_lowercase();
+                        event.payload["keys"].as_str() == Some(key.as_str())
+                    }
+                    _ => false,
+                }
+            })
+        })
+        .cloned()
+        .collect();
+    let merged = merge_inputs(&events);
     coalesce_redundant(merged)
 }
 
 fn merge_inputs(events: &[RawEvent]) -> Vec<RawEvent> {
     let mut out: Vec<RawEvent> = Vec::with_capacity(events.len());
     for evt in events {
+        if evt.source == "desktop" && evt.kind == "text" {
+            if let Some(previous) = out.last_mut() {
+                if previous.source == "desktop"
+                    && previous.kind == "text"
+                    && previous.payload.get("field") == evt.payload.get("field")
+                    && evt.at_ms.saturating_sub(previous.at_ms) <= 1000
+                {
+                    *previous = evt.clone();
+                    continue;
+                }
+            }
+        }
         match evt.kind.as_str() {
             "heartbeat" | "binding_ready" | "bind_error" => continue,
             "input" => {
@@ -779,6 +830,43 @@ fn merge_inputs(events: &[RawEvent]) -> Vec<RawEvent> {
 fn coalesce_redundant(events: Vec<RawEvent>) -> Vec<RawEvent> {
     let mut out: Vec<RawEvent> = Vec::with_capacity(events.len());
     for evt in events {
+        if evt.source == "desktop"
+            && evt.kind == "text"
+            && evt.payload["safe"].as_bool() == Some(true)
+            && out.last().is_some_and(|previous| {
+                previous.source == "desktop"
+                    && previous.kind == "key"
+                    && matches!(
+                        previous.payload["keys"].as_str(),
+                        Some("cmd+v" | "ctrl+v" | "cmd+x" | "ctrl+x" | "backspace" | "delete")
+                    )
+                    && evt.at_ms.saturating_sub(previous.at_ms) <= 500
+            })
+        {
+            out.pop();
+        }
+        // Preserve a real desktop double click as one explicit two-click action.
+        if evt.source == "desktop" && evt.kind == "click" {
+            if let Some(previous) = out.last_mut() {
+                let same_point = ["x", "y"].iter().all(|key| {
+                    match (previous.payload[key].as_f64(), evt.payload[key].as_f64()) {
+                        (Some(a), Some(b)) => (a - b).abs() <= 3.0,
+                        _ => false,
+                    }
+                });
+                if previous.source == "desktop"
+                    && previous.kind == "click"
+                    && same_point
+                    && previous.payload["button"] == evt.payload["button"]
+                    && previous.payload["count"].as_u64().unwrap_or(1) == 1
+                    && evt.at_ms.saturating_sub(previous.at_ms) <= 400
+                {
+                    previous.payload["count"] = 2.into();
+                    previous.at_ms = evt.at_ms;
+                    continue;
+                }
+            }
+        }
         // input following a click on the same selector → drop the click.
         if evt.kind == "input" {
             if let Some(last) = out.last() {
@@ -980,6 +1068,9 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
                 steps.push(step.into());
             }
             ("dom", "input") | ("dom", "change") => {
+                if evt.payload["redacted"].as_bool() == Some(true) {
+                    continue;
+                }
                 let sel = selectors_block(&evt.payload);
                 if sel.is_empty() {
                     continue;
@@ -1044,6 +1135,56 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
                 step.insert("with".into(), with.into());
                 steps.push(step.into());
             }
+            ("desktop", "click" | "drag" | "scroll" | "key") => {
+                let action = format!("desktop.{}", evt.kind);
+                let allowed: &[&str] = match evt.kind.as_str() {
+                    "click" => &["x", "y", "button", "double"],
+                    "drag" => &["from_x", "from_y", "to_x", "to_y", "button", "duration_ms"],
+                    "scroll" => &["dx", "dy"],
+                    _ => &["keys"],
+                };
+                let mut with = serde_json::Map::new();
+                for key in allowed {
+                    if let Some(value) = evt.payload.get(*key) {
+                        with.insert((*key).into(), value.clone());
+                    }
+                }
+                if evt.kind == "click" && evt.payload["count"].as_u64() == Some(2) {
+                    with.insert("double".into(), true.into());
+                }
+                steps.push(
+                    serde_yaml::to_value(serde_json::json!({
+                        "id": id_for(&evt.kind), "action": action, "with": with,
+                    }))
+                    .expect("JSON event can be encoded as YAML"),
+                );
+            }
+            ("desktop", "text") if evt.payload["safe"].as_bool() == Some(true) => {
+                let Some(text) = evt.payload["text"].as_str() else {
+                    continue;
+                };
+                if evt.payload["replace"].as_bool() == Some(true) {
+                    let select_all = match evt.payload["select_all"].as_str() {
+                        Some("cmd+a") => "cmd+a",
+                        _ => "ctrl+a",
+                    };
+                    steps.push(serde_yaml::to_value(serde_json::json!({
+                        "id": id_for("select_text"), "action": "desktop.key", "with": {"keys": select_all},
+                    })).expect("JSON event can be encoded as YAML"));
+                }
+                if text.is_empty() {
+                    steps.push(serde_yaml::to_value(serde_json::json!({
+                        "id": id_for("clear_text"), "action": "desktop.key", "with": {"keys": "backspace"},
+                    })).expect("JSON event can be encoded as YAML"));
+                } else {
+                    steps.push(
+                        serde_yaml::to_value(serde_json::json!({
+                            "id": id_for("type"), "action": "desktop.type", "with": {"text": text},
+                        }))
+                        .expect("JSON event can be encoded as YAML"),
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -1052,6 +1193,10 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
     yaml.push_str("# Recorder YAML patch — review selectors before merging.\n");
     yaml.push_str("# Each step ships a 4-fingerprint `selectors:` block so the\n");
     yaml.push_str("# runtime self-heals through CSS → XPath → aria-label → text.\n");
+    if events.iter().any(|e| e.source == "desktop") {
+        yaml.push_str("# Desktop steps use absolute screen coordinates; review display scaling and field focus before replay.\n");
+        yaml.push_str("# Password and inaccessible text fields are excluded; supply secrets through vault-backed steps.\n");
+    }
     if steps.is_empty() {
         yaml.push_str("# (no actionable events were captured)\n");
         return yaml;
@@ -1066,6 +1211,172 @@ pub fn events_to_yaml_patch(events: &[RawEvent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn desktop_event(kind: &str, payload: serde_json::Value, at_ms: i64) -> RawEvent {
+        RawEvent {
+            source: "desktop".into(),
+            kind: kind.into(),
+            payload,
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn desktop_recording_patch_preserves_action_order_and_unicode_edits() {
+        let events = vec![
+            desktop_event(
+                "click",
+                serde_json::json!({"x": 12.0, "y": 24.0, "button": "left"}),
+                1,
+            ),
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "search", "text": "中", "replace": true, "safe": true, "select_all": "cmd+a"}),
+                20,
+            ),
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "search", "text": "中文", "replace": true, "safe": true, "select_all": "cmd+a"}),
+                50,
+            ),
+            desktop_event("key", serde_json::json!({"keys": "enter"}), 70),
+            desktop_event("scroll", serde_json::json!({"dx": 0, "dy": 2}), 90),
+        ];
+        let patch = events_to_yaml_patch(&events);
+        let steps: Vec<serde_json::Value> = serde_yaml::from_str(&patch).unwrap();
+        let actions: Vec<_> = steps
+            .iter()
+            .map(|s| s["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                "desktop.click",
+                "desktop.key",
+                "desktop.type",
+                "desktop.key",
+                "desktop.scroll"
+            ]
+        );
+        assert_eq!(steps[1]["with"]["keys"], "cmd+a");
+        assert_eq!(steps[2]["with"]["text"], "中文");
+        assert!(!patch.contains("field:"));
+        assert!(patch.contains("vault"));
+    }
+
+    #[test]
+    fn desktop_patch_excludes_unverified_text_and_replays_deletion() {
+        let patch = events_to_yaml_patch(&[
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "password", "text": "never-serialize-secret", "safe": false}),
+                1,
+            ),
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "notes", "text": "", "safe": true, "replace": true, "select_all": "ctrl+a"}),
+                2,
+            ),
+        ]);
+        assert!(!patch.contains("never-serialize-secret"));
+        let steps: Vec<serde_json::Value> = serde_yaml::from_str(&patch).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["with"]["keys"], "ctrl+a");
+        assert_eq!(steps[1]["with"]["keys"], "backspace");
+    }
+
+    #[test]
+    fn desktop_double_click_matches_real_action_schema() {
+        let events = [
+            desktop_event(
+                "click",
+                serde_json::json!({"x": 5.0, "y": 6.0, "button": "left"}),
+                1,
+            ),
+            desktop_event(
+                "click",
+                serde_json::json!({"x": 5.0, "y": 6.0, "button": "left"}),
+                200,
+            ),
+        ];
+        let patch = events_to_yaml_patch(&events);
+        let steps: Vec<serde_json::Value> = serde_yaml::from_str(&patch).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["with"]["double"], true);
+        assert!(steps[0]["with"].get("count").is_none());
+    }
+
+    #[test]
+    fn desktop_text_merge_never_crosses_pointer_or_key_boundary() {
+        let text = || serde_json::json!({"field": "x", "text": "hello", "safe": true});
+        let events = [
+            desktop_event("text", text(), 1),
+            desktop_event("key", serde_json::json!({"keys": "tab"}), 2),
+            desktop_event("text", text(), 3),
+        ];
+        assert_eq!(condense_events(&events).len(), 3);
+    }
+
+    #[test]
+    fn mixed_capture_prefers_browser_selectors_without_dropping_desktop_controls() {
+        let events = [
+            desktop_event(
+                "click",
+                serde_json::json!({"x": 100.0, "y": 200.0, "button": "left"}),
+                1,
+            ),
+            evt(
+                "click",
+                serde_json::json!({"selector": "#ok", "screen_x": 100, "screen_y": 200}),
+                5,
+            ),
+            desktop_event(
+                "click",
+                serde_json::json!({"x": 100.0, "y": 50.0, "button": "left"}),
+                1000,
+            ),
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "search", "text": "hello", "safe": true}),
+                1100,
+            ),
+            evt(
+                "input",
+                serde_json::json!({"selector": "#q", "value": "hello"}),
+                1200,
+            ),
+        ];
+        let condensed = condense_events(&events);
+        assert_eq!(condensed.len(), 3);
+        assert_eq!(condensed[0].source, "dom");
+        assert_eq!(condensed[1].source, "desktop");
+        assert_eq!(condensed[1].payload["y"], 50.0);
+        assert_eq!(condensed[2].source, "dom");
+    }
+
+    #[test]
+    fn browser_password_markers_are_not_replayed_as_literal_credentials() {
+        let patch = events_to_yaml_patch(&[evt(
+            "input",
+            serde_json::json!({"selector": "#pw", "value": "(redacted)", "redacted": true}),
+            1,
+        )]);
+        assert!(!patch.contains("browser.type"));
+    }
+
+    #[test]
+    fn paste_replays_captured_text_instead_of_future_clipboard() {
+        let patch = events_to_yaml_patch(&[
+            desktop_event("key", serde_json::json!({"keys": "cmd+v"}), 1),
+            desktop_event(
+                "text",
+                serde_json::json!({"field": "notes", "text": "copied content", "safe": true, "replace": true, "select_all": "cmd+a"}),
+                20,
+            ),
+        ]);
+        assert!(!patch.contains("cmd+v"));
+        assert!(patch.contains("copied content"));
+    }
 
     fn evt(kind: &str, payload: serde_json::Value, at_ms: i64) -> RawEvent {
         RawEvent {

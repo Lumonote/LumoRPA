@@ -364,7 +364,7 @@ mod capability_caps_sync {
     fn externally_registered() -> BTreeSet<&'static str> {
         // desktop 特性开启时 extend 分支被 cfg 掉,mut 只在关闭路径用到。
         #[allow(unused_mut)]
-        let mut ids: BTreeSet<&'static str> = ["ai.chat"].into_iter().collect();
+        let mut ids: BTreeSet<&'static str> = ["ai.chat", "ai.screen_agent"].into_iter().collect();
         #[cfg(not(feature = "desktop"))]
         ids.extend([
             "desktop.click",
@@ -372,6 +372,7 @@ mod capability_caps_sync {
             "desktop.drag",
             "desktop.key",
             "desktop.move",
+            "desktop.observe",
             "desktop.screenshot",
             "desktop.scroll",
             "desktop.type",

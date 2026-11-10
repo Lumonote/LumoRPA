@@ -32,7 +32,8 @@ use std::{path::Path, sync::Arc};
 ///   3 -> 4: add durable voice, MCP, capability, agent, and improvement tables.
 ///   4 -> 5: add durable scheduled agent jobs and node recovery checkpoints.
 ///   5 -> 6: persist node results, run association, and approval waiting.
-pub const LATEST_USER_VERSION: i64 = 6;
+///   6 -> 7: retain per-attempt usage and associated nested VM runs.
+pub const LATEST_USER_VERSION: i64 = 7;
 
 #[derive(Clone)]
 pub struct Repo {
@@ -618,6 +619,9 @@ fn run_migrations_with_ddls(
     }
     if current < 6 {
         tx.execute_batch(schema::V6_DDL)?;
+    }
+    if current < 7 {
+        tx.execute_batch(schema::V7_DDL)?;
     }
 
     // PRAGMA user_version does not accept bound parameters; the value is a

@@ -94,9 +94,29 @@ impl Action for FlowCallAction {
                  (no `..`, no absolute paths)"
             )));
         }
-        let full = self.base_dir.join(&path);
-        let src = std::fs::read_to_string(&full)
-            .map_err(|e| StepError::msg(format!("flow.call cannot read `{path}`: {e}")))?;
+        let src = if let Some(snapshot) = ctx.source_snapshot() {
+            snapshot
+                .source(&snapshot.flow_base.join(&path))
+                .map(str::to_owned)
+                .map_err(StepError::msg)?
+        } else {
+            let full = self.base_dir.join(&path);
+            let canonical_base = self
+                .base_dir
+                .canonicalize()
+                .map_err(|e| StepError::msg(e.to_string()))?;
+            if !full
+                .canonicalize()
+                .map_err(|e| StepError::msg(e.to_string()))?
+                .starts_with(canonical_base)
+            {
+                return Err(StepError::msg(
+                    "flow.call source escapes flows directory through a symlink",
+                ));
+            }
+            std::fs::read_to_string(&full)
+                .map_err(|e| StepError::msg(format!("flow.call cannot read `{path}`: {e}")))?
+        };
         let flow = lumo_dsl::parse_str(&src)
             .map_err(|e| StepError::msg(format!("flow.call parse `{path}`: {e}")))?;
 

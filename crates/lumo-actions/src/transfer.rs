@@ -9,15 +9,14 @@
 //! * 机密(password / secret_key)以普通输入串到达(flow 作者写
 //!   `${{ vault.* }}`,VM 在本动作执行前已解析)。仅作字段接收,**永不日志**。
 //!
-//! TLS:全部走 rustls(ring)——FTP 经 suppaftp tokio-rustls-ring(此处用明文
-//! 控制连接,数据走 rustls 能力已编译进,后续可加 explicit FTPS);S3 经
+//! TLS:全部走 rustls(ring)——FTP 可选 explicit FTPS,控制/数据通道均加密;S3 经
 //! workspace 的 reqwest(rustls/ring)。不引 openssl/native-tls/任何 C 依赖。
 //!
-//! 已 DEFER:SFTP。纯 Rust 的 russh + russh-sftp 需自管密钥交换、host-key 校验、
-//! channel/subsystem 握手与会话状态机,体量与本族其余动作不成比例;为保 F-6
-//! 小而干净、全门禁通过,SFTP 暂缓(参考 F-10 对 iframe 的处理方式)。引入时应
-//! 沿用 russh(纯 Rust,避开 libssh2 这个会破坏交叉编译的 C 依赖)。
+//! SFTP uses system OpenSSH with pinned host keys, isolated configuration and
+//! key-only non-interactive authentication (see `sftp`).
 
+mod ftps;
+mod sftp;
 mod sigv4;
 
 use async_trait::async_trait;
@@ -34,6 +33,7 @@ use std::sync::Arc;
 use crate::resource_store::ResourceStore;
 
 pub fn register(r: &mut ActionRegistry) {
+    sftp::register(r);
     r.register(FtpUploadAction);
     r.register(FtpDownloadAction);
     r.register(S3PutAction);
@@ -117,6 +117,14 @@ fn default_max_bytes() -> u64 {
     100 * 1024 * 1024 // 100 MiB,与 http.* 对齐
 }
 
+#[derive(Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum FtpTls {
+    #[default]
+    Plain,
+    Explicit,
+}
+
 // ─── ftp.upload ─────────────────────────────────────────────────────────────
 
 pub struct FtpUploadAction;
@@ -133,6 +141,13 @@ struct FtpUploadIn {
     local_path: PathBuf,
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
+    #[serde(default)]
+    tls: FtpTls,
+    /// Optional PEM CA bundle for explicit FTPS; hostname validation remains on.
+    #[serde(default)]
+    ca_cert: Option<PathBuf>,
+    #[serde(default = "sftp::timeout")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -148,6 +163,29 @@ impl Action for FtpUploadAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let parsed: FtpUploadIn = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("ftp.upload input invalid: {e}")))?;
+        if parsed.tls == FtpTls::Explicit {
+            return ftps::transfer(
+                ctx,
+                ftps::Input {
+                    host: parsed.host,
+                    port: parsed.port,
+                    username: parsed.username,
+                    password: parsed.password,
+                    remote_path: parsed.remote_path,
+                    local_path: parsed.local_path,
+                    max_bytes: parsed.max_bytes,
+                    ca_cert: parsed.ca_cert,
+                    timeout_ms: parsed.timeout_ms,
+                },
+                true,
+            )
+            .await;
+        }
+        if parsed.ca_cert.is_some() {
+            return Err(StepError::msg("ftp: ca_cert requires tls: explicit"));
+        }
         let FtpUploadIn {
             host,
             port,
@@ -156,8 +194,8 @@ impl Action for FtpUploadAction {
             remote_path,
             local_path,
             max_bytes,
-        } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("ftp.upload input invalid: {e}")))?;
+            ..
+        } = parsed;
 
         // 门禁:先 fs.read 源,再 network host。两者任一未授权 → capability denied,
         // 不建连。`ftp://{host}` 让 ensure_network_url 的 extract_host 取到 host。
@@ -229,6 +267,12 @@ struct FtpDownloadIn {
     local_path: PathBuf,
     #[serde(default = "default_max_bytes")]
     max_bytes: u64,
+    #[serde(default)]
+    tls: FtpTls,
+    #[serde(default)]
+    ca_cert: Option<PathBuf>,
+    #[serde(default = "sftp::timeout")]
+    timeout_ms: u64,
 }
 
 #[async_trait]
@@ -244,6 +288,29 @@ impl Action for FtpDownloadAction {
         &SCHEMA
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        let parsed: FtpDownloadIn = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("ftp.download input invalid: {e}")))?;
+        if parsed.tls == FtpTls::Explicit {
+            return ftps::transfer(
+                ctx,
+                ftps::Input {
+                    host: parsed.host,
+                    port: parsed.port,
+                    username: parsed.username,
+                    password: parsed.password,
+                    remote_path: parsed.remote_path,
+                    local_path: parsed.local_path,
+                    max_bytes: parsed.max_bytes,
+                    ca_cert: parsed.ca_cert,
+                    timeout_ms: parsed.timeout_ms,
+                },
+                false,
+            )
+            .await;
+        }
+        if parsed.ca_cert.is_some() {
+            return Err(StepError::msg("ftp: ca_cert requires tls: explicit"));
+        }
         let FtpDownloadIn {
             host,
             port,
@@ -252,8 +319,8 @@ impl Action for FtpDownloadAction {
             remote_path,
             local_path,
             max_bytes,
-        } = serde_json::from_value(input)
-            .map_err(|e| StepError::msg(format!("ftp.download input invalid: {e}")))?;
+            ..
+        } = parsed;
 
         // 门禁:先 fs.write 目标,再 network host —— 连接之前完成。
         ctx.ensure_fs_write(&local_path)?;

@@ -1,6 +1,7 @@
 import { applyAgentEvent, createRunProjection, readyTopology } from "./agent-events.js";
 import { renderConfirmation, renderRunControls, runAgentControl } from "./agent-confirmation.js";
 import { renderAgentLog } from "./agent-feedback.js";
+import { mountInvocationUsage } from "./invocation-usage.js";
 
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
@@ -162,6 +163,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
   root.querySelector(".mc-head")?.append(errorBox);
   const state = { root, call, selector, errorBox, latest: projection, cache: new Map(), history: new Map(), selectionRevision: 0, refreshing: false, refreshAgain: false, listError: "", selectionError: "" };
   missions.set(root, state);
+  mountInvocationUsage(root, call, () => root.dataset.selectedRun || state.latest?.runId);
   root.dataset.selectedRun = "";
   renderHistory(state);
   selector.addEventListener("change", async () => {

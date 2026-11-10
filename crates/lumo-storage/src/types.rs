@@ -152,6 +152,60 @@ pub struct FlowRunRow {
     pub trace_id: Option<String>,
 }
 
+/// Recorded usage is a lower bound. `unknown` explicitly preserves possible
+/// unreported spend; absent values must never be interpreted as a measured 0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationAttemptRow {
+    pub run_id: String,
+    pub node_id: String,
+    pub attempt: u32,
+    pub capability_id: String,
+    pub source_kind: String,
+    pub flow_run_id: Option<String>,
+    pub state: String,
+    pub usage_state: String,
+    pub budget_sensitive: bool,
+    pub tokens_used: Option<u64>,
+    pub cost_usd_micro: Option<u64>,
+    pub duration_ms: u64,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+    pub revision: u64,
+    pub resolved_by: Option<String>,
+    pub resolution_reason: Option<String>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationFlowRunRow {
+    pub flow_run_id: String,
+    pub run_id: String,
+    pub node_id: String,
+    pub attempt: u32,
+    pub parent_flow_run_id: Option<String>,
+    pub state: String,
+    pub usage_unknown: bool,
+    pub tokens_used: Option<u64>,
+    pub cost_usd_micro: Option<u64>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationUsageResolution {
+    pub run_id: String,
+    pub node_id: String,
+    pub attempt: u32,
+    pub expected_revision: u64,
+    pub tokens_used: u64,
+    pub cost_usd_micro: u64,
+    pub resolved_by: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepRunRow {
     pub flow_run_id: String,

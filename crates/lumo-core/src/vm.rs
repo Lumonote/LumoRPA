@@ -58,6 +58,7 @@ pub struct RunReport {
     /// (or when a provider does not report usage), these totals are zero.
     pub tokens_used: u64,
     pub cost_usd_micro: u64,
+    pub usage_unknown: bool,
     pub outputs: Option<Value>,
     /// F-20: when the run paused at a breakpoint / single-step, the path of the
     /// step it paused *before* (which did not execute). `None` for a run that
@@ -71,6 +72,9 @@ pub struct RunHandle {
 }
 
 pub struct FlowVm {
+    usage_observer: Option<crate::RunUsageObserver>,
+    parent_run_id: Option<String>,
+    sources: Option<Arc<crate::SourceSnapshot>>,
     registry: ActionRegistry,
     repo: Option<Repo>,
     ai_provider: Option<Arc<dyn AiHookProvider>>,
@@ -116,6 +120,9 @@ pub struct FlowVm {
 impl FlowVm {
     pub fn new(registry: ActionRegistry, repo: Option<Repo>) -> Self {
         Self {
+            usage_observer: None,
+            parent_run_id: None,
+            sources: None,
             registry,
             repo,
             ai_provider: None,
@@ -158,7 +165,20 @@ impl FlowVm {
         // P2-7:进度观察者一并继承 —— 子流程步骤事件汇入同一通道,事件自带
         // 各自的 run_id,宿主可按 run 分流。
         vm.on_step = ctx.on_step();
+        vm.sources = ctx.source_snapshot().cloned();
+        vm.usage_observer = ctx.usage_observer();
+        vm.parent_run_id = Some(ctx.run_id().to_string());
         vm
+    }
+
+    pub fn with_source_snapshot(mut self, sources: Option<Arc<crate::SourceSnapshot>>) -> Self {
+        self.sources = sources;
+        self
+    }
+
+    pub fn with_usage_observer(mut self, observer: Option<crate::RunUsageObserver>) -> Self {
+        self.usage_observer = observer;
+        self
     }
 
     /// P2-7:注册可选 on_step 进度观察者(step 开始/结束/日志行,见
@@ -351,6 +371,13 @@ impl FlowVm {
             })?;
         }
 
+        if let Some(observer) = &self.usage_observer {
+            observer(&crate::RunUsageEvent::Started {
+                run_id: run_id.clone(),
+                parent_run_id: self.parent_run_id.clone(),
+            });
+        }
+
         let mut ctx = StepCtx::new(
             run_id.clone(),
             flow.metadata.id.clone(),
@@ -371,6 +398,8 @@ impl FlowVm {
         .with_debug(self.build_debug_controller())
         .with_human_prompter(self.human_prompter.clone())
         .with_on_step(self.on_step.clone())
+        .with_source_snapshot(self.sources.clone())
+        .with_usage_observer(self.usage_observer.clone())
         .with_resources(flow.spec.resources.clone());
         // X-07：仅在宿主显式开启时给 ctx 接上 artifacts 目录——StepCtx 的
         // builder 收 PathBuf 而非 Option，这里用 if-let 保持未开启路径零开销。
@@ -380,6 +409,12 @@ impl FlowVm {
 
         let total = count_steps(&flow.spec.steps);
         let result = run_block_inline(&mut ctx, &flow.spec.steps).await;
+        if let Some(provider) = ctx.ai_provider() {
+            let usage = provider.take_usage();
+            if !usage.is_empty() {
+                persist_ai_usage(&ctx, &usage).await;
+            }
+        }
 
         // P1-2: reclaim run-scoped external resources (e.g. a launched browser
         // process) whether the flow succeeded or failed. Action crates register
@@ -409,6 +444,8 @@ impl FlowVm {
             // without re-scanning ai_calls every render.
             if let Ok((tokens, cost)) = repo.rollup_run_cost(&run_id) {
                 recorded_usage = (tokens.max(0) as u64, cost.max(0) as u64);
+            } else {
+                ctx.mark_usage_unknown();
             }
             let state = if paused_at.is_some() {
                 "paused"
@@ -420,6 +457,26 @@ impl FlowVm {
                 "failed"
             };
             let _ = repo.finish_run(&run_id, state, outputs.as_ref());
+        }
+        if let Some(observer) = &self.usage_observer {
+            observer(&crate::RunUsageEvent::Finished {
+                run_id: run_id.clone(),
+                parent_run_id: self.parent_run_id.clone(),
+                tokens_used: recorded_usage.0,
+                cost_usd_micro: recorded_usage.1,
+                usage_unknown: ctx.usage_unknown(),
+                state: if paused_at.is_some() {
+                    "paused"
+                } else if ok {
+                    "ok"
+                } else if cancelled {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .into(),
+                duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            });
         }
         // A paused run is not an error to the caller — it's surfaced via the
         // report's `paused_at`. Non-paused errors (cancel, uncaught failure)
@@ -442,6 +499,7 @@ impl FlowVm {
             duration_ms: started.elapsed().as_millis(),
             tokens_used: recorded_usage.0,
             cost_usd_micro: recorded_usage.1,
+            usage_unknown: ctx.usage_unknown(),
             outputs,
             paused_at,
         })
@@ -460,6 +518,14 @@ async fn run_block_at(
     depth: i64,
 ) -> Result<(), ExecError> {
     for (idx, step) in steps.iter().enumerate() {
+        if let Some(sources) = ctx.source_snapshot().cloned() {
+            if !sources.dependencies.is_empty() {
+                tokio::task::spawn_blocking(move || sources.verify_dependencies())
+                    .await
+                    .map_err(|e| ExecError::Other(anyhow::anyhow!(e.to_string())))?
+                    .map_err(|e| ExecError::Other(anyhow::anyhow!(e)))?;
+            }
+        }
         let path = match &parent_path {
             Some(parent) => format!("{parent}/{}", step.id),
             None => step.id.clone(),
@@ -2240,11 +2306,19 @@ fn input_type_matches(ty: &str, value: &Value) -> bool {
 /// simply skips the write.
 async fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
     if usage.is_empty() {
+        ctx.mark_usage_unknown();
         return;
     }
     let Some(repo) = ctx.repo().cloned() else {
+        ctx.mark_usage_unknown();
         return;
     };
+    if usage
+        .iter()
+        .any(|u| u.input_tokens == 0 && u.output_tokens == 0)
+    {
+        ctx.mark_usage_unknown();
+    }
     let run_id = ctx.run_id().to_string();
     let step_id = ctx.current_step_id();
     // A1: own the usage records + ids, then write the `ai_calls` ledger rows on
@@ -2252,7 +2326,7 @@ async fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
     let usage = usage.to_vec();
     let res = tokio::task::spawn_blocking(move || {
         for u in &usage {
-            let _ = repo.record_ai_call(AiCallInsert {
+            repo.record_ai_call(AiCallInsert {
                 flow_run_id: &run_id,
                 step_id: step_id.as_deref(),
                 helper: &u.helper,
@@ -2262,12 +2336,17 @@ async fn persist_ai_usage(ctx: &StepCtx, usage: &[AiCallUsage]) {
                 output_tokens: u.output_tokens as i64,
                 latency_ms: u.latency_ms,
                 cost_usd_micro: u.cost_usd_micro,
-            });
+            })?;
         }
+        Ok::<(), lumo_storage::StorageError>(())
     })
     .await;
-    if let Err(e) = res {
-        tracing::warn!("persist_ai_usage join: {e}");
+    match res {
+        Ok(Ok(())) => {}
+        other => {
+            ctx.mark_usage_unknown();
+            tracing::warn!("persist_ai_usage failed: {other:?}");
+        }
     }
 }
 
@@ -2347,10 +2426,12 @@ async fn try_ai_recovery(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let usage_guard = ctx.begin_usage_call();
             let healed = provider
                 .heal_selector(&failed_selector, &prompt, None, model.as_deref())
                 .await?;
             let mut usage = provider.take_usage();
+            usage_guard.finish(!usage.is_empty());
             let Some(new_sel) = healed.css.clone().or_else(|| healed.xpath.clone()) else {
                 // Heal still cost an LLM call even though it gave nothing usable.
                 persist_ai_usage(ctx, &usage).await;
@@ -2392,10 +2473,12 @@ async fn try_ai_recovery(
             // ExtractFailed; passing it makes extraction truly multimodal.
             let screenshot = ctx.take_screenshot();
             let used_image = screenshot.is_some();
+            let usage_guard = ctx.begin_usage_call();
             let value = provider
                 .extract_visual(screenshot, &target, None, None, model.as_deref())
                 .await?;
             let usage = provider.take_usage();
+            usage_guard.finish(!usage.is_empty());
             persist_ai_usage(ctx, &usage).await;
             tracing::info!(
                 "step `{}`: AI extract_visual produced value (image={})",
@@ -2430,8 +2513,10 @@ async fn try_ai_decide(
     let model = effective_ai_model(ctx, step);
     let prompt = effective_ai_prompt(step);
     let vars = ctx.vars_snapshot();
+    let usage_guard = ctx.begin_usage_call();
     let decision = provider.decide(&vars, &prompt, model.as_deref()).await?;
     let usage = provider.take_usage();
+    usage_guard.finish(!usage.is_empty());
     persist_ai_usage(ctx, &usage).await;
     tracing::info!(
         "step `{}`: AI decide → {} (confidence {:.2}) — {}",
@@ -2452,11 +2537,14 @@ async fn maybe_diagnose(ctx: &StepCtx, step: &Step, error: &str) -> Option<Strin
         return None;
     }
     let model = effective_ai_model(ctx, step);
+    let usage_guard = ctx.begin_usage_call();
     let outcome = provider
         .diagnose(&step.id, &step.action, error, model.as_deref())
         .await;
     // diagnose has no `_ai` trace of its own, but it still spent budget — book it.
-    persist_ai_usage(ctx, &provider.take_usage()).await;
+    let usage = provider.take_usage();
+    usage_guard.finish(!usage.is_empty());
+    persist_ai_usage(ctx, &usage).await;
     match outcome {
         Ok(s) if !s.trim().is_empty() => Some(s),
         Ok(_) => None,

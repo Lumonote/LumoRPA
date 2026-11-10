@@ -103,6 +103,7 @@ pub struct LoopEngine {
     events: Option<Arc<dyn AgentEventPublisher>>,
     control: Option<AgentRunControl>,
     checkpoint: Option<JobCheckpointStore>,
+    usage_repo: Option<lumo_storage::Repo>,
     approval: Option<ApprovalSnapshot>,
 }
 
@@ -119,6 +120,7 @@ impl LoopEngine {
             events: None,
             control: None,
             checkpoint: None,
+            usage_repo: None,
             approval: None,
         }
     }
@@ -134,7 +136,15 @@ impl LoopEngine {
     }
 
     pub fn with_job_checkpoint(mut self, checkpoint: JobCheckpointStore) -> Self {
+        if self.usage_repo.is_none() {
+            self.usage_repo = Some(checkpoint.repo());
+        }
         self.checkpoint = Some(checkpoint);
+        self
+    }
+
+    pub fn with_usage_ledger(mut self, repo: lumo_storage::Repo) -> Self {
+        self.usage_repo = Some(repo);
         self
     }
 
@@ -211,19 +221,61 @@ impl LoopEngine {
             },
             None => (BTreeMap::new(), BTreeMap::new()),
         };
-        let steps = attempts.values().copied().fold(0_u32, u32::saturating_add);
-        let (tokens, cost, runtime) =
-            outputs
-                .values()
-                .fold((0_u64, 0_u64, 0_u64), |usage, result| {
-                    (
-                        usage.0.saturating_add(result.tokens_used),
-                        usage.1.saturating_add(result.cost_usd_micro),
-                        usage.2.saturating_add(result.duration_ms),
+        let recorded_attempts = match &self.usage_repo {
+            Some(repo) => match repo
+                .reconcile_invocation_usage(&run_id)
+                .and_then(|_| repo.list_invocation_attempts(&run_id))
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    return LoopReport::terminal(
+                        run_id,
+                        LoopStatus::Failed,
+                        outputs,
+                        attempts,
+                        vec![],
+                        Some(error.to_string()),
                     )
-                });
+                }
+            },
+            None => Vec::new(),
+        };
+        for row in &recorded_attempts {
+            let saved = attempts.entry(row.node_id.clone()).or_default();
+            *saved = (*saved).max(row.attempt);
+        }
+        let steps = attempts.values().copied().fold(0_u32, u32::saturating_add);
+        let (mut tokens, mut cost, mut runtime) = outputs
+            .iter()
+            .filter(|(node_id, _)| !recorded_attempts.iter().any(|row| &row.node_id == *node_id))
+            .fold((0_u64, 0_u64, 0_u64), |usage, (_, result)| {
+                (
+                    usage.0.saturating_add(result.tokens_used),
+                    usage.1.saturating_add(result.cost_usd_micro),
+                    usage.2.saturating_add(result.duration_ms),
+                )
+            });
+        for row in &recorded_attempts {
+            tokens = tokens.saturating_add(row.tokens_used.unwrap_or(0));
+            cost = cost.saturating_add(row.cost_usd_micro.unwrap_or(0));
+            runtime = runtime.saturating_add(row.duration_ms);
+        }
         if let Err(error) = budget.restore_recorded_usage(steps, tokens, cost, runtime) {
             return budget_report(run_id, outputs, attempts, Vec::new(), error);
+        }
+        if let Some(row) = recorded_attempts
+            .iter()
+            .find(|row| row.budget_sensitive && row.usage_state != "recorded")
+        {
+            return budget_report(
+                run_id,
+                outputs,
+                attempts,
+                Vec::new(),
+                BudgetExceeded::UsageUnknown {
+                    node_id: row.node_id.clone(),
+                },
+            );
         }
         validated
             .approval_required
@@ -426,7 +478,50 @@ impl LoopEngine {
                         .payload(json!({"attempt": attempt_number})),
                 )
                 .await;
-                let context = InvocationContext::new(&run_id, &node_id).with_cancel(cancel.clone());
+                let mut context =
+                    InvocationContext::new(&run_id, &node_id).with_cancel(cancel.clone());
+                if let Some(snapshot) = plan
+                    .metadata
+                    .get(crate::SOURCE_SNAPSHOTS_KEY)
+                    .and_then(|snapshots| snapshots.get(&node.capability_id))
+                {
+                    context
+                        .metadata
+                        .insert(crate::SOURCE_SNAPSHOTS_KEY.into(), snapshot.clone());
+                }
+                let usage_guard = if let Some(repo) = &self.usage_repo {
+                    match crate::InvocationUsageReporter::begin(
+                        repo.clone(),
+                        &run_id,
+                        &node_id,
+                        attempt_number,
+                        &capability.id,
+                        crate::CapabilityKind::from_source(&capability.source),
+                        capability
+                            .input_schema
+                            .get("x-lumo-billable")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false),
+                    ) {
+                        Ok(guard) => {
+                            context.usage = Some(guard.reporter());
+                            Some(guard)
+                        }
+                        Err(error) => {
+                            running.abort_all();
+                            return LoopReport::terminal(
+                                run_id,
+                                LoopStatus::Failed,
+                                outputs,
+                                attempts,
+                                decisions,
+                                Some(error),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
                 running.spawn(async move {
                     let request = InvocationRequest {
                         capability: (*capability).clone(),
@@ -443,7 +538,8 @@ impl LoopEngine {
                         duration_ms: node.timeout_ms,
                     })
                     .and_then(|result| result);
-                    (node, attempt_number, result)
+                    let usage = usage_guard.map(|guard| guard.finish(&result));
+                    (node, attempt_number, result, usage)
                 });
             }
 
@@ -500,7 +596,7 @@ impl LoopEngine {
             }) else {
                 continue;
             };
-            let (node, attempt, result) = match joined {
+            let (node, attempt, result, usage) = match joined {
                 Ok(result) => result,
                 Err(error) => {
                     return LoopReport::terminal(
@@ -513,6 +609,46 @@ impl LoopEngine {
                     );
                 }
             };
+            let recorded_usage = match usage {
+                Some(Ok(usage)) => Some(usage),
+                Some(Err(error)) => {
+                    running.abort_all();
+                    return LoopReport::terminal(
+                        run_id,
+                        LoopStatus::Failed,
+                        outputs,
+                        attempts,
+                        decisions,
+                        Some(error),
+                    );
+                }
+                None => None,
+            };
+            let usage_error = if let Some(usage) = &recorded_usage {
+                budget
+                    .lock()
+                    .await
+                    .charge_usage(
+                        usage.tokens_used.unwrap_or(0),
+                        usage.cost_usd_micro.unwrap_or(0),
+                    )
+                    .err()
+                    .or_else(|| {
+                        (usage.budget_sensitive && usage.usage_state != "recorded").then(|| {
+                            BudgetExceeded::UsageUnknown {
+                                node_id: node.id.clone(),
+                            }
+                        })
+                    })
+            } else {
+                None
+            };
+            if result.is_err() && !cancel.is_cancelled() {
+                if let Some(error) = usage_error.clone() {
+                    running.abort_all();
+                    return budget_report(run_id, outputs, attempts, decisions, error);
+                }
+            }
             match result.and_then(|result| {
                 validate_invocation_result(&node, &result)
                     .map_err(|error| InvocationError::Failed(error.to_string()))?;
@@ -534,16 +670,22 @@ impl LoopEngine {
                             );
                         }
                     }
-                    if let Err(error) = budget
-                        .lock()
-                        .await
-                        .charge_usage(result.tokens_used, result.cost_usd_micro)
-                    {
-                        running.abort_all();
-                        return budget_report(run_id, outputs, attempts, decisions, error);
+                    if recorded_usage.is_none() {
+                        if let Err(error) = budget
+                            .lock()
+                            .await
+                            .charge_usage(result.tokens_used, result.cost_usd_micro)
+                        {
+                            running.abort_all();
+                            return budget_report(run_id, outputs, attempts, decisions, error);
+                        }
                     }
                     completed.insert(node.id.clone());
                     outputs.insert(node.id.clone(), result.clone());
+                    if let Some(error) = usage_error {
+                        running.abort_all();
+                        return budget_report(run_id, outputs, attempts, decisions, error);
+                    }
                     self.emit(
                         AgentEventDraft::new(&run_id, AgentEventKind::NodeCompleted)
                             .node_id(&node.id)

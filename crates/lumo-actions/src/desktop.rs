@@ -24,7 +24,7 @@
 
 use async_trait::async_trait;
 use lumo_core::error::StepError;
-use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx};
+use lumo_core::{Action, ActionRegistry, ActionResult, StepCtx, StepInterrupt};
 use once_cell::sync::Lazy;
 use rdev::{simulate, Button, EventType, Key};
 use schemars::JsonSchema;
@@ -100,25 +100,27 @@ impl Action for DragAction {
         if steps == 0 {
             return Err(StepError::msg("desktop.drag: `steps` must be >= 1"));
         }
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || {
-            send(EventType::MouseMove {
+            let mut input = NativeInput::new(interrupt, send);
+            input.event(EventType::MouseMove {
                 x: from_x,
                 y: from_y,
             })?;
-            send(EventType::ButtonPress(button.to_rdev()))?;
+            input.event(EventType::ButtonPress(button.to_rdev()))?;
             let pause = Duration::from_millis(duration_ms / u64::from(steps));
             for step in 1..=steps {
                 let t = f64::from(step) / f64::from(steps);
-                send(EventType::MouseMove {
+                input.event(EventType::MouseMove {
                     x: from_x + (to_x - from_x) * t,
                     y: from_y + (to_y - from_y) * t,
                 })?;
                 if !pause.is_zero() {
-                    std::thread::sleep(pause);
+                    input.wait(pause)?;
                 }
             }
-            send(EventType::ButtonRelease(button.to_rdev()))?;
-            Ok::<(), StepError>(())
+            input.event(EventType::ButtonRelease(button.to_rdev()))?;
+            input.check()
         })
         .await
         .map_err(|e| StepError::msg(format!("desktop.drag join: {e}")))??;
@@ -136,11 +138,122 @@ impl Action for DragAction {
 const TICK: Duration = Duration::from_millis(20);
 
 /// 发一个事件并停顿一拍。仅在 `spawn_blocking` 内调用,sleep 不阻塞 async 执行器。
-/// `pub(crate)`:desktop_text(desktop.click_text)复用同一条点击触发路径。
-pub(crate) fn send(ev: EventType) -> Result<(), StepError> {
+/// All callers must go through NativeInput so interruption releases held input.
+fn send(ev: EventType) -> Result<(), StepError> {
     simulate(&ev).map_err(|e| StepError::msg(format!("desktop simulate failed: {e:?}")))?;
     std::thread::sleep(TICK);
     Ok(())
+}
+
+/// One native input transaction. Cancellation blocks every new event, while
+/// Drop releases keys/buttons already pressed even if a send failed or the
+/// async caller dropped its spawn_blocking handle. Cleanup must ignore the
+/// cancellation bit so modifiers cannot remain stuck after a timeout.
+struct NativeInput<S: FnMut(EventType) -> Result<(), StepError>> {
+    interrupt: StepInterrupt,
+    sink: S,
+    releases: Vec<EventType>,
+}
+
+impl<S: FnMut(EventType) -> Result<(), StepError>> NativeInput<S> {
+    fn new(interrupt: StepInterrupt, sink: S) -> Self {
+        Self {
+            interrupt,
+            sink,
+            releases: Vec::new(),
+        }
+    }
+
+    fn check(&self) -> Result<(), StepError> {
+        if self.interrupt.is_interrupted() {
+            Err(StepError::msg("desktop input cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn event(&mut self, event: EventType) -> Result<(), StepError> {
+        self.check()?;
+        match event {
+            // Track before sending: an OS API can partially deliver an event
+            // before reporting failure, so a best-effort release is required.
+            EventType::KeyPress(key) => self.releases.push(EventType::KeyRelease(key)),
+            EventType::ButtonPress(button) => self.releases.push(EventType::ButtonRelease(button)),
+            _ => {}
+        }
+        (self.sink)(event)?;
+        if matches!(
+            event,
+            EventType::KeyRelease(_) | EventType::ButtonRelease(_)
+        ) {
+            if let Some(index) = self.releases.iter().rposition(|release| *release == event) {
+                self.releases.remove(index);
+            }
+        }
+        self.check()
+    }
+
+    fn click(
+        &mut self,
+        position: Option<(f64, f64)>,
+        button: ClickButton,
+        double: bool,
+    ) -> Result<(), StepError> {
+        if let Some((x, y)) = position {
+            self.event(EventType::MouseMove { x, y })?;
+        }
+        for _ in 0..if double { 2 } else { 1 } {
+            self.event(EventType::ButtonPress(button.to_rdev()))?;
+            self.event(EventType::ButtonRelease(button.to_rdev()))?;
+        }
+        self.check()
+    }
+
+    fn combo(&mut self, modifiers: &[Key], main: Key) -> Result<(), StepError> {
+        for modifier in modifiers {
+            self.event(EventType::KeyPress(*modifier))?;
+        }
+        self.event(EventType::KeyPress(main))?;
+        self.event(EventType::KeyRelease(main))?;
+        for modifier in modifiers.iter().rev() {
+            self.event(EventType::KeyRelease(*modifier))?;
+        }
+        self.check()
+    }
+
+    fn wait(&self, duration: Duration) -> Result<(), StepError> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < duration {
+            self.check()?;
+            std::thread::sleep(
+                duration
+                    .saturating_sub(start.elapsed())
+                    .min(Duration::from_millis(10)),
+            );
+        }
+        self.check()
+    }
+}
+
+impl<S: FnMut(EventType) -> Result<(), StepError>> Drop for NativeInput<S> {
+    fn drop(&mut self) {
+        for release in self.releases.drain(..).rev() {
+            if let Err(error) = (self.sink)(release) {
+                tracing::warn!("desktop input cleanup could not release held input: {error}");
+            }
+        }
+    }
+}
+
+/// Shared guarded native click used by coordinate and OCR targeting actions.
+/// Call only inside spawn_blocking; the OS sender includes short event pacing.
+pub(crate) fn guarded_click(
+    interrupt: StepInterrupt,
+    position: Option<(f64, f64)>,
+    button: ClickButton,
+    double: bool,
+) -> Result<(), StepError> {
+    NativeInput::new(interrupt, send).click(position, button, double)
 }
 
 // ---------------------------------------------------------------------------
@@ -174,9 +287,12 @@ impl Action for MoveAction {
         let MoveIn { x, y } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("desktop.move input invalid: {e}")))?;
         ctx.ensure_desktop("mouse")?;
-        tokio::task::spawn_blocking(move || send(EventType::MouseMove { x, y }))
-            .await
-            .map_err(|e| StepError::msg(format!("desktop.move join: {e}")))??;
+        let interrupt = ctx.step_interrupt();
+        tokio::task::spawn_blocking(move || {
+            NativeInput::new(interrupt, send).event(EventType::MouseMove { x, y })
+        })
+        .await
+        .map_err(|e| StepError::msg(format!("desktop.move join: {e}")))??;
         Ok(ActionResult::from(serde_json::json!({ "x": x, "y": y })))
     }
 }
@@ -255,19 +371,10 @@ impl Action for ClickAction {
                 ))
             }
         };
-        tokio::task::spawn_blocking(move || {
-            if let Some((x, y)) = pos {
-                send(EventType::MouseMove { x, y })?;
-            }
-            let clicks = if double { 2 } else { 1 };
-            for _ in 0..clicks {
-                send(EventType::ButtonPress(button.to_rdev()))?;
-                send(EventType::ButtonRelease(button.to_rdev()))?;
-            }
-            Ok::<(), StepError>(())
-        })
-        .await
-        .map_err(|e| StepError::msg(format!("desktop.click join: {e}")))??;
+        let interrupt = ctx.step_interrupt();
+        tokio::task::spawn_blocking(move || guarded_click(interrupt, pos, button, double))
+            .await
+            .map_err(|e| StepError::msg(format!("desktop.click join: {e}")))??;
         Ok(ActionResult::from(
             serde_json::json!({ "clicked": true, "double": double }),
         ))
@@ -307,8 +414,9 @@ impl Action for ScrollAction {
         let ScrollIn { dx, dy } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("desktop.scroll input invalid: {e}")))?;
         ctx.ensure_desktop("mouse")?;
+        let interrupt = ctx.step_interrupt();
         tokio::task::spawn_blocking(move || {
-            send(EventType::Wheel {
+            NativeInput::new(interrupt, send).event(EventType::Wheel {
                 delta_x: dx,
                 delta_y: dy,
             })
@@ -355,19 +463,10 @@ impl Action for KeyAction {
         ctx.ensure_desktop("keyboard")?;
         // 解析在闸门后、触发前 —— 非法组合键快速失败,不触 rdev。
         let (mods, main) = parse_combo(&keys)?;
-        tokio::task::spawn_blocking(move || {
-            for m in &mods {
-                send(EventType::KeyPress(*m))?;
-            }
-            send(EventType::KeyPress(main))?;
-            send(EventType::KeyRelease(main))?;
-            for m in mods.iter().rev() {
-                send(EventType::KeyRelease(*m))?;
-            }
-            Ok::<(), StepError>(())
-        })
-        .await
-        .map_err(|e| StepError::msg(format!("desktop.key join: {e}")))??;
+        let interrupt = ctx.step_interrupt();
+        tokio::task::spawn_blocking(move || NativeInput::new(interrupt, send).combo(&mods, main))
+            .await
+            .map_err(|e| StepError::msg(format!("desktop.key join: {e}")))??;
         Ok(ActionResult::from(serde_json::json!({ "keys": keys })))
     }
 }
@@ -516,7 +615,8 @@ impl Action for TypeAction {
             .map_err(|e| StepError::msg(format!("desktop.type input invalid: {e}")))?;
         ctx.ensure_desktop("keyboard")?;
         let len = text.chars().count();
-        tokio::task::spawn_blocking(move || paste_text(text))
+        let interrupt = ctx.step_interrupt();
+        tokio::task::spawn_blocking(move || paste_text(text, interrupt))
             .await
             .map_err(|e| StepError::msg(format!("desktop.type join: {e}")))??;
         Ok(ActionResult::from(serde_json::json!({ "typed": len })))
@@ -525,9 +625,12 @@ impl Action for TypeAction {
 
 /// 把文本写入剪贴板再模拟粘贴热键(macOS = Cmd+V,其余 = Ctrl+V)。中文/Unicode
 /// 安全 —— rdev 逐键模拟无法产出非 ASCII,粘贴是唯一可靠的跨平台路径。
-fn paste_text(text: String) -> Result<(), StepError> {
+fn paste_text(text: String, interrupt: StepInterrupt) -> Result<(), StepError> {
+    let mut input = NativeInput::new(interrupt, send);
+    input.check()?;
     let mut cb = arboard::Clipboard::new()
         .map_err(|e| StepError::msg(format!("desktop.type: clipboard unavailable: {e}")))?;
+    input.check()?;
     cb.set_text(text)
         .map_err(|e| StepError::msg(format!("desktop.type: clipboard write: {e}")))?;
     let modifier = if cfg!(target_os = "macos") {
@@ -535,9 +638,153 @@ fn paste_text(text: String) -> Result<(), StepError> {
     } else {
         Key::ControlLeft
     };
-    send(EventType::KeyPress(modifier))?;
-    send(EventType::KeyPress(Key::KeyV))?;
-    send(EventType::KeyRelease(Key::KeyV))?;
-    send(EventType::KeyRelease(modifier))?;
-    Ok(())
+    input.combo(&[modifier], Key::KeyV)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn cancelled_before_start_never_sends_input_or_pastes() {
+        let interrupt = StepInterrupt::default();
+        interrupt.interrupt();
+        let sent = RefCell::new(Vec::new());
+        let mut input = NativeInput::new(interrupt.clone(), |event| {
+            sent.borrow_mut().push(event);
+            Ok(())
+        });
+        assert!(input.combo(&[Key::ControlLeft], Key::KeyV).is_err());
+        assert!(input
+            .event(EventType::Wheel {
+                delta_x: 0,
+                delta_y: 1
+            })
+            .is_err());
+        assert!(paste_text("must never reach clipboard".into(), interrupt).is_err());
+        drop(input);
+        assert!(sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn cancelled_mid_combo_releases_modifier_without_pressing_main_key() {
+        let interrupt = StepInterrupt::default();
+        let sent = RefCell::new(Vec::new());
+        {
+            let mut input = NativeInput::new(interrupt.clone(), |event| {
+                sent.borrow_mut().push(event);
+                if event == EventType::KeyPress(Key::ControlLeft) {
+                    interrupt.interrupt();
+                }
+                Ok(())
+            });
+            assert!(input.combo(&[Key::ControlLeft], Key::KeyV).is_err());
+        }
+        assert_eq!(
+            *sent.borrow(),
+            vec![
+                EventType::KeyPress(Key::ControlLeft),
+                EventType::KeyRelease(Key::ControlLeft)
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_press_releases_main_and_modifiers_in_reverse_order() {
+        let sent = RefCell::new(Vec::new());
+        {
+            let mut input = NativeInput::new(StepInterrupt::default(), |event| {
+                sent.borrow_mut().push(event);
+                if event == EventType::KeyPress(Key::KeyA) {
+                    Err(StepError::msg("OS reported partial input failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(input
+                .combo(&[Key::ControlLeft, Key::ShiftLeft], Key::KeyA)
+                .is_err());
+        }
+        assert_eq!(
+            *sent.borrow(),
+            vec![
+                EventType::KeyPress(Key::ControlLeft),
+                EventType::KeyPress(Key::ShiftLeft),
+                EventType::KeyPress(Key::KeyA),
+                EventType::KeyRelease(Key::KeyA),
+                EventType::KeyRelease(Key::ShiftLeft),
+                EventType::KeyRelease(Key::ControlLeft)
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelled_drag_releases_mouse_without_sending_more_movement() {
+        let interrupt = StepInterrupt::default();
+        let sent = RefCell::new(Vec::new());
+        {
+            let mut input = NativeInput::new(interrupt.clone(), |event| {
+                sent.borrow_mut().push(event);
+                if event == EventType::ButtonPress(Button::Left) {
+                    interrupt.interrupt();
+                }
+                Ok(())
+            });
+            assert!(input.event(EventType::ButtonPress(Button::Left)).is_err());
+            assert!(input
+                .event(EventType::MouseMove { x: 100.0, y: 100.0 })
+                .is_err());
+        }
+        assert_eq!(
+            *sent.borrow(),
+            vec![
+                EventType::ButtonPress(Button::Left),
+                EventType::ButtonRelease(Button::Left)
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelled_ocr_coordinate_click_never_presses_mouse() {
+        let interrupt = StepInterrupt::default();
+        let sent = RefCell::new(Vec::new());
+        {
+            let mut input = NativeInput::new(interrupt.clone(), |event| {
+                sent.borrow_mut().push(event);
+                if matches!(event, EventType::MouseMove { .. }) {
+                    interrupt.interrupt();
+                }
+                Ok(())
+            });
+            assert!(input
+                .click(Some((12.0, 34.0)), ClickButton::Left, true)
+                .is_err());
+        }
+        assert_eq!(
+            *sent.borrow(),
+            vec![EventType::MouseMove { x: 12.0, y: 34.0 }]
+        );
+    }
+
+    #[test]
+    fn successful_combo_does_not_release_twice_on_drop() {
+        let sent = RefCell::new(Vec::new());
+        {
+            let mut input = NativeInput::new(StepInterrupt::default(), |event| {
+                sent.borrow_mut().push(event);
+                Ok(())
+            });
+            input.combo(&[Key::MetaLeft], Key::KeyV).unwrap();
+        }
+        assert_eq!(
+            *sent.borrow(),
+            vec![
+                EventType::KeyPress(Key::MetaLeft),
+                EventType::KeyPress(Key::KeyV),
+                EventType::KeyRelease(Key::KeyV),
+                EventType::KeyRelease(Key::MetaLeft)
+            ]
+        );
+    }
 }

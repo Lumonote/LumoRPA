@@ -579,6 +579,14 @@ impl Repo {
         let job_ids = expired_job_ids(&tx, now)?;
         let mut recovered = Vec::with_capacity(job_ids.len());
         for job_id in job_ids {
+            let interrupted_run: Option<String> = tx.query_row(
+                "SELECT run_id FROM agent_jobs WHERE id=?",
+                [&job_id],
+                |row| row.get(0),
+            )?;
+            if let Some(run_id) = interrupted_run {
+                crate::invocation_store::mark_interrupted_invocations(&tx, &run_id)?;
+            }
             tx.execute(
                 "UPDATE agent_job_nodes SET state='unknown',updated_at=? WHERE job_id=? AND state='completed' AND (node_hash='' OR result_json IS NULL)",
                 params![now.timestamp_millis(),job_id],

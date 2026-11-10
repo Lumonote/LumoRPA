@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Must match `lumo_storage::repo::LATEST_USER_VERSION`. Hard-coded here on
 /// purpose so an accidental change to the migration list trips the test.
 /// v4: adds durable agent, MCP, voice, capability, and improvement tables.
-const EXPECTED_USER_VERSION: i64 = 6;
+const EXPECTED_USER_VERSION: i64 = 7;
 
 fn make_run(id: &str) -> FlowRunRow {
     FlowRunRow {

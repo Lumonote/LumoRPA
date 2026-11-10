@@ -147,6 +147,10 @@ pub enum BudgetExceeded {
     Tokens { limit: u64 },
     #[error("cost budget exhausted at {limit_usd_micro} micro-US dollars")]
     Cost { limit_usd_micro: u64 },
+    #[error(
+        "usage for node `{node_id}` is incomplete; reconcile recorded charges before retrying"
+    )]
+    UsageUnknown { node_id: String },
 }
 
 impl BudgetExceeded {
@@ -156,6 +160,7 @@ impl BudgetExceeded {
             Self::Runtime { .. } => "runtime",
             Self::Tokens { .. } => "tokens",
             Self::Cost { .. } => "cost",
+            Self::UsageUnknown { .. } => "usage_unknown",
         }
     }
 }

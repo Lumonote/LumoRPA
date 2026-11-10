@@ -110,6 +110,7 @@ use RequiredCap::{Desktop, FsRead, FsWrite, Llm, Mcp, Network};
 /// 声明表本体。**按 action 字典序排列**(`action_caps` 走二分;顺序有测试钉住)。
 pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("ai.chat", &[Llm], &[]),
+    entry("ai.screen_agent", &[Llm, Desktop("screen")], &[]),
     entry("archive.unzip", &[FsRead, FsWrite], &[]),
     entry("archive.zip", &[FsRead, FsWrite], &[]),
     entry("browser.download_wait", &[FsWrite], &[]),
@@ -138,6 +139,7 @@ pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("desktop.drag", &[Desktop("mouse")], &[]),
     entry("desktop.key", &[Desktop("keyboard")], &[]),
     entry("desktop.move", &[Desktop("mouse")], &[]),
+    entry("desktop.observe", &[Desktop("screen")], &[]),
     entry("desktop.screenshot", &[FsWrite, Desktop("screen")], &[]),
     entry("desktop.scroll", &[Desktop("mouse")], &[]),
     entry("desktop.type", &[Desktop("keyboard")], &[]),
@@ -219,10 +221,10 @@ pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("file.rename", &[FsRead, FsWrite], &[]),
     entry("file.wait", &[FsRead], &[]),
     entry("file.write", &[FsWrite], &[]),
-    entry("ftp.download", &[FsWrite, Network], &[]),
+    entry("ftp.download", &[FsWrite, Network], &[("ca_cert", FsRead)]),
     // 传输动词别名(与目标动作同参同门禁):ftp.get ≙ ftp.download,
     // ftp.put ≙ ftp.upload,s3.download ≙ s3.get,s3.upload ≙ s3.put。
-    entry("ftp.get", &[FsWrite, Network], &[]),
+    entry("ftp.get", &[FsWrite, Network], &[("ca_cert", FsRead)]),
     entry("ftp.put", &[FsRead, Network], &[]),
     entry("ftp.upload", &[FsRead, Network], &[]),
     entry("hash.md5", &[], &[("path", FsRead)]),
@@ -254,6 +256,8 @@ pub static ACTION_CAPS: &[ActionCaps] = &[
     entry("s3.get", &[FsWrite, Network], &[]),
     entry("s3.put", &[FsRead, Network], &[]),
     entry("s3.upload", &[FsRead, Network], &[]),
+    entry("sftp.download", &[FsRead, FsWrite, Network], &[]),
+    entry("sftp.upload", &[FsRead, Network], &[]),
     entry("window.activate", &[Desktop("window")], &[]),
     entry("window.bounds", &[Desktop("window")], &[]),
     entry("window.close", &[Desktop("window")], &[]),

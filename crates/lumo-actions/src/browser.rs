@@ -9,8 +9,7 @@ use chromiumoxide::cdp::browser_protocol::browser::{
 };
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
-    MouseButton,
+    DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, EventLoadingFailed, EventLoadingFinished, EventResponseReceived,
@@ -20,7 +19,6 @@ use chromiumoxide::cdp::browser_protocol::page::{
     EventJavascriptDialogOpening, GetNavigationHistoryParams, HandleJavaScriptDialogParams,
     NavigateToHistoryEntryParams, PrintToPdfParams,
 };
-use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ExecutionContextId};
 use chromiumoxide::layout::Point;
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
@@ -905,7 +903,7 @@ struct ClickIn {
     /// Click inside this iframe instead of the main frame — same addressing as
     /// `browser.extract`/`browser.eval` (`url_includes`/`name`/`index`). The
     /// element is located in-frame, then clicked with real top-level CDP input
-    /// (isTrusted). Same-origin frame chains only; the vision fallback does not
+    /// (isTrusted). Same-origin and cross-origin frame chains; the vision fallback does not
     /// apply in-frame.
     #[serde(default)]
     frame: Option<FrameSel>,
@@ -952,16 +950,19 @@ impl Action for ClickAction {
         // 帧内未命中报 SelectorNotFound(retry.on: [selector_not_found] 开箱可用);
         // vision 兜底不进帧(其坐标↔DOM 映射只认主帧)。
         if let Some(fsel) = frame.as_ref() {
-            let (x, y, strategy) =
-                frame_element_point(&page, "browser.click", &spec, fsel, timeout_ms).await?;
-            page.click(Point::new(x, y))
-                .await
-                .map_err(|e| StepError::msg(format!("click `{hint}` in frame: {e}")))?;
-            return Ok(ActionResult::from(serde_json::json!({
-                "resolved_by": strategy,
-                "matched": hint,
-                "frame": true,
-            })));
+            return crate::contracts::with_timeout(timeout_ms, async {
+                let (x, y, strategy) =
+                    frame_element_point(&page, "browser.click", &spec, fsel, timeout_ms).await?;
+                page.click(Point::new(x, y))
+                    .await
+                    .map_err(|e| StepError::msg(format!("click `{hint}` in frame: {e}")))?;
+                Ok(ActionResult::from(serde_json::json!({
+                    "resolved_by": strategy,
+                    "matched": hint,
+                    "frame": true,
+                })))
+            })
+            .await;
         }
         let (element, strategy) = resolve_with_vision_fallback(
             _ctx,
@@ -1006,7 +1007,7 @@ struct TypeIn {
     /// `browser.extract`/`browser.eval` (`url_includes`/`name`/`index`). The
     /// element is located in-frame, focused by a real top-level click, then the
     /// text is sent through the same tab-level keyboard as the main-frame path
-    /// (isTrusted). Same-origin frame chains only; no vision fallback in-frame.
+    /// (isTrusted). Cross-origin frames are supported; no vision fallback in-frame.
     #[serde(default)]
     frame: Option<FrameSel>,
     #[serde(default = "default_timeout_ms")]
@@ -1052,21 +1053,37 @@ impl Action for TypeAction {
         // 事件)→ 复用主帧同款 tab 级键盘通路逐字符派发按键(dispatch_type_str
         // 照搬 chromiumoxide element.type_str 的底层实现)。
         if let Some(fsel) = frame.as_ref() {
-            let (x, y, strategy) =
-                frame_element_point(&page, "browser.type", &spec, fsel, timeout_ms).await?;
-            page.click(Point::new(x, y))
-                .await
-                .map_err(|e| StepError::msg(format!("type `{hint}` in frame: focus click: {e}")))?;
-            if clear {
-                let _ = eval_in_frame(&page, frame_clear_js(&spec), fsel, timeout_ms).await;
-            }
-            dispatch_type_str(&page, &text).await?;
-            return Ok(ActionResult::from(serde_json::json!({
-                "resolved_by": strategy,
-                "matched": hint,
-                "typed": text.len(),
-                "frame": true,
-            })));
+            return crate::contracts::with_timeout(timeout_ms, async {
+                let mut cdp = FrameCdp::connect(&page).await?;
+                let target = cdp.select(fsel)?;
+                let (x, y, strategy) = cdp.element_point(&target, &spec).await?;
+                page.click(Point::new(x, y)).await.map_err(|e| {
+                    StepError::msg(format!("type `{hint}` in frame: focus click: {e}"))
+                })?;
+                let focused = cdp.evaluate(&target, frame_focus_js(&spec), true).await?;
+                if focused["value"] != Value::Bool(true) {
+                    return Err(StepError::msg(format!(
+                        "type `{hint}` in frame: target did not receive keyboard focus"
+                    )));
+                }
+                if clear {
+                    let cleared = cdp.evaluate(&target, frame_clear_js(&spec), true).await?;
+                    if cleared["value"] != Value::Bool(true) {
+                        return Err(StepError::SelectorNotFound(hint.clone()));
+                    }
+                }
+                // Keyboard events belong to the focused renderer, which may
+                // be an OOPIF. Sending to the top renderer can silently lose
+                // text even after a successful cross-process focus click.
+                dispatch_frame_text(&mut cdp, &target, &text).await?;
+                Ok(ActionResult::from(serde_json::json!({
+                    "resolved_by": strategy,
+                    "matched": hint,
+                    "typed": text.len(),
+                    "frame": true,
+                })))
+            })
+            .await;
         }
         let (element, strategy) = resolve_with_vision_fallback(
             _ctx,
@@ -1476,105 +1493,368 @@ impl FrameSel {
     }
 }
 
-/// Resolve the JS execution context of the iframe matching `sel`.
-async fn resolve_frame_context(
-    page: &Page,
-    sel: &FrameSel,
-) -> Result<ExecutionContextId, StepError> {
-    let frames = page
-        .frames()
-        .await
-        .map_err(|e| StepError::msg(format!("frames: {e}")))?;
-    // Index addressing: pick directly by position (chromiumoxide's frame list is
-    // ordered by the CDP frame tree, so index is stable within a page load).
-    if let Some(idx) = sel.index {
-        let fid = frames.get(idx).cloned().ok_or_else(|| {
-            StepError::msg(format!(
-                "frame index {idx} out of range (page has {} frames)",
-                frames.len()
-            ))
-        })?;
-        return page
-            .frame_execution_context(fid)
-            .await
-            .map_err(|e| StepError::msg(format!("frame context: {e}")))?
-            .ok_or_else(|| {
-                StepError::msg("matched iframe has no execution context yet (still loading?)")
-            });
-    }
-    for fid in frames {
-        let hit = if let Some(sub) = sel.url_includes.as_deref() {
-            page.frame_url(fid.clone())
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|u| u.contains(sub))
-        } else if let Some(name) = sel.name.as_deref() {
-            page.frame_name(fid.clone())
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|n| n == name)
-        } else {
-            false
-        };
-        if hit {
-            return page
-                .frame_execution_context(fid)
-                .await
-                .map_err(|e| StepError::msg(format!("frame context: {e}")))?
-                .ok_or_else(|| {
-                    StepError::msg("matched iframe has no execution context yet (still loading?)")
-                });
-        }
-    }
-    Err(StepError::msg("no iframe matched `frame`"))
+/// Frame commands use their own short-lived CDP connection. chromiumoxide 0.7
+/// only initializes `page` targets, so its frame-context cache cannot address
+/// an out-of-process iframe. A flattened session per renderer keeps both same-
+/// process and OOPIF frames addressable without disabling Chrome site isolation.
+#[derive(Debug, Deserialize)]
+struct FrameCdpEvent {
+    method: String,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    params: Value,
 }
 
-/// Evaluate `expr` inside the iframe matched by `sel`, returning its JSON value.
-/// A thrown JS exception surfaces as an error rather than a silent null.
+impl chromiumoxide::Method for FrameCdpEvent {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        self.method.clone().into()
+    }
+}
+
+impl chromiumoxide::types::EventMessage for FrameCdpEvent {
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RoutedFrame {
+    id: String,
+    parent: Option<String>,
+    name: String,
+    url: String,
+    session: String,
+}
+
+struct FrameCdp {
+    connection: chromiumoxide::Connection<FrameCdpEvent>,
+    contexts: HashMap<(String, String), i64>,
+    frames: Vec<RoutedFrame>,
+}
+
+impl FrameCdp {
+    async fn command(
+        &mut self,
+        session: Option<&str>,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, StepError> {
+        let id = self
+            .connection
+            .submit_command(method.into(), session.map(|s| s.to_owned().into()), params)
+            .map_err(|e| StepError::msg(format!("frame {method}: {e}")))?;
+        while let Some(message) = self.connection.next().await {
+            match message.map_err(|e| StepError::msg(format!("frame connection: {e}")))? {
+                chromiumoxide::types::Message::Response(response) if response.id == id => {
+                    if let Some(error) = response.error {
+                        return Err(StepError::msg(format!("frame {method}: {error}")));
+                    }
+                    return Ok(response.result.unwrap_or(Value::Null));
+                }
+                chromiumoxide::types::Message::Event(event) => {
+                    if event.method == "Runtime.executionContextCreated" {
+                        let context = &event.params["context"];
+                        if context["auxData"]["isDefault"].as_bool() == Some(true) {
+                            if let (Some(session), Some(frame), Some(id)) = (
+                                event.session_id,
+                                context["auxData"]["frameId"].as_str(),
+                                context["id"].as_i64(),
+                            ) {
+                                self.contexts.insert((session, frame.to_string()), id);
+                            }
+                        }
+                    } else if event.method == "Runtime.executionContextsCleared" {
+                        if let Some(session) = event.session_id {
+                            self.contexts.retain(|(s, _), _| s != &session);
+                        }
+                    } else if event.method == "Runtime.executionContextDestroyed" {
+                        if let (Some(session), Some(id)) = (
+                            event.session_id,
+                            event.params["executionContextId"].as_i64(),
+                        ) {
+                            self.contexts
+                                .retain(|(s, _), context| s != &session || *context != id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(StepError::msg("frame connection closed"))
+    }
+
+    async fn attach(&mut self, target: &str) -> Result<String, StepError> {
+        let result = self
+            .command(
+                None,
+                "Target.attachToTarget",
+                serde_json::json!({"targetId": target, "flatten": true}),
+            )
+            .await?;
+        let session = result["sessionId"]
+            .as_str()
+            .ok_or_else(|| StepError::msg("frame attach returned no session"))?
+            .to_string();
+        self.command(Some(&session), "Runtime.enable", serde_json::json!({}))
+            .await?;
+        Ok(session)
+    }
+
+    fn add_tree(&mut self, tree: &Value, parent: Option<&str>) -> Result<(), StepError> {
+        let frame = &tree["frame"];
+        let id = frame["id"]
+            .as_str()
+            .ok_or_else(|| StepError::msg("frame tree has no id"))?;
+        if !self.frames.iter().any(|known| known.id == id) {
+            if self.frames.len() >= 256 {
+                return Err(StepError::msg("frame tree exceeds 256 frames"));
+            }
+            self.frames.push(RoutedFrame {
+                id: id.into(),
+                parent: parent.map(Into::into),
+                name: frame["name"].as_str().unwrap_or_default().into(),
+                url: frame["url"].as_str().unwrap_or_default().into(),
+                session: String::new(),
+            });
+        }
+        if let Some(children) = tree["childFrames"].as_array() {
+            for child in children {
+                self.add_tree(child, Some(id))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Page.getFrameTree omits OOPIF children in current Chrome versions.
+    /// Inspect each frame owner's DOM node to recover its frameId, including
+    /// owners in open shadow roots, then attach that renderer independently.
+    async fn discover_children(&mut self, frame: &RoutedFrame) -> Result<(), StepError> {
+        let owners = self
+            .evaluate(
+                frame,
+                r#"(() => {
+            const frames = [];
+            const visit = root => {
+                for (const element of root.querySelectorAll('*')) {
+                    if (element.matches('iframe,frame')) frames.push(element);
+                    if (element.shadowRoot) visit(element.shadowRoot);
+                }
+            };
+            visit(document);
+            return frames;
+        })()"#
+                    .into(),
+                false,
+            )
+            .await?;
+        let Some(array_id) = owners["objectId"].as_str() else {
+            return Ok(());
+        };
+        let properties = self
+            .command(
+                Some(&frame.session),
+                "Runtime.getProperties",
+                serde_json::json!({
+                    "objectId": array_id, "ownProperties": true
+                }),
+            )
+            .await?;
+        if let Some(properties) = properties["result"].as_array() {
+            for property in properties {
+                if property["name"]
+                    .as_str()
+                    .and_then(|name| name.parse::<usize>().ok())
+                    .is_none()
+                {
+                    continue;
+                }
+                let Some(object) = property["value"]["objectId"].as_str() else {
+                    continue;
+                };
+                let node = self
+                    .command(
+                        Some(&frame.session),
+                        "DOM.describeNode",
+                        serde_json::json!({"objectId": object}),
+                    )
+                    .await?;
+                let Some(id) = node["node"]["frameId"].as_str() else {
+                    continue;
+                };
+                if self.frames.iter().any(|known| known.id == id) {
+                    continue;
+                }
+                if self.frames.len() >= 256 {
+                    return Err(StepError::msg("frame tree exceeds 256 frames"));
+                }
+                self.frames.push(RoutedFrame {
+                    id: id.to_string(),
+                    parent: Some(frame.id.clone()),
+                    name: String::new(),
+                    url: String::new(),
+                    session: String::new(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn connect(page: &Page) -> Result<Self, StepError> {
+        let session = {
+            let all = sessions();
+            let all = all.lock();
+            all.values()
+                .flat_map(|slots| slots.values())
+                .find(|session| {
+                    session
+                        .page
+                        .lock()
+                        .as_ref()
+                        .is_some_and(|current| current.target_id() == page.target_id())
+                })
+                .cloned()
+                .ok_or_else(|| StepError::msg("frame browser session is no longer active"))?
+        };
+        let endpoint = session.browser.lock().await.websocket_address().clone();
+        let connection = chromiumoxide::Connection::connect(endpoint)
+            .await
+            .map_err(|e| StepError::msg(format!("frame connect: {e}")))?;
+        let mut cdp = Self {
+            connection,
+            contexts: HashMap::new(),
+            frames: Vec::new(),
+        };
+        let root_session = cdp.attach(page.target_id().as_ref()).await?;
+        let tree = cdp
+            .command(
+                Some(&root_session),
+                "Page.getFrameTree",
+                serde_json::json!({}),
+            )
+            .await?;
+        cdp.add_tree(&tree["frameTree"], None)?;
+        // Parent frames precede their children. Fetching each OOPIF's own tree
+        // also discovers descendants omitted from the top renderer's tree.
+        let mut index = 0;
+        while index < cdp.frames.len() {
+            if index >= 256 {
+                return Err(StepError::msg("frame tree exceeds 256 frames"));
+            }
+            let frame = cdp.frames[index].clone();
+            let parent_session = frame
+                .parent
+                .as_ref()
+                .and_then(|id| cdp.frames.iter().find(|f| &f.id == id))
+                .map(|f| f.session.clone())
+                .unwrap_or_else(|| root_session.clone());
+            let frame_session = if cdp
+                .contexts
+                .contains_key(&(parent_session.clone(), frame.id.clone()))
+            {
+                parent_session
+            } else {
+                let Ok(attached) = cdp.attach(&frame.id).await else {
+                    // A different iframe can be navigating or disappearing.
+                    // Keep its descriptor; selecting it reports loading below.
+                    index += 1;
+                    continue;
+                };
+                let subtree = cdp
+                    .command(Some(&attached), "Page.getFrameTree", serde_json::json!({}))
+                    .await?;
+                cdp.add_tree(&subtree["frameTree"], frame.parent.as_deref())?;
+                attached
+            };
+            cdp.frames[index].session = frame_session;
+            let routed = cdp.frames[index].clone();
+            if cdp
+                .contexts
+                .contains_key(&(routed.session.clone(), routed.id.clone()))
+            {
+                let identity = cdp
+                    .evaluate(&routed, "[window.name, location.href]".into(), true)
+                    .await?;
+                cdp.frames[index].name = identity["value"][0].as_str().unwrap_or_default().into();
+                cdp.frames[index].url = identity["value"][1].as_str().unwrap_or_default().into();
+                cdp.discover_children(&routed).await?;
+            }
+            index += 1;
+        }
+        Ok(cdp)
+    }
+
+    fn select(&self, sel: &FrameSel) -> Result<RoutedFrame, StepError> {
+        let selected = if let Some(index) = sel.index {
+            self.frames.get(index)
+        } else {
+            self.frames.iter().find(|frame| {
+                if let Some(url) = &sel.url_includes {
+                    frame.url.contains(url)
+                } else if let Some(name) = &sel.name {
+                    &frame.name == name
+                } else {
+                    false
+                }
+            })
+        };
+        let selected = selected
+            .cloned()
+            .ok_or_else(|| StepError::msg("no iframe matched `frame`"))?;
+        if !self
+            .contexts
+            .contains_key(&(selected.session.clone(), selected.id.clone()))
+        {
+            return Err(StepError::msg(
+                "matched iframe has no execution context yet (still loading?)",
+            ));
+        }
+        Ok(selected)
+    }
+
+    async fn evaluate(
+        &mut self,
+        frame: &RoutedFrame,
+        expression: String,
+        by_value: bool,
+    ) -> Result<Value, StepError> {
+        let context = self
+            .contexts
+            .get(&(frame.session.clone(), frame.id.clone()))
+            .ok_or_else(|| StepError::msg("iframe execution context changed during operation"))?;
+        let result = self.command(Some(&frame.session), "Runtime.evaluate", serde_json::json!({
+            "expression": expression, "contextId": context, "returnByValue": by_value, "awaitPromise": true
+        })).await?;
+        if let Some(exception) = result.get("exceptionDetails") {
+            return Err(StepError::msg(format!(
+                "frame script threw: {}",
+                exception["text"].as_str().unwrap_or("JavaScript exception")
+            )));
+        }
+        Ok(result["result"].clone())
+    }
+}
+
+/// Evaluate in the frame's normal world, including OOPIFs. Page-defined window
+/// state remains visible; an isolated world would hide application properties.
 async fn eval_in_frame(
     page: &Page,
     expr: String,
     sel: &FrameSel,
     timeout_ms: u64,
 ) -> Result<Value, StepError> {
-    let ctx_id = resolve_frame_context(page, sel).await?;
-    let params = EvaluateParams::builder()
-        .expression(expr)
-        .context_id(ctx_id)
-        .return_by_value(true)
-        .await_promise(true)
-        .build()
-        .map_err(|e| StepError::msg(format!("frame eval params: {e}")))?;
-    let resp = tokio::time::timeout(Duration::from_millis(timeout_ms), page.execute(params))
-        .await
-        .map_err(|_| StepError::msg("timed out"))?
-        .map_err(|e| StepError::msg(format!("{e}")))?;
-    let returns = resp.result;
-    if let Some(exc) = returns.exception_details {
-        return Err(StepError::msg(format!("threw: {}", exc.text)));
-    }
-    Ok(returns.result.value.unwrap_or(Value::Null))
+    crate::contracts::with_timeout(timeout_ms, async {
+        let mut cdp = FrameCdp::connect(page).await?;
+        let frame = cdp.select(sel)?;
+        let result = cdp.evaluate(&frame, expr, true).await?;
+        Ok(result.get("value").cloned().unwrap_or(Value::Null))
+    })
+    .await
 }
 
-// ─── in-frame click/type(指令集 P1)─────────────────────────────────────────
-// 「帧内定位 + 顶层真实输入」两段式,保 isTrusted=true:
-//
-//   1. eval_in_frame 在目标帧里按主帧同款策略序(id → data_testid → css →
-//      aria_label → text_includes → xpath)查元素,scrollIntoView 后取
-//      getBoundingClientRect 中心(帧内 viewport 坐标);
-//   2. 同一段 JS 沿 window.frameElement 逐层上溯,收集每级 <iframe> 元素的
-//      内容盒原点(border-box left/top + clientLeft/Top(边框)+ padding)在
-//      其父文档 viewport 里的偏移 —— 只有同域链路才允许读 frameElement /
-//      父窗 getComputedStyle,跨域读不到 ⇒ 显式报错并指向 workaround
-//      (browser.frame op:eval / browser.eval + frame: 的帧内 JS 合成事件);
-//   3. Rust 侧纯函数 apply_frame_offsets 把帧内中心累加成顶层 viewport 坐标,
-//      再走 CDP Input 真实派发(click:page.click = move+press+release;
-//      type:坐标点击聚焦后 dispatch_type_str 逐字符键盘事件)。
-//
-// 为什么不在帧里 el.click()/合成 KeyboardEvent:合成事件 isTrusted=false,
-// 会被登录/支付页常见的防自动化脚本与部分框架(如信任检查的支付 SDK)忽略。
+// ─── in-frame click/type ─────────────────────────────────────────────────
+// Locate through CDP in the target renderer; map renderer-local content quads
+// through each OOPIF owner; deliver native Input events to the top-level tab.
+// No synthetic DOM input and no same-origin policy relaxation are required.
 
 /// In-frame finder shared by the frame click/type paths — the same strategy
 /// order and lookup shapes as the main-frame resolver (`RESOLVE_JS_TEMPLATE`)
@@ -1615,46 +1895,44 @@ fn frame_spec_json(spec: &MultiSelector) -> String {
     .to_string()
 }
 
-/// JS evaluated in the target frame: find the element, scroll it into view,
-/// return its rect center (frame-viewport CSS px) plus the per-ancestor iframe
-/// offsets up to the top document. Cross-origin ancestors are unreadable —
-/// reported as `cross_origin: true` instead of guessed-at coordinates.
-fn frame_point_js(spec: &MultiSelector) -> String {
+/// Remote element handle for CDP DOM geometry, scoped to the matching frame's
+/// normal execution context. Scrolling the element also handles same-process
+/// ancestor frames; renderer boundaries are scrolled explicitly below.
+fn frame_target_js(spec: &MultiSelector) -> String {
     format!(
         r#"((spec) => {{
 {FRAME_FIND_FN}
   const hit = find(spec);
-  if (!hit) return {{ found: false }};
-  const [el, strategy] = hit;
-  el.scrollIntoView({{ block: 'center', inline: 'center' }});
-  const r = el.getBoundingClientRect();
-  if (!(r.width > 0 && r.height > 0)) return {{ found: true, not_visible: true, strategy }};
-  const offsets = [];
-  let win = window;
-  try {{
-    while (win !== win.parent) {{
-      const fe = win.frameElement; // null / throws when the parent is cross-origin
-      if (!fe) return {{ found: true, cross_origin: true, strategy }};
-      const fr = fe.getBoundingClientRect();
-      const st = win.parent.getComputedStyle(fe);
-      offsets.push({{
-        dx: fr.left + fe.clientLeft + (parseFloat(st.paddingLeft) || 0),
-        dy: fr.top + fe.clientTop + (parseFloat(st.paddingTop) || 0),
-      }});
-      win = win.parent;
-    }}
-  }} catch (_) {{
-    return {{ found: true, cross_origin: true, strategy }};
-  }}
-  return {{ found: true, strategy, x: r.left + r.width / 2, y: r.top + r.height / 2, offsets }};
+  if (!hit) return null;
+  hit[0].scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+  return hit[0];
 }})({spec_json})"#,
-        spec_json = frame_spec_json(spec),
+        spec_json = frame_spec_json(spec)
     )
 }
 
-/// JS evaluated in the target frame for `browser.type`'s `clear: true`: empty
-/// the matched element's value (same semantics as the main-frame clear — set
-/// `.value = ''`, no synthetic keyboard events).
+fn frame_strategy_js(spec: &MultiSelector) -> String {
+    format!(
+        r#"((spec) => {{
+{FRAME_FIND_FN}
+  const hit = find(spec);
+  return hit ? hit[1] : null;
+}})({spec_json})"#,
+        spec_json = frame_spec_json(spec)
+    )
+}
+
+fn frame_focus_js(spec: &MultiSelector) -> String {
+    format!(
+        r#"((spec) => {{
+{FRAME_FIND_FN}
+  const hit = find(spec);
+  return !!hit && (hit[0] === document.activeElement || hit[0].contains(document.activeElement));
+}})({spec_json})"#,
+        spec_json = frame_spec_json(spec)
+    )
+}
+
 fn frame_clear_js(spec: &MultiSelector) -> String {
     format!(
         r#"((spec) => {{
@@ -1664,75 +1942,200 @@ fn frame_clear_js(spec: &MultiSelector) -> String {
   hit[0].value = '';
   return true;
 }})({spec_json})"#,
-        spec_json = frame_spec_json(spec),
+        spec_json = frame_spec_json(spec)
     )
 }
 
-/// One ancestor-iframe offset level: the `<iframe>` element's content-box
-/// origin in its parent document's viewport (CSS px).
-#[derive(Debug, Deserialize, PartialEq, Clone, Copy)]
-struct FrameOffset {
-    dx: f64,
-    dy: f64,
-}
-
-/// 帧内坐标 → 顶层 viewport 坐标:逐级累加祖先 iframe 偏移(纯函数,单测覆盖)。
-fn apply_frame_offsets(point: (f64, f64), offsets: &[FrameOffset]) -> (f64, f64) {
-    offsets.iter().fold(point, |(x, y), o| (x + o.dx, y + o.dy))
-}
-
-/// What `frame_point_js` reports back from the frame.
-#[derive(Debug, Deserialize)]
-struct FramePointOutcome {
-    found: bool,
-    #[serde(default)]
-    cross_origin: bool,
-    #[serde(default)]
-    not_visible: bool,
-    #[serde(default)]
-    strategy: Option<String>,
-    #[serde(default)]
-    x: Option<f64>,
-    #[serde(default)]
-    y: Option<f64>,
-    #[serde(default)]
-    offsets: Vec<FrameOffset>,
-}
-
-/// Turn the frame-locate payload into `(top-level x, top-level y, strategy)`.
-/// A miss maps to [`StepError::SelectorNotFound`] — the same error kind as the
-/// main-frame resolver, so `retry.on: [selector_not_found]` works unchanged.
-fn parse_frame_point(action: &str, hint: &str, v: Value) -> Result<(f64, f64, String), StepError> {
-    let out: FramePointOutcome = serde_json::from_value(v)
-        .map_err(|e| StepError::msg(format!("{action}: frame locate decode: {e}")))?;
-    if !out.found {
-        return Err(StepError::SelectorNotFound(hint.to_string()));
+fn quad_points(value: &Value) -> Result<[f64; 8], StepError> {
+    let values = value
+        .as_array()
+        .filter(|values| values.len() == 8)
+        .ok_or_else(|| StepError::msg("frame geometry has no valid content quad"))?;
+    let mut quad = [0.0; 8];
+    for (target, value) in quad.iter_mut().zip(values) {
+        *target = value
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| StepError::msg("frame geometry contains a non-finite coordinate"))?;
     }
-    if out.cross_origin {
-        return Err(StepError::msg(format!(
-            "{action}: the target iframe chain is cross-origin, so its position cannot be read \
-             from the parent document; drive it with in-frame JS instead (`browser.frame` with \
-             `op: eval`, or `browser.eval` with `frame:`) — note those dispatch synthetic \
-             (isTrusted=false) events"
-        )));
+    let area = (0..4)
+        .map(|i| {
+            let j = (i + 1) % 4;
+            quad[i * 2] * quad[j * 2 + 1] - quad[j * 2] * quad[i * 2 + 1]
+        })
+        .sum::<f64>()
+        .abs()
+        / 2.0;
+    if area < 0.01 {
+        return Err(StepError::msg("frame element has no visible box"));
     }
-    if out.not_visible {
-        return Err(StepError::msg(format!(
-            "{action} `{hint}`: matched element in frame has no visible box"
-        )));
-    }
-    let (Some(x), Some(y)) = (out.x, out.y) else {
-        return Err(StepError::msg(format!(
-            "{action}: frame locate returned no coordinates"
-        )));
-    };
-    let (tx, ty) = apply_frame_offsets((x, y), &out.offsets);
-    Ok((tx, ty, out.strategy.unwrap_or_else(|| "unknown".into())))
+    Ok(quad)
 }
 
-/// Locate `spec` inside the iframe `sel` and return the element center in
-/// **top-level viewport CSS px** plus the strategy name that matched. The
-/// first half of the "locate in-frame, input at top level" click/type path.
+/// Map a renderer-viewport point through its iframe owner's content quad.
+/// Affine transforms (translation, scale, rotation and skew) are exact.
+/// Reject perspective quads instead of risking input at an unrelated position.
+fn map_frame_point(
+    point: (f64, f64),
+    viewport: (f64, f64),
+    quad: &[f64; 8],
+) -> Result<(f64, f64), StepError> {
+    if !viewport.0.is_finite() || !viewport.1.is_finite() || viewport.0 <= 0.0 || viewport.1 <= 0.0
+    {
+        return Err(StepError::msg("frame viewport has no positive dimensions"));
+    }
+    if !point.0.is_finite()
+        || !point.1.is_finite()
+        || point.0 < 0.0
+        || point.1 < 0.0
+        || point.0 >= viewport.0
+        || point.1 >= viewport.1
+    {
+        return Err(StepError::msg(
+            "frame target is outside its visible viewport",
+        ));
+    }
+    if (quad[0] + quad[4] - quad[2] - quad[6]).abs() > 0.1
+        || (quad[1] + quad[5] - quad[3] - quad[7]).abs() > 0.1
+    {
+        return Err(StepError::msg(
+            "frame input does not support perspective-transformed iframe owners",
+        ));
+    }
+    let u = point.0 / viewport.0;
+    let v = point.1 / viewport.1;
+    Ok((
+        quad[0] + u * (quad[2] - quad[0]) + v * (quad[6] - quad[0]),
+        quad[1] + u * (quad[3] - quad[1]) + v * (quad[7] - quad[1]),
+    ))
+}
+
+impl FrameCdp {
+    fn ancestors(&self, frame: &RoutedFrame) -> Result<Vec<RoutedFrame>, StepError> {
+        let mut path = vec![frame.clone()];
+        while let Some(parent) = path.last().and_then(|frame| frame.parent.as_ref()) {
+            if path.len() > 64 {
+                return Err(StepError::msg("iframe nesting exceeds 64 levels"));
+            }
+            let frame = self
+                .frames
+                .iter()
+                .find(|frame| &frame.id == parent)
+                .cloned()
+                .ok_or_else(|| StepError::msg("iframe parent disappeared"))?;
+            path.push(frame);
+        }
+        path.reverse();
+        Ok(path)
+    }
+
+    async fn viewport(&mut self, frame: &RoutedFrame) -> Result<(f64, f64), StepError> {
+        let value = self
+            .evaluate(
+                frame,
+                "[window.innerWidth, window.innerHeight]".into(),
+                true,
+            )
+            .await?;
+        Ok((
+            value["value"][0].as_f64().unwrap_or(0.0),
+            value["value"][1].as_f64().unwrap_or(0.0),
+        ))
+    }
+
+    async fn owner(
+        &mut self,
+        parent: &RoutedFrame,
+        child: &RoutedFrame,
+    ) -> Result<Value, StepError> {
+        let owner = self
+            .command(
+                Some(&parent.session),
+                "DOM.getFrameOwner",
+                serde_json::json!({"frameId": child.id}),
+            )
+            .await?;
+        owner
+            .get("backendNodeId")
+            .cloned()
+            .ok_or_else(|| StepError::msg("iframe owner has no DOM node"))
+    }
+
+    async fn element_point(
+        &mut self,
+        frame: &RoutedFrame,
+        spec: &MultiSelector,
+    ) -> Result<(f64, f64, String), StepError> {
+        let path = self.ancestors(frame)?;
+        for pair in path.windows(2) {
+            let owner = self.owner(&pair[0], &pair[1]).await?;
+            self.command(
+                Some(&pair[0].session),
+                "DOM.scrollIntoViewIfNeeded",
+                serde_json::json!({"backendNodeId": owner}),
+            )
+            .await?;
+        }
+        let element = self.evaluate(frame, frame_target_js(spec), false).await?;
+        // DOM scrolling updates layout before the compositor's OOPIF hit-test
+        // regions. Wait for painted frames before sending irreversible input;
+        // otherwise a correct point can hit the previous scroll position.
+        for ancestor in path.iter().rev() {
+            self.evaluate(ancestor, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))".into(), true).await?;
+        }
+        let object = element["objectId"]
+            .as_str()
+            .ok_or_else(|| StepError::SelectorNotFound(spec.first_hint()))?;
+        let geometry = self
+            .command(
+                Some(&frame.session),
+                "DOM.getContentQuads",
+                serde_json::json!({"objectId": object}),
+            )
+            .await?;
+        let quad = quad_points(&geometry["quads"][0])?;
+        let mut point = (
+            (quad[0] + quad[2] + quad[4] + quad[6]) / 4.0,
+            (quad[1] + quad[3] + quad[5] + quad[7]) / 4.0,
+        );
+        let strategy = self
+            .evaluate(frame, frame_strategy_js(spec), true)
+            .await?
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        // Content quads already include all same-process ancestors. Only an
+        // OOPIF renderer boundary needs an additional coordinate transform.
+        for pair in path.windows(2).rev() {
+            let (parent, child) = (&pair[0], &pair[1]);
+            if parent.session != child.session {
+                let owner = self.owner(parent, child).await?;
+                let model = self
+                    .command(
+                        Some(&parent.session),
+                        "DOM.getBoxModel",
+                        serde_json::json!({"backendNodeId": owner}),
+                    )
+                    .await?;
+                let quad = quad_points(&model["model"]["content"])?;
+                let viewport = self.viewport(child).await?;
+                point = map_frame_point(point, viewport, &quad)?;
+            }
+        }
+        let viewport = self.viewport(&path[0]).await?;
+        // Reuse the viewport validation before the irreversible input dispatch.
+        map_frame_point(
+            point,
+            viewport,
+            &[
+                0.0, 0.0, viewport.0, 0.0, viewport.0, viewport.1, 0.0, viewport.1,
+            ],
+        )?;
+        Ok((point.0, point.1, strategy))
+    }
+}
+
 async fn frame_element_point(
     page: &Page,
     action: &str,
@@ -1740,55 +2143,58 @@ async fn frame_element_point(
     sel: &FrameSel,
     timeout_ms: u64,
 ) -> Result<(f64, f64, String), StepError> {
-    let v = eval_in_frame(page, frame_point_js(spec), sel, timeout_ms)
-        .await
-        .map_err(|e| StepError::msg(format!("{action}: {e}")))?;
-    parse_frame_point(action, &spec.first_hint(), v)
+    crate::contracts::with_timeout(timeout_ms, async {
+        let mut cdp = FrameCdp::connect(page).await?;
+        let frame = cdp.select(sel)?;
+        cdp.element_point(&frame, spec).await.map_err(|e| match e {
+            StepError::SelectorNotFound(_) => e,
+            _ => StepError::msg(format!("{action}: {e}")),
+        })
+    })
+    .await
 }
 
-/// Tab-level typing via CDP `Input.dispatchKeyEvent` (keyDown+keyUp per char),
-/// delivered to whatever element currently holds focus. This is byte-for-byte
-/// the logic behind chromiumoxide 0.7's `element.type_str` (the main-frame
-/// `browser.type` path) — replicated here with its public
-/// `keys::get_key_definition` because an in-frame node can't yield an
-/// `Element` handle to call `type_str` on.
-async fn dispatch_type_str(page: &Page, input: &str) -> Result<(), StepError> {
+/// Trusted keyboard/IME input is dispatched to the selected renderer session.
+/// Keep that session alive from locating/focusing through the last key-up.
+async fn dispatch_frame_text(
+    cdp: &mut FrameCdp,
+    frame: &RoutedFrame,
+    input: &str,
+) -> Result<(), StepError> {
     use chromiumoxide::keys::get_key_definition;
-    for c in input.split("").filter(|s| !s.is_empty()) {
-        let def = get_key_definition(c)
-            .ok_or_else(|| StepError::msg(format!("type: Key not found: {c}")))?;
-        let mut cmd = DispatchKeyEventParams::builder();
-        // Same text/type decision as upstream press_key: printable keys carry
-        // `text` and a full KeyDown; non-printables send RawKeyDown.
-        let down_type = if let Some(txt) = def.text {
-            cmd = cmd.text(txt);
-            DispatchKeyEventType::KeyDown
-        } else if def.key.len() == 1 {
-            cmd = cmd.text(def.key);
-            DispatchKeyEventType::KeyDown
-        } else {
-            DispatchKeyEventType::RawKeyDown
+    for character in input.chars() {
+        let text = character.to_string();
+        let Some(definition) = get_key_definition(&text) else {
+            cdp.command(
+                Some(&frame.session),
+                "Input.insertText",
+                serde_json::json!({"text": text}),
+            )
+            .await?;
+            continue;
         };
-        let cmd = cmd
-            .key(def.key)
-            .code(def.code)
-            .windows_virtual_key_code(def.key_code)
-            .native_virtual_key_code(def.key_code);
-        let down = cmd
-            .clone()
-            .r#type(down_type)
-            .build()
-            .map_err(|e| StepError::msg(format!("type key params: {e}")))?;
-        page.execute(down)
-            .await
-            .map_err(|e| StepError::msg(format!("type: {e}")))?;
-        let up = cmd
-            .r#type(DispatchKeyEventType::KeyUp)
-            .build()
-            .map_err(|e| StepError::msg(format!("type key params: {e}")))?;
-        page.execute(up)
-            .await
-            .map_err(|e| StepError::msg(format!("type: {e}")))?;
+        let mut params = serde_json::json!({
+            "key": definition.key, "code": definition.code,
+            "windowsVirtualKeyCode": definition.key_code, "nativeVirtualKeyCode": definition.key_code
+        });
+        if let Some(text) = definition.text {
+            params["text"] = text.into();
+            params["type"] = "keyDown".into();
+        } else if definition.key.len() == 1 {
+            params["text"] = definition.key.into();
+            params["type"] = "keyDown".into();
+        } else {
+            params["type"] = "rawKeyDown".into();
+        }
+        cdp.command(
+            Some(&frame.session),
+            "Input.dispatchKeyEvent",
+            params.clone(),
+        )
+        .await?;
+        params["type"] = "keyUp".into();
+        cdp.command(Some(&frame.session), "Input.dispatchKeyEvent", params)
+            .await?;
     }
     Ok(())
 }
@@ -3934,122 +4340,57 @@ mod tests {
         assert!(err.to_string().contains("invalid regex"), "got: {err}");
     }
 
-    // ─── 指令集 P1:click/type 进 iframe 的纯逻辑单测(无浏览器)────────────────
-
     #[test]
-    fn apply_frame_offsets_accumulates_each_ancestor_level() {
-        // 无嵌套(目标帧直接挂在顶层):坐标原样返回。
-        assert_eq!(apply_frame_offsets((10.5, 20.0), &[]), (10.5, 20.0));
-        // 两级嵌套:帧内中心 + 每级 iframe 的内容盒偏移逐级相加。
-        let offsets = [
-            FrameOffset {
-                dx: 100.0,
-                dy: 50.0,
-            }, // 目标帧的 <iframe> 在父文档里
-            FrameOffset { dx: 8.0, dy: 12.5 }, // 父帧的 <iframe> 在顶层文档里
-        ];
-        assert_eq!(apply_frame_offsets((30.0, 40.0), &offsets), (138.0, 102.5));
-        // 负偏移(iframe 被滚出视口上方/左侧)同样成立。
-        let neg = [FrameOffset {
-            dx: -25.0,
-            dy: -5.0,
-        }];
-        assert_eq!(apply_frame_offsets((30.0, 40.0), &neg), (5.0, 35.0));
-    }
-
-    #[test]
-    fn parse_frame_point_maps_miss_to_selector_not_found() {
-        // 帧内未命中 → 与主帧 resolve_element 同款 SelectorNotFound,
-        // retry.on: [selector_not_found] 开箱可用。
-        let err = parse_frame_point(
-            "browser.click",
-            "css=#go",
-            serde_json::json!({ "found": false }),
+    fn frame_quad_maps_scaled_and_rotated_renderer_coordinates() {
+        let scaled = [100.0, 50.0, 300.0, 50.0, 300.0, 150.0, 100.0, 150.0];
+        assert_eq!(
+            map_frame_point((100.0, 50.0), (400.0, 200.0), &scaled).unwrap(),
+            (150.0, 75.0)
+        );
+        let rotated = [300.0, 100.0, 300.0, 300.0, 200.0, 300.0, 200.0, 100.0];
+        assert_eq!(
+            map_frame_point((100.0, 50.0), (400.0, 200.0), &rotated).unwrap(),
+            (275.0, 150.0)
+        );
+        // Two renderer boundaries compose from the innermost to outermost.
+        let inner = map_frame_point(
+            (20.0, 30.0),
+            (100.0, 100.0),
+            &[10.0, 20.0, 110.0, 20.0, 110.0, 120.0, 10.0, 120.0],
         )
-        .expect_err("a miss must error");
-        assert!(
-            matches!(err, StepError::SelectorNotFound(ref h) if h == "css=#go"),
-            "got: {err:?}"
+        .unwrap();
+        assert_eq!(
+            map_frame_point(inner, (400.0, 200.0), &scaled).unwrap(),
+            (115.0, 75.0)
         );
     }
 
     #[test]
-    fn parse_frame_point_reports_cross_origin_with_workaround() {
-        let err = parse_frame_point(
-            "browser.click",
-            "css=#pay",
-            serde_json::json!({ "found": true, "cross_origin": true, "strategy": "css" }),
-        )
-        .expect_err("cross-origin must error");
-        let msg = err.to_string();
-        assert!(msg.contains("cross-origin"), "got: {msg}");
-        assert!(
-            msg.contains("browser.frame"),
-            "must name the workaround, got: {msg}"
-        );
-        // 不是 SelectorNotFound:元素在,是位置读不到 —— 重试也无济于事。
-        assert!(!matches!(err, StepError::SelectorNotFound(_)));
+    fn frame_geometry_rejects_unsafe_input_coordinates() {
+        let quad = [0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 0.0, 100.0];
+        for point in [(f64::NAN, 0.0), (-1.0, 1.0), (100.0, 1.0), (1.0, 101.0)] {
+            assert!(map_frame_point(point, (100.0, 100.0), &quad).is_err());
+        }
+        assert!(map_frame_point((1.0, 1.0), (0.0, 100.0), &quad).is_err());
+        let perspective = [0.0, 0.0, 100.0, 0.0, 80.0, 100.0, 20.0, 100.0];
+        assert!(map_frame_point((1.0, 1.0), (100.0, 100.0), &perspective)
+            .unwrap_err()
+            .to_string()
+            .contains("perspective"));
+        assert!(quad_points(&serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0])).is_err());
+        assert!(quad_points(&serde_json::json!([0, 0, 1])).is_err());
+        assert!(quad_points(&serde_json::json!([null, 0, 1, 0, 1, 1, 0, 1])).is_err());
     }
 
     #[test]
-    fn parse_frame_point_sums_offsets_into_top_level_coordinates() {
-        let (x, y, strategy) = parse_frame_point(
-            "browser.type",
-            "css=#user",
-            serde_json::json!({
-                "found": true,
-                "strategy": "css",
-                "x": 30.0, "y": 40.0,
-                "offsets": [ { "dx": 100.0, "dy": 50.0 }, { "dx": 8.0, "dy": 12.5 } ],
-            }),
-        )
-        .expect("full payload parses");
-        assert_eq!((x, y), (138.0, 102.5));
-        assert_eq!(strategy, "css");
-        // offsets 缺省(旧式/主帧即目标帧)⇒ 帧内坐标即顶层坐标。
-        let (x, y, _) = parse_frame_point(
-            "browser.type",
-            "css=#user",
-            serde_json::json!({ "found": true, "strategy": "id", "x": 3.0, "y": 4.0 }),
-        )
-        .expect("no-offsets payload parses");
-        assert_eq!((x, y), (3.0, 4.0));
-    }
-
-    #[test]
-    fn parse_frame_point_rejects_invisible_and_coordinate_less_payloads() {
-        let err = parse_frame_point(
-            "browser.click",
-            "css=#go",
-            serde_json::json!({ "found": true, "not_visible": true, "strategy": "css" }),
-        )
-        .expect_err("a zero-size box must error");
-        assert!(err.to_string().contains("no visible box"), "got: {err}");
-        let err = parse_frame_point(
-            "browser.click",
-            "css=#go",
-            serde_json::json!({ "found": true, "strategy": "css" }),
-        )
-        .expect_err("missing coordinates must error");
-        assert!(err.to_string().contains("no coordinates"), "got: {err}");
-    }
-
-    #[test]
-    fn frame_point_js_embeds_the_spec_and_the_offset_climb() {
-        let spec = MultiSelector {
-            css: Some("#login .submit".into()),
-            ..MultiSelector::default()
-        };
-        let js = frame_point_js(&spec);
-        // spec 以 JSON 注入(与 wait/resolve 模板同款形状)。
-        assert!(js.contains(r##""css":"#login .submit""##), "got: {js}");
-        // 关键机制在脚本里:同域上溯 frameElement、跨域显式标记、rect 中心。
-        assert!(js.contains("frameElement"));
-        assert!(js.contains("cross_origin"));
-        assert!(js.contains("getBoundingClientRect"));
-        // clear 脚本复用同一查找器,只置 value。
-        let clear = frame_clear_js(&spec);
-        assert!(clear.contains(".value = ''"), "got: {clear}");
-        assert!(clear.contains(r##""css":"#login .submit""##));
+    fn frame_events_keep_renderer_session_identity() {
+        use chromiumoxide::types::EventMessage;
+        let event: FrameCdpEvent = serde_json::from_value(serde_json::json!({
+            "method": "Runtime.executionContextCreated", "sessionId": "child-renderer",
+            "params": {"context": {"id": 7, "auxData": {"frameId": "child", "isDefault": true}}}
+        }))
+        .unwrap();
+        assert_eq!(event.session_id(), Some("child-renderer"));
+        assert_eq!(event.params["context"]["auxData"]["frameId"], "child");
     }
 }

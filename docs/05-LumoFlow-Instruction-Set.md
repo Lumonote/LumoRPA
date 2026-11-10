@@ -557,26 +557,24 @@ same addressing as a standalone eval/extract action. Omitting `frame:` keeps
 the action on the main frame, exactly as before.
 
 For `browser.click` / `browser.type` the element is located **inside the
-frame** (same strategy order as the main-frame resolver: id, data_testid, css,
-aria_label, text_includes, xpath — the winner is reported in `resolved_by`,
-plus `frame: true`), its rect center is translated to top-level viewport
-coordinates by accumulating each ancestor `<iframe>`'s offset, and the click /
-keystrokes are then dispatched as **real top-level CDP input** — the page sees
-genuine trusted events (`isTrusted: true`), not synthetic in-frame JS events.
-`browser.type` focuses the element with a real click first; `clear: true`
-empties the field in-frame before typing. A selector that matches nothing
-inside the frame fails with `selector_not_found`, so
-`retry.on: [selector_not_found]` works unchanged.
+frame** using the normal selector strategies. The result reports `frame: true`
+and the winning `resolved_by`. CDP discovers frame owners and attaches to the
+appropriate renderer, including cross-origin and nested out-of-process frames.
+Coordinates account for frame borders, scrolling and affine CSS transforms.
+Perspective transforms or a frame that disappears during resolution fail
+explicitly instead of producing an uncertain click.
 
-Cross-origin limitation: translating in-frame coordinates walks
-`window.frameElement`, which browsers only permit across **same-origin**
-frame chains. A cross-origin iframe (e.g. a third-party payment widget) fails
-with an explicit error; drive those with in-frame JS via `browser.frame`
-(`op: eval`) or `browser.eval` + `frame:` instead — noting that such JS
-dispatches synthetic (`isTrusted: false`) events, and that fully site-isolated
-(out-of-process) frames may be unreachable even for the JS bridge. The vision
-fallback (`prompt:`) applies only to main-frame resolution and is skipped when
-`frame:` is set.
+Clicks use native CDP mouse input; keyboard and Unicode IME input are routed to
+the target renderer after checking actual focus. Pages receive trusted events
+(`isTrusted: true`). `browser.type` clicks to focus before entering text;
+`clear: true` clears the field before typing. Missing selectors still report
+`selector_not_found`, so `retry.on: [selector_not_found]` works unchanged.
+Renderer sessions are scoped to the operation and detached afterward.
+
+The vision fallback (`prompt:`) applies only to main-frame resolution and is
+skipped when `frame:` is set. Standalone frame evaluation remains available,
+but JavaScript-created events retain the browser's normal untrusted status.
+See [desktop acceptance](testing/desktop-e2e.md) for real Chrome coverage.
 
 ### XML conventions (`xml.parse` / `xml.build` / `xml.xpath`)
 

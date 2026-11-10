@@ -45,6 +45,12 @@ impl Backend for WindowsBackend {
             .map_err(|e| anyhow::anyhow!("desktop poll join: {e}"))??;
         Ok(snap)
     }
+    fn start_input(
+        &self,
+        emitter: crate::desktop::input::InputEmitter,
+    ) -> anyhow::Result<Option<crate::desktop::input::CaptureGuard>> {
+        super::windows_input::start(emitter).map(Some)
+    }
 }
 
 fn read_foreground() -> anyhow::Result<FocusSnapshot> {

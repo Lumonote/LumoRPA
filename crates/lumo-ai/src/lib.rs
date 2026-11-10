@@ -10,6 +10,7 @@ pub mod helpers;
 pub mod ocr_models;
 pub mod provider;
 pub mod router;
+pub mod screen_agent;
 
 pub use action::ChatAction;
 pub use budget::RunBudget;
@@ -29,3 +30,4 @@ pub use provider::{
     ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, ProviderError, ProviderId, Role,
 };
 pub use router::{AiRouter, AiRouterBuilder};
+pub use screen_agent::ScreenAgentAction;

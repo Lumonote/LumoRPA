@@ -109,6 +109,13 @@ impl InvocationAdapter for McpAdapter {
         .map_err(|_| InvocationError::Timeout {
             duration_ms: request.timeout_ms,
         })??;
-        Ok(InvocationResult::new(output, started))
+        let mut result = InvocationResult::new(output, started);
+        // MCP's standard tool result does not report billed model usage.
+        // Keep that fact explicit; schemas can opt into budget-sensitive
+        // handling with x-lumo-billable instead of blocking every local tool.
+        result
+            .metadata
+            .insert("usageState".into(), "unknown".into());
+        Ok(result)
     }
 }

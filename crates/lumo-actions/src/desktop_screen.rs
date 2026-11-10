@@ -44,6 +44,7 @@ use std::path::PathBuf;
 use xcap::{Monitor, Window};
 
 pub fn register(r: &mut ActionRegistry) {
+    r.register(ObserveAction);
     r.register(ScreenshotAction);
     r.register(WindowListAction);
     r.register(WindowActivateAction);
@@ -51,6 +52,59 @@ pub fn register(r: &mut ActionRegistry) {
     r.register(WindowCloseAction);
     r.register(WindowMinimizeAction);
     r.register(WindowMaximizeAction);
+}
+
+/// In-memory screenshot used by the bounded visual Agent. No screenshot is
+/// written into variables or the execution ledger by this primitive itself.
+pub struct ObserveAction;
+
+#[async_trait]
+impl Action for ObserveAction {
+    fn id(&self) -> &'static str {
+        "desktop.observe"
+    }
+    fn summary(&self) -> &'static str {
+        "Observe one display in memory with screen-coordinate geometry"
+    }
+    fn schema(&self) -> &'static Value {
+        static SCHEMA: Lazy<Value> = Lazy::new(
+            || json!({"type":"object","properties":{"display":{"type":"integer","minimum":0}},"additionalProperties":false}),
+        );
+        &SCHEMA
+    }
+    async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            #[serde(default)]
+            display: usize,
+        }
+        let cfg: Input = serde_json::from_value(input)
+            .map_err(|e| StepError::msg(format!("desktop.observe: {e}")))?;
+        ctx.ensure_desktop("screen")?;
+        let interrupt = ctx.step_interrupt();
+        let output = tokio::task::spawn_blocking(move || {
+            if interrupt.is_interrupted() { return Err(StepError::msg("screen observation cancelled")); }
+            let monitor = select_monitor("desktop.observe", cfg.display)?;
+            let image = monitor.capture_image().map_err(|e| StepError::msg(e.to_string()))?;
+            let (original_width, original_height) = (image.width(), image.height());
+            // Bound multimodal request size while retaining the exact mapping
+            // from resized screenshot pixels to logical OS input coordinates.
+            let image = image::DynamicImage::ImageRgba8(image).thumbnail(1600, 1200);
+            let mut png = Vec::new();
+            image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| StepError::msg(e.to_string()))?;
+            if png.len() > 4 * 1024 * 1024 { return Err(StepError::msg("screen observation exceeds 4 MiB")); }
+            if interrupt.is_interrupted() { return Err(StepError::msg("screen observation cancelled")); }
+            use base64::Engine;
+            Ok::<Value, StepError>(json!({"png":base64::engine::general_purpose::STANDARD.encode(png),
+                "width":image.width(),"height":image.height(),"original_width":original_width,"original_height":original_height,
+                "screen_x":monitor.x().map_err(|e| StepError::msg(e.to_string()))?,
+                "screen_y":monitor.y().map_err(|e| StepError::msg(e.to_string()))?,
+                "screen_width":monitor.width().map_err(|e| StepError::msg(e.to_string()))?,
+                "screen_height":monitor.height().map_err(|e| StepError::msg(e.to_string()))?}))
+        }).await.map_err(|e| StepError::msg(e.to_string()))??;
+        Ok(ActionResult::from(output))
+    }
 }
 
 // ---------------------------------------------------------------------------

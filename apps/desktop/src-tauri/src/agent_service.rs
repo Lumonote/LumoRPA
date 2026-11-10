@@ -39,6 +39,13 @@ pub struct AgentStartInput {
 
 #[async_trait]
 pub trait DesktopAgentFactory: Send + Sync {
+    async fn pin_sources(
+        &self,
+        _plan: &mut AgentPlan,
+        _catalog: &CapabilityCatalog,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     async fn catalog(&self, profile_id: Option<&str>) -> Result<CapabilityCatalog, String>;
     async fn profile(&self, profile_id: Option<&str>) -> Result<AgentProfile, String>;
     async fn adapters(&self, profile: &AgentProfile) -> Result<AdapterRegistry, String>;
@@ -459,6 +466,13 @@ impl DesktopAgentService {
             .unwrap_or_else(|| ulid::Ulid::new().to_string());
         plan.id.clone_from(&run_id);
         lumo_agent::validate_dag(&plan).map_err(|error| error.to_string())?;
+        // New plans freeze the full available dependency universe before
+        // approval/persistence; resumed plans retain their original snapshot.
+        if !plan.metadata.contains_key(lumo_agent::SOURCE_SNAPSHOTS_KEY)
+            && job.as_ref().is_none_or(|(job, _)| job.run_id.is_none())
+        {
+            self.factory.pin_sources(&mut plan, &catalog).await?;
+        }
         if let Some(versions) = plan.metadata.get("capabilityVersions") {
             let versions = versions
                 .as_object()
@@ -567,6 +581,7 @@ impl DesktopAgentService {
         let cancel = CancelToken::new();
         let control = interactive.then(AgentRunControl::default);
         let mut engine = LoopEngine::new(catalog, profile.clone(), adapters)
+            .with_usage_ledger(self.repo.clone())
             .with_event_publisher(self.events.clone());
         if let Some(control) = &control {
             engine = engine.with_run_control(control.clone());
@@ -881,6 +896,43 @@ fn desktop_vm_factory(
 
 #[async_trait]
 impl DesktopAgentFactory for ProductionDesktopAgentFactory {
+    async fn pin_sources(
+        &self,
+        plan: &mut AgentPlan,
+        catalog: &CapabilityCatalog,
+    ) -> Result<(), String> {
+        // Each flow gets its own local Skill precedence, matching its VM.
+        let mut snapshots = serde_json::Map::new();
+        for node in &plan.nodes {
+            if let Some(capability) = catalog.get(&node.capability_id) {
+                let path = match &capability.source {
+                    CapabilitySource::Flow { path } => Some(std::path::Path::new(path)),
+                    CapabilitySource::Skill { source, .. } => Some(std::path::Path::new(source)),
+                    CapabilitySource::Mcp { .. } => None,
+                };
+                if let Some(path) = path {
+                    let mut single = AgentPlan::new("snapshot", "snapshot", vec![node.clone()]);
+                    lumo_agent::pin_plan_sources(
+                        &mut single,
+                        catalog,
+                        &load_skill_registry(&self.home, Some(path)),
+                    )?;
+                    if let Some(values) = single
+                        .metadata
+                        .get(lumo_agent::SOURCE_SNAPSHOTS_KEY)
+                        .and_then(Value::as_object)
+                    {
+                        snapshots.extend(values.clone());
+                    }
+                }
+            }
+        }
+        if !snapshots.is_empty() {
+            plan.metadata
+                .insert(lumo_agent::SOURCE_SNAPSHOTS_KEY.into(), snapshots.into());
+        }
+        Ok(())
+    }
     async fn catalog(&self, _profile_id: Option<&str>) -> Result<CapabilityCatalog, String> {
         self.capability_catalog()
     }

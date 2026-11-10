@@ -171,6 +171,7 @@ pub(crate) fn build_registry_bundle(
 
     let mut registry = ActionRegistry::new();
     lumo_actions::register_all(&mut registry);
+    registry.register(lumo_ai::ScreenAgentAction::new(router.clone()));
     registry.register(ChatAction::new(router));
 
     // P2-3：load_dir 失败不再 `let _ =` 静默吞掉 —— tracing::warn 每次记录，

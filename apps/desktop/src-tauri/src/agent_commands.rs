@@ -76,6 +76,9 @@ pub(super) async fn agent_start(
 
 pub(super) fn setup_agent_service(app: &AppHandle) -> Result<(), String> {
     let repo = open_repo(app)?;
+    // Called once before this process has accepted any Agent sessions.
+    repo.recover_interrupted_invocations()
+        .map_err(|e| e.to_string())?;
     let factory = Arc::new(ProductionDesktopAgentFactory::new(
         app.clone(),
         repo.clone(),
@@ -397,6 +400,35 @@ pub(super) fn agent_events(
     };
     repo.list_agent_events(&run_id, after_seq.unwrap_or(0))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(super) fn agent_usage(
+    app: AppHandle,
+    run_id: String,
+) -> Result<Vec<lumo_storage::InvocationAttemptRow>, String> {
+    let repo = open_repo(&app)?;
+    repo.reconcile_invocation_usage(&run_id)
+        .map_err(|e| e.to_string())?;
+    repo.list_invocation_attempts(&run_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(super) fn agent_resolve_usage(
+    app: AppHandle,
+    resolution: lumo_storage::InvocationUsageResolution,
+) -> Result<(), String> {
+    let repo = open_repo(&app)?;
+    repo.reconcile_invocation_usage(&resolution.run_id)
+        .map_err(|e| e.to_string())?;
+    if !repo
+        .resolve_invocation_usage(&resolution)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("用量已更新、仍在执行，或填写的总量小于已记录用量，请刷新后重试".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]

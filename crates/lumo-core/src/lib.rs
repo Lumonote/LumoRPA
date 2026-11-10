@@ -10,7 +10,9 @@ pub mod error;
 pub mod human;
 pub mod registry;
 pub mod resource;
+pub mod run_usage;
 pub mod schema;
+pub mod source_snapshot;
 pub mod validate;
 pub mod vm;
 
@@ -24,5 +26,7 @@ pub use error::{CapKind, ErrorKind, ExecError, StepError};
 pub use human::{HumanPromptKind, HumanPromptRequest, HumanPrompter, HumanResponse};
 pub use registry::{ActionRegistry, RunTeardown};
 pub use resource::ResourceFactory;
+pub use run_usage::{RunUsageEvent, RunUsageObserver, UsageCallGuard};
+pub use source_snapshot::SourceSnapshot;
 pub use validate::validate_steps;
 pub use vm::{FlowVm, RunHandle, RunOptions, RunReport, VARS_JSON_MAX_BYTES};

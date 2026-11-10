@@ -62,8 +62,9 @@ mod voice_model_commands;
 mod voice_persona;
 
 use agent_commands::{
-    agent_approve, agent_cancel, agent_events, agent_pause, agent_restore, agent_resume,
-    agent_run_list, agent_start, setup_agent_service, DesktopAgentRuntime,
+    agent_approve, agent_cancel, agent_events, agent_pause, agent_resolve_usage, agent_restore,
+    agent_resume, agent_run_list, agent_start, agent_usage, setup_agent_service,
+    DesktopAgentRuntime,
 };
 use agent_management_commands::{
     approve_improvement, evaluate_improvement, list_agent_profiles, list_improvement_proposals,
@@ -1436,6 +1437,8 @@ pub fn run() {
             agent_approve,
             agent_events,
             agent_run_list,
+            agent_usage,
+            agent_resolve_usage,
             agent_restore,
             job_list,
             job_unknown_nodes,

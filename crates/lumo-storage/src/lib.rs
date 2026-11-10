@@ -6,6 +6,7 @@
 
 mod agent_store;
 pub mod error;
+mod invocation_store;
 mod job_store;
 pub mod repo;
 pub mod schema;

@@ -29,12 +29,14 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use crate::{push_event, RawEvent, RawEventSender, Recorder, SharedBuffer};
 
+pub mod input;
 pub mod platform;
 
 /// One read of the platform foreground state. All fields are best-effort —
@@ -70,6 +72,8 @@ pub struct DesktopRecorder {
     /// "remote control" deployments where the foreground state arrives
     /// from a sidecar process rather than this OS).
     backend: Mutex<Option<Arc<dyn platform::Backend>>>,
+    capture: Mutex<Option<input::CaptureGuard>>,
+    active: AtomicBool,
 }
 
 impl Default for DesktopRecorder {
@@ -84,6 +88,8 @@ impl DesktopRecorder {
             buffer: Arc::new(Mutex::new(Vec::new())),
             tasks: Mutex::new(Vec::new()),
             backend: Mutex::new(None),
+            capture: Mutex::new(None),
+            active: AtomicBool::new(false),
         }
     }
 
@@ -98,12 +104,42 @@ impl DesktopRecorder {
 #[async_trait]
 impl Recorder for DesktopRecorder {
     async fn start(&self, live: Option<RawEventSender>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.active.swap(true, Ordering::SeqCst),
+            "Desktop recorder is already running"
+        );
         self.buffer.lock().clear();
         let backend = self
             .backend
             .lock()
             .clone()
             .unwrap_or_else(platform::default_backend);
+        if !backend.is_supported() {
+            self.active.store(false, Ordering::SeqCst);
+            anyhow::bail!(
+                "Desktop recorder backend `{}` is not available in this session",
+                backend.name()
+            );
+        }
+        let input_buffer = self.buffer.clone();
+        let input_live = live.clone();
+        let emitter = input::InputEmitter::new(Arc::new(move |event| {
+            push_event(&input_buffer, &input_live, event);
+        }));
+        let input_backend = backend.clone();
+        match tokio::task::spawn_blocking(move || input_backend.start_input(emitter)).await {
+            Ok(Ok(capture)) => *self.capture.lock() = capture,
+            result => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(match result {
+                    Ok(Err(error)) => error,
+                    Err(error) => {
+                        anyhow::anyhow!("Desktop input capture initialization failed: {error}")
+                    }
+                    _ => unreachable!(),
+                });
+            }
+        }
         push_event(
             &self.buffer,
             &live,
@@ -177,10 +213,30 @@ impl Recorder for DesktopRecorder {
     }
 
     async fn stop(&self) -> anyhow::Result<Vec<RawEvent>> {
-        for t in self.tasks.lock().drain(..) {
-            t.abort();
+        let tasks: Vec<_> = self.tasks.lock().drain(..).collect();
+        for task in &tasks {
+            task.abort();
         }
+        for task in tasks {
+            let _ = task.await;
+        }
+        let capture = self.capture.lock().take();
+        if let Some(capture) = capture {
+            tokio::task::spawn_blocking(move || capture.stop()).await?;
+        }
+        self.active.store(false, Ordering::SeqCst);
         Ok(std::mem::take(&mut *self.buffer.lock()))
+    }
+}
+
+impl Drop for DesktopRecorder {
+    fn drop(&mut self) {
+        for task in self.tasks.get_mut().drain(..) {
+            task.abort();
+        }
+        // Native guards stop and join their worker; no global callback can
+        // access the event sink after the recorder has been dropped.
+        self.capture.get_mut().take();
     }
 }
 
@@ -280,5 +336,49 @@ mod tests {
     fn focus_snapshot_with_content_not_empty() {
         let s = snap("X", "win", "role");
         assert!(!s.is_empty());
+    }
+
+    #[derive(Debug)]
+    struct UnsupportedBackend;
+
+    #[async_trait]
+    impl platform::Backend for UnsupportedBackend {
+        fn name(&self) -> &'static str {
+            "unsupported"
+        }
+        fn is_supported(&self) -> bool {
+            false
+        }
+        async fn poll(&self) -> anyhow::Result<FocusSnapshot> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_capture_fails_instead_of_claiming_to_record() {
+        let rec = DesktopRecorder::new().with_backend(Arc::new(UnsupportedBackend));
+        assert!(rec
+            .start(None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not available"));
+        assert!(rec.stop().await.unwrap().is_empty());
+        assert!(rec.start(None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn repeated_start_is_rejected_without_losing_recording() {
+        let rec = DesktopRecorder::new().with_backend(ScriptedBackend::new(vec![]));
+        rec.start(None).await.unwrap();
+        assert!(rec
+            .start(None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already running"));
+        assert_eq!(rec.stop().await.unwrap().len(), 1);
+        rec.start(None).await.unwrap();
+        rec.stop().await.unwrap();
     }
 }

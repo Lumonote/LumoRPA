@@ -35,7 +35,10 @@ export function renderSchemaFields(schema, withValue) {
       }
       const ph = placeholder ? ` placeholder="${html(placeholder)}"` : "";
 
-      if (Array.isArray(spec.enum) && spec.enum.length) {
+      if (typeof cur === "string" && cur.includes("{{")) {
+        control = `<input type="text" data-with-key="${html(key)}" data-type="expression" value="${html(cur)}" />`;
+        typeHint = " (表达式)";
+      } else if (Array.isArray(spec.enum) && spec.enum.length) {
         // Preselect current value, else schema default.
         const selected = isSet ? cur : hasDefault ? spec.default : undefined;
         const options = spec.enum

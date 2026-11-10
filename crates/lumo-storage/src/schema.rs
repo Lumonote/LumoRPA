@@ -315,3 +315,58 @@ CREATE INDEX idx_agent_jobs_ready ON agent_jobs(state, available_at, priority DE
 CREATE INDEX idx_agent_jobs_lease ON agent_jobs(state, lease_until) WHERE state = 'running';
 CREATE UNIQUE INDEX idx_agent_jobs_run ON agent_jobs(run_id) WHERE run_id IS NOT NULL;
 "#;
+
+/// Invocation attempts retain metered failures and cancellation independently
+/// of the latest durable node output. Flow associations survive flow pruning.
+pub const V7_DDL: &str = r#"
+CREATE TABLE agent_invocation_attempts (
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt > 0),
+  capability_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('flow','skill','mcp')),
+  flow_run_id TEXT,
+  state TEXT NOT NULL CHECK(state IN ('running','completed','failed','cancelled','timed_out','dropped')),
+  usage_state TEXT NOT NULL CHECK(usage_state IN ('pending','recorded','unknown')),
+  budget_sensitive INTEGER NOT NULL CHECK(budget_sensitive IN (0,1)),
+  tokens_used INTEGER CHECK(tokens_used >= 0),
+  cost_usd_micro INTEGER CHECK(cost_usd_micro >= 0),
+  duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  error TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+  resolved_by TEXT,
+  resolution_reason TEXT,
+  resolved_at INTEGER,
+  PRIMARY KEY(run_id,node_id,attempt)
+);
+CREATE INDEX idx_invocation_attempts_run ON agent_invocation_attempts(run_id,started_at);
+CREATE TABLE agent_invocation_flow_runs (
+  flow_run_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  parent_flow_run_id TEXT,
+  state TEXT NOT NULL,
+  usage_unknown INTEGER NOT NULL DEFAULT 1 CHECK(usage_unknown IN (0,1)),
+  tokens_used INTEGER CHECK(tokens_used >= 0),
+  cost_usd_micro INTEGER CHECK(cost_usd_micro >= 0),
+  duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
+  FOREIGN KEY(run_id,node_id,attempt) REFERENCES agent_invocation_attempts(run_id,node_id,attempt) ON DELETE CASCADE
+);
+CREATE INDEX idx_invocation_flow_runs_attempt ON agent_invocation_flow_runs(run_id,node_id,attempt);
+CREATE TABLE agent_invocation_usage_resolutions (
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  tokens_used INTEGER NOT NULL CHECK(tokens_used >= 0),
+  cost_usd_micro INTEGER NOT NULL CHECK(cost_usd_micro >= 0),
+  resolved_by TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  resolved_at INTEGER NOT NULL,
+  PRIMARY KEY(run_id,node_id,attempt,revision),
+  FOREIGN KEY(run_id,node_id,attempt) REFERENCES agent_invocation_attempts(run_id,node_id,attempt) ON DELETE CASCADE
+);
+"#;

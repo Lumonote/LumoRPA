@@ -194,11 +194,12 @@ const DERIVED_CLOSED: &[&str] = &[
     "pdf.info",
     "pdf.write",
     // transfer (F-6) — FTP + S3-compatible upload/download; fs + network gated.
-    // (SFTP deferred — see transfer.rs module header.)
     "ftp.upload",
     "ftp.download",
     "s3.put",
     "s3.get",
+    "sftp.upload",
+    "sftp.download",
     // image (F-2) — template matching reads locally; OCR reads local images and
     // calls the configured OCR/vision model.
     "image.locate",

@@ -1,0 +1,32 @@
+name: secure transfer acceptance
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-sftp-ftps:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/linux-deps
+      - name: Install isolated server test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server openssh-client openssl
+          sudo mkdir -p /run/sshd
+      - name: Verify gates and TLS downgrade rejection
+        run: cargo test -p lumo-actions --locked --test secure_transfer
+      - name: Verify real SFTP and encrypted FTP data channels
+        run: python3 scripts/secure-transfer-e2e.py

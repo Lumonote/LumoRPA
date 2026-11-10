@@ -24,9 +24,11 @@ mod run_control;
 mod security_center;
 mod shadow_eval;
 mod skill_manager;
+mod source_snapshot;
 mod telemetry;
 mod trace_miner;
 mod trust;
+mod usage;
 mod validator;
 
 pub use adapters::{
@@ -89,9 +91,11 @@ pub use shadow_eval::{
     ShadowExecutionRequest, ShadowResult, ShadowThresholds,
 };
 pub use skill_manager::{SkillManager, SkillManagerError, SkillValidationReport, SkillVersion};
+pub use source_snapshot::{capture_source_snapshot, pin_plan_sources, SOURCE_SNAPSHOTS_KEY};
 pub use telemetry::{DiagnosticEvent, TelemetryBuffer, TelemetryPolicy};
 pub use trace_miner::{TraceAggregate, TraceMiner, TraceRecord, TraceSummary};
 pub use trust::{ContentEnvelope, ContentOrigin, ControlPlaneField, TrustError, TrustGuard};
+pub use usage::InvocationUsageReporter;
 pub use validator::{
     validate_invocation_result, validate_json_schema, PlanValidationError, PlanValidator,
     ValidatedPlan,

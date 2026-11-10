@@ -117,6 +117,7 @@ pub(crate) fn build_action_registry(home: &Path, flow_path: Option<&Path>) -> Ac
 
     let mut registry = ActionRegistry::new();
     lumo_actions::register_all(&mut registry);
+    registry.register(lumo_ai::ScreenAgentAction::new(router.clone()));
     registry.register(ChatAction::new(router));
 
     let skill_reg = load_skill_registry(home, flow_path);

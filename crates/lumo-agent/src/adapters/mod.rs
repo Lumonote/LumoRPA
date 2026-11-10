@@ -50,6 +50,7 @@ pub struct InvocationContext {
     pub node_id: String,
     pub cancel: CancelToken,
     pub metadata: BTreeMap<String, Value>,
+    pub usage: Option<crate::InvocationUsageReporter>,
 }
 
 impl InvocationContext {
@@ -59,6 +60,7 @@ impl InvocationContext {
             node_id: node_id.into(),
             cancel: CancelToken::new(),
             metadata: BTreeMap::new(),
+            usage: None,
         }
     }
 

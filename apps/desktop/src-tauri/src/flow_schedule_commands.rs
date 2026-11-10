@@ -169,7 +169,8 @@ async fn prepare_flow(
     }
     let now = Utc::now();
     let source = std::fs::read_to_string(&request.path).map_err(|error| error.to_string())?;
-    let request = flow_request_with_source(request, &capability, &source, now)?;
+    let mut request = flow_request_with_source(request, &capability, &source, now)?;
+    factory.pin_sources(&mut request.plan, &catalog).await?;
     lumo_agent::PlanValidator::new(&catalog, &profile)
         .validate(request.plan.clone())
         .map_err(|error| error.to_string())?;

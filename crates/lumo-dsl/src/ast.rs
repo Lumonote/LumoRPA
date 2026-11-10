@@ -55,6 +55,10 @@ fn default_version() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowSpec {
+    /// Read-only files whose versions must stay fixed for an approved plan.
+    /// Paths are relative to the declaring flow/skill file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<IoDecl>,
     #[serde(default)]

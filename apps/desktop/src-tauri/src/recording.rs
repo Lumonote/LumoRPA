@@ -221,6 +221,29 @@ pub(crate) fn recording_flow_doc(id: &str, steps: Vec<YamlValue>) -> YamlValue {
         yaml_key("network"),
         YamlValue::Sequence(vec![YamlValue::String("*".into())]),
     );
+    let mut desktop = std::collections::BTreeSet::new();
+    for step in &steps {
+        match step.get(yaml_key("action")).and_then(YamlValue::as_str) {
+            Some("desktop.click" | "desktop.drag" | "desktop.move" | "desktop.scroll") => {
+                desktop.insert("mouse");
+            }
+            Some("desktop.key" | "desktop.type") => {
+                desktop.insert("keyboard");
+            }
+            _ => {}
+        }
+    }
+    if !desktop.is_empty() {
+        capabilities.insert(
+            yaml_key("desktop"),
+            YamlValue::Sequence(
+                desktop
+                    .into_iter()
+                    .map(|category| YamlValue::String(category.into()))
+                    .collect(),
+            ),
+        );
+    }
 
     let mut spec = YamlMapping::new();
     spec.insert(yaml_key("capabilities"), YamlValue::Mapping(capabilities));
@@ -342,5 +365,21 @@ mod recording_flow_tests {
         assert_eq!(flow.spec.steps[0].action, "browser.click");
         assert_eq!(flow.spec.steps[1].id, "type_1");
         assert_eq!(flow.spec.steps[1].action, "browser.type");
+    }
+
+    #[test]
+    fn desktop_recording_has_replay_permissions_for_only_used_input_categories() {
+        let mouse = "- id: click\n  action: desktop.click\n  with: {x: 10, y: 20, button: left}\n";
+        let source = wrap_recording_fragment("desktop-click", mouse).unwrap();
+        let flow = lumo_dsl::parse_str(&source).unwrap();
+        assert_eq!(flow.spec.capabilities.desktop, ["mouse"]);
+        let source = wrap_recording_fragment(
+            "desktop-text",
+            &format!("{mouse}- id: text\n  action: desktop.type\n  with: {{text: 中文}}\n"),
+        )
+        .unwrap();
+        let flow = lumo_dsl::parse_str(&source).unwrap();
+        assert_eq!(flow.spec.capabilities.desktop, ["keyboard", "mouse"]);
+        lumo_dsl::validate(&flow).unwrap();
     }
 }
