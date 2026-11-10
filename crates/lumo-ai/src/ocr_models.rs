@@ -658,6 +658,8 @@ try:
     with contextlib.redirect_stdout(sys.stderr):
         for name in ("torch", "transformers", "PIL", "accelerate"):
             importlib.import_module(name)
+        if sys.argv[1] in ("glm-ocr", "paddleocr-vl"):
+            importlib.import_module("torchvision")
         import transformers
         required = ("AutoTokenizer", "AutoModel") if sys.argv[1] == "deepseek-ocr" else ("AutoProcessor", "GlmOcrForConditionalGeneration" if sys.argv[1] == "glm-ocr" else "AutoModelForImageTextToText")
         for name in required:
@@ -1133,6 +1135,92 @@ printf '%s' '{"text":"same desktop cache"}'
             error.to_string().contains("No module named torch"),
             "{error}"
         );
+    }
+
+    async fn runtime_probe_with_fake_modules(
+        dir: &Path,
+        engine: &str,
+    ) -> (bool, serde_json::Value) {
+        let output = Command::new("python3")
+            // Exclude installed site packages so a developer's torchvision
+            // cannot hide a missing dependency in this controlled fixture.
+            .arg("-S")
+            .arg("-c")
+            .arg(PYTHON_RUNTIME_PROBE)
+            .arg(engine)
+            .env("PYTHONPATH", dir)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .current_dir(dir)
+            .output()
+            .await
+            .expect("Python 3 is required for the OCR runtime probe contract test");
+        let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "invalid runtime report: {error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.success(), report)
+    }
+
+    fn fake_runtime_modules(dir: &Path) {
+        for name in ["torch", "PIL", "accelerate"] {
+            std::fs::write(dir.join(format!("{name}.py")), "").unwrap();
+        }
+        std::fs::write(
+            dir.join("transformers.py"),
+            "AutoTokenizer = AutoModel = AutoProcessor = GlmOcrForConditionalGeneration = AutoModelForImageTextToText = object\n",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn multimodal_runtime_probe_rejects_missing_or_broken_torchvision() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_runtime_modules(dir.path());
+        for engine in ["glm-ocr", "paddleocr-vl"] {
+            let (success, report) = runtime_probe_with_fake_modules(dir.path(), engine).await;
+            assert!(!success, "{engine} must reject missing torchvision");
+            assert_eq!(report["ok"], false);
+            assert!(
+                report["error"].as_str().unwrap().contains("torchvision"),
+                "{engine}: {report}"
+            );
+        }
+        std::fs::write(
+            dir.path().join("torchvision.py"),
+            "raise RuntimeError('torchvision compiled operators unavailable')\n",
+        )
+        .unwrap();
+        for engine in ["glm-ocr", "paddleocr-vl"] {
+            let (success, report) = runtime_probe_with_fake_modules(dir.path(), engine).await;
+            assert!(!success, "{engine} must reject a broken torchvision import");
+            assert_eq!(report["ok"], false);
+            assert_eq!(
+                report["error"],
+                "torchvision compiled operators unavailable"
+            );
+        }
+        std::fs::write(dir.path().join("torchvision.py"), "").unwrap();
+        for engine in ["glm-ocr", "paddleocr-vl"] {
+            let (success, report) = runtime_probe_with_fake_modules(dir.path(), engine).await;
+            assert!(success, "{engine}: {report}");
+            assert_eq!(report["ok"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_runtime_probe_does_not_require_unrelated_processor_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_runtime_modules(dir.path());
+        std::fs::write(
+            dir.path().join("torchvision.py"),
+            "raise RuntimeError('this engine must not import torchvision')\n",
+        )
+        .unwrap();
+        let (success, report) = runtime_probe_with_fake_modules(dir.path(), "deepseek-ocr").await;
+        assert!(success, "{report}");
+        assert_eq!(report["ok"], true);
     }
 
     #[tokio::test]

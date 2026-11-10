@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "model": "modelscope/ZhipuAI/GLM-OCR",
+  "cases": [
+    {
+      "id": "english",
+      "image": "fixtures/english.png",
+      "maxCer": 0.05,
+      "maxElapsedMs": 600000,
+      "maxPeakRssMb": 10000,
+      "timeoutMs": 600000,
+      "expectedText": "LumoRPA Document Test\nInvoice number: INV-2026-1109\nTotal amount: USD 1280.50\nPayment due: 2026-12-01"
+    },
+    {
+      "id": "chinese",
+      "image": "fixtures/chinese.png",
+      "maxCer": 0.05,
+      "maxElapsedMs": 600000,
+      "maxPeakRssMb": 10000,
+      "timeoutMs": 600000,
+      "expectedText": "自动化任务验收\n订单编号：LUMO20261110\n商品数量：12\n合计金额：1280.50元"
+    },
+    {
+      "id": "numbers",
+      "image": "fixtures/numbers.png",
+      "maxCer": 0.05,
+      "maxElapsedMs": 600000,
+      "maxPeakRssMb": 10000,
+      "timeoutMs": 600000,
+      "expectedText": "Receipt 2026-11-10\nItem       Qty       Price\nPaper      12        24.00\nPen        3         15.00\nTotal                39.00"
+    },
+    {
+      "id": "english-scan",
+      "image": "fixtures/english-scan.jpg",
+      "maxCer": 0.05,
+      "maxElapsedMs": 600000,
+      "maxPeakRssMb": 10000,
+      "timeoutMs": 600000,
+      "expectedText": "LumoRPA Document Test\nInvoice number: INV-2026-1109\nTotal amount: USD 1280.50\nPayment due: 2026-12-01"
+    },
+    {
+      "id": "chinese-scan",
+      "image": "fixtures/chinese-scan.jpg",
+      "maxCer": 0.05,
+      "maxElapsedMs": 600000,
+      "maxPeakRssMb": 10000,
+      "timeoutMs": 600000,
+      "expectedText": "自动化任务验收\n订单编号：LUMO20261110\n商品数量：12\n合计金额：1280.50元"
+    }
+  ]
+}

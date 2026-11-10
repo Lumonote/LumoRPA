@@ -1,0 +1,33 @@
+2026-11-10T04:31:03.439397Z  WARN provider `acceptance-local`: unknown kind `local`, skipping
+2026-11-10T04:31:03.441075Z  WARN provider `acceptance-local`: unknown kind `local`, skipping
+
+✓ run=01M71VJK8H2BFXWH1YQA69Z4SP state=ok steps_ok=1 executed=1 declared=1 skipped=0 retried=0 caught=0 failed=0 duration=4090ms
+outputs: {
+  "recognize": {
+    "result": {
+      "text": "LumoRPA Document Test\nInvoice number: INV-2026-1109\nTotal amount: USD 1280.50\nPayment due: 2026-12-01",
+      "lines": [
+        {
+          "text": "LumoRPA Document Test",
+          "confidence": 0.75
+        },
+        {
+          "text": "Invoice number: INV-2026-1109",
+          "confidence": 0.75
+        },
+        {
+          "text": "Total amount: USD 1280.50",
+          "confidence": 0.75
+        },
+        {
+          "text": "Payment due: 2026-12-01",
+          "confidence": 0.75
+        }
+      ],
+      "engine": "ocrlocal",
+      "source": "ocr_local",
+      "left_machine": false,
+      "low_confidence_lines": 0
+    }
+  }
+}

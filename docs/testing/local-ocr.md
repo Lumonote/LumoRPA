@@ -5,10 +5,12 @@
 每个模型分别显示三种状态：
 
 - **模型文件**：未下载、文件不完整、文件完整。文件完整仅代表所需文件存在且结构检查通过。
-- **运行环境**：未检查、缺少依赖、环境就绪。点击“检查运行环境”检查所选 Python、PyTorch、Transformers、Pillow、Accelerate 和模型需要的 Transformers 类，不加载权重。
+- **运行环境**：未检查、缺少依赖、环境就绪。点击“检查运行环境”检查所选 Python、PyTorch、Transformers、Pillow、Accelerate 和模型需要的 Transformers 类；GLM-OCR、PaddleOCR-VL 还检查 Torchvision 是否可导入，不加载权重。
 - **本地识别**：未验证、验证通过、验证失败。文件完整后点击“测试本地识别”，加载模型并识别内置空白图片；失败原因会显示在卡片中。此检查验证加载与生成链路，不能衡量真实文档准确率。
 
 刷新列表不会加载模型。Python 默认为 `python3`，可在启动应用前用 `LUMO_OCR_PYTHON` 指定安装了所需依赖的解释器。各预设仍可能要求额外的模型专用依赖；以自检的具体错误为准。
+
+GLM-OCR、PaddleOCR-VL 的多模态处理器还需要与 PyTorch 版本兼容的 `torchvision`。仅安装 `torch`、`transformers`、`Pillow` 和 `accelerate` 不足以使用这两个引擎；`torchvision` 缺失或导入失败时，运行环境会显示“缺少依赖”及具体错误。DeepSeek-OCR 当前通过 `AutoTokenizer`、`AutoModel` 和模型自身的 `infer()` 接口调用，通用探针不额外要求 `torchvision`；模型自定义代码的其他依赖由本地识别自检确认。
 
 以下流程仅需图片读取权限。先保存并激活本地模型源，再将图片放到实际授权路径，修改示例中的 `/absolute/path/`：
 
@@ -41,7 +43,7 @@ spec:
 
 本地路径使用离线模式和 `local_files_only`。文件缺失、依赖缺失、超时或推理失败都会报告错误，**不会自动转用云端**。远程 OCR 仍需同时开启 `ocr.allow_cloud` 和对应的 `network` 或 `llm` 能力授权。
 
-本次验证使用临时模型文件、替代模型模块及真实 Python 进程测试下载、目录选择和调用契约，未下载 GB 级真实权重。真实模型在具体设备上的加载、内存需求和识别准确率尚需通过上述自检及代表性文档验收。
+2026-11-10 已通过项目 CLI 加载官方 GLM-OCR 真实权重，完成中英文、数字及退化扫描图片的 5 份本地样本验收；忽略空白后的 CER 均为 0，独立进程耗时约 3.73–4.74 秒，采样进程树 RSS 约 2.72–2.73 GiB。完整样本、版本、权重校验值、原始日志及限制见[设备验收记录](reports/2026-11-10-glm-ocr/README.md)。这些合成样本建立了真实模型基线；其他预设及实际业务扫描件仍需分别验收。
 
 ## 真实文档批量验收
 
@@ -98,4 +100,4 @@ CER 为 Unicode 字符编辑距离除以参考字符数，包含插入、删除�
 python3 -m unittest discover -s scripts -p test_ocr_acceptance.py -v
 ```
 
-这些测试使用替代 CLI 验证验收工具契约，不代表真实 OCR 模型准确率。本开发环境尚未安装真实模型权重与推理依赖，真实设备上的准确率、加载时长和内存验收仍需使用上述代表性样本执行。
+这些测试使用替代 CLI 验证验收工具契约，不代表真实 OCR 模型准确率。真实 GLM-OCR 基线及可复用图片已保存在[设备验收记录](reports/2026-11-10-glm-ocr/README.md)；实际设备和业务文档可沿用同一脚本及 manifest 格式验证。

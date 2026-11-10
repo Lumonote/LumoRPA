@@ -1,7 +1,53 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeToastEvent, reduceRunProgress } from "../src/js/app-events.js";
+import { bindCapsuleRunNavigation, normalizeToastEvent, reduceRunProgress } from "../src/js/app-events.js";
+
+test("capsule run navigation awaits opening the exact run and returns the listener disposer", async () => {
+  let receive;
+  let finish;
+  const calls = [];
+  const stop = () => {};
+  const unlisten = await bindCapsuleRunNavigation({
+    listen: async (name, handler) => {
+      assert.equal(name, "lumo://capsule-open-run");
+      receive = handler;
+      return stop;
+    },
+    openRun: (runId) => {
+      calls.push(runId);
+      return new Promise((resolve) => { finish = resolve; });
+    },
+    onError: (error) => assert.fail(error),
+  });
+  let settled = false;
+  const opening = receive({ payload: { runId: "associated-run" } }).then(() => { settled = true; });
+  assert.deepEqual(calls, ["associated-run"]);
+  assert.equal(settled, false);
+  finish();
+  await opening;
+  assert.equal(settled, true);
+  assert.equal(unlisten, stop);
+});
+
+test("capsule run navigation ignores invalid run ids and reports navigation errors", async () => {
+  let receive;
+  const calls = [];
+  const errors = [];
+  const failure = new Error("mission control unavailable");
+  await bindCapsuleRunNavigation({
+    listen: async (_name, handler) => { receive = handler; return () => {}; },
+    openRun: async (runId) => { calls.push(runId); throw failure; },
+    onError: (error) => errors.push(error),
+  });
+  for (const event of [undefined, {}, { payload: {} }, ...[null, "", "   ", 12, {}].map((runId) => ({ payload: { runId } }))]) {
+    await receive(event);
+  }
+  assert.deepEqual(calls, []);
+  await receive({ payload: { runId: "run-1" } });
+  assert.deepEqual(calls, ["run-1"]);
+  assert.deepEqual(errors, [failure]);
+});
 
 test("normalizes backend toast payloads for the existing toast helper", () => {
   assert.deepEqual(

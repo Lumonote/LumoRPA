@@ -66,12 +66,56 @@ Reproducible commands and limitations are documented in
 [secure transfers](../../testing/secure-transfers.md) and
 [local OCR acceptance](../../testing/local-ocr.md).
 
-Item 7 remains unverified on this macOS host: there is no usable Linux runtime
-or logged-in CI access, and no installed real OCR weights/inference dependencies.
-The Linux Tauri, Linux native recorder and document OCR acceptance entry points
-are ready for the target environment; no skipped or unavailable test is counted
-as a pass. OCR device reports must include representative documents, CER,
-cold-start runtime and sampled process-tree memory.
+Item 7 remains open for Linux native acceptance. The first Linux CI runs for
+`ffd4bc5` built successfully but failed during native recorder/Tauri acceptance;
+real Chrome and secure-transfer CI passed. Public annotations exposed only the
+exit code, and the authorized Chrome session was also signed out, so the exact
+native failures have not been diagnosed. Subsequent Python acceptance failures
+now publish escaped, actionable exception annotations. No failed or unavailable
+test is counted as a pass.
+
+The real OCR portion now has a verified GLM-OCR baseline: five clean/degraded
+synthetic documents passed through the production CLI and official weights,
+with whitespace-normalized CER 0, process elapsed 3.73–4.74 s and sampled
+process-tree RSS 2.72–2.73 GiB. See the [raw device report and reusable fixtures](../../testing/reports/2026-11-10-glm-ocr/README.md).
+This does not establish accuracy for other models, handwriting, complex tables
+or private business documents.
+
+## Task assistant follow-up, 2026-11-10
+
+The user selected text/voice instructions, execution progress and results as
+the companion's priority. Implemented [the task assistant](../../testing/companion-assistant.md):
+
+- [x] Text submission through the existing Agent planning, permissions and
+  approval path, without requiring microphone activation.
+- [x] Run-specific progress, result summaries, failures, stop and exact history
+  navigation; closing the companion preserves unrelated Agent sessions.
+- [x] Open the text assistant from the main toolbar without microphone access;
+  selected task details keep receiving approval/progress events even when
+  another task becomes the globally latest run.
+- [x] Complete revisioned host snapshots, durable event replay on binding,
+  race-safe submission/cancellation and terminal-state recovery.
+- [x] Stable draft/focus, frame-coalesced audio levels, subscription cleanup,
+  hidden/reduced-motion behavior and screen-constrained expanded layout.
+- [x] Linux recorder focus/password fail-closed fixes and replayable key filtering.
+- [x] Real OCR dependency diagnosis: GLM/Paddle require working torchvision;
+  supported local OCR profiles no longer generate an unknown chat-kind warning.
+
+Validation for this follow-up: frontend 264/264 and lint passed; desktop Rust
+132/132, AI Rust 40/40, Linux helper 9/9 and CI annotation 3/3 passed. The OCR
+runtime tests include missing and broken torchvision and preserve DeepSeek's
+existing dependency contract. Formatting, whitespace checks, a current CLI
+build and workspace Clippy (`--all-targets --locked -- -D warnings`) passed.
+With the user's explicit localhost authorization, browser acceptance of the
+actual companion frontend with simulated interfaces passed: text submission,
+progress/results, retry/stop, muted text input, simulated voice, run-specific
+details and hide/recall. It exposed and fixed Esc focus loss and a clipped send
+button. Idle, completed, long-result and failed layouts keep every input/action
+control visible at 390×390; results scroll independently without horizontal
+overflow. An additional regression protects composing IME Escape. See the
+[screenshots and measured layout evidence](../../testing/reports/2026-11-10-companion/README.md).
+The fixture does not establish native Tauri IPC, real microphone/STT or actual
+end-to-end task execution acceptance.
 
 All changes were developed in the primary `dev` checkout without a worktree.
 Commit and push follow the user's explicit request; the outstanding native

@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { URL } from "node:url";
-import { mountMissionControl, updateMissionControl, renderTopology, renderNodeDetail, renderRunHistoryOptions, renderRunMetrics, renderVoiceHistory } from "../src/js/mission-control.js";
+import { mountMissionControl, receiveMissionControlAgentEvent, selectMissionControlRun, updateMissionControl, renderTopology, renderNodeDetail, renderRunHistoryOptions, renderRunMetrics, renderVoiceHistory } from "../src/js/mission-control.js";
+import { bindCapsuleRunNavigation, restoreAndSubscribeAgentEvents } from "../src/js/app-events.js";
 import { createRunProjection, applyAgentEvent } from "../src/js/agent-events.js";
 
 const projection = {
@@ -120,6 +121,179 @@ test("history keeps an explicit follow-latest option even when no runs exist", (
   assert.match(renderRunHistoryOptions([{ id: "old", state: "completed" }], "old"), /<option value="">.*跟随最新/);
 });
 
+test("programmatic selection opens an exact run missing from recent history", async (context) => {
+  const ui = missionRoot(context);
+  const requests = [];
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command, args) => {
+    if (command !== "agent_events") return [];
+    requests.push(args);
+    return completedEvents("requested result", 6);
+  });
+  await selectMissionControlRun(ui.root, "older-run");
+  const selector = ui.elements.find((element) => element.tagName === "select");
+  assert.deepEqual(requests, [{ runId: "older-run", afterSeq: 0 }]);
+  assert.equal(ui.root.dataset.selectedRun, "older-run");
+  assert.equal(selector.value, "older-run");
+  assert.match(selector.innerHTML, /value="older-run" selected/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 6/);
+  assert.equal(selector.attributes["aria-busy"], "false");
+});
+
+test("rapid capsule navigation keeps the last requested run when responses arrive late", async (context) => {
+  const ui = missionRoot(context);
+  const requests = new Map();
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command, args) => {
+    if (command !== "agent_events") return [];
+    const request = deferred(); requests.set(args.runId, request); return request.promise;
+  });
+  let receive;
+  const errors = [];
+  await bindCapsuleRunNavigation({
+    listen: async (_name, handler) => { receive = handler; return () => {}; },
+    openRun: (runId) => selectMissionControlRun(ui.root, runId),
+    onError: (error) => errors.push(error),
+  });
+  const loadingA = receive({ payload: { runId: "A" } });
+  const loadingB = receive({ payload: { runId: "B" } });
+  const selector = ui.elements.find((element) => element.tagName === "select");
+  await flush();
+  requests.get("A").reject(new Error("stale request failed"));
+  await loadingA;
+  assert.equal(selector.attributes["aria-busy"], "true");
+  assert.equal(ui.boxes["[data-mc-history-error]"].textContent, "");
+  requests.get("B").resolve(completedEvents("B result", 9));
+  await loadingB;
+  assert.equal(ui.root.dataset.selectedRun, "B");
+  assert.equal(selector.value, "B");
+  assert.equal(selector.attributes["aria-busy"], "false");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 9/);
+  assert.deepEqual(errors, []);
+});
+
+test("repeated programmatic selection of one run discards earlier snapshots", async (context) => {
+  const ui = missionRoot(context);
+  const requests = [];
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => {
+    if (command !== "agent_events") return [];
+    const request = deferred(); requests.push(request); return request.promise;
+  });
+  const first = selectMissionControlRun(ui.root, "same-run");
+  const second = selectMissionControlRun(ui.root, "same-run");
+  await flush();
+  requests[1].resolve(completedEvents("new snapshot", 12));
+  await second;
+  requests[0].resolve(completedEvents("old snapshot", 3));
+  await first;
+  assert.equal(ui.root.dataset.selectedRun, "same-run");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 12/);
+  await selectMissionControlRun(ui.root, "");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /RUNNING/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 2/);
+});
+
+test("one native subscription keeps a selected companion run live after another run becomes latest", async (context) => {
+  const ui = missionRoot(context);
+  const events = {
+    A: [
+      { runId: "A", seq: 1, kind: "session.started" },
+      { runId: "A", seq: 2, kind: "plan.created", payload: { nodes: [{ id: "report", capabilityId: "flow:report" }] } },
+      { runId: "A", seq: 3, kind: "permission.requested", nodeId: "report", payload: { planHash: "hash", nodeIds: ["report"], risk: "L1" } },
+    ],
+    B: [{ runId: "B", seq: 1, kind: "run.started" }],
+  };
+  let latest = "A", receive, subscriptions = 0;
+  const requests = [];
+  const call = async (command, args) => {
+    if (command !== "agent_events") return [];
+    requests.push(args);
+    return events[args.runId === "latest" ? latest : args.runId].filter((event) => event.seq > args.afterSeq);
+  };
+  mountMissionControl(ui.root, createRunProjection("A"), call);
+  const stream = await restoreAndSubscribeAgentEvents({
+    runId: "latest", call,
+    listen: async (name, handler) => { subscriptions++; assert.equal(name, "lumo://agent-event"); receive = handler; return () => {}; },
+    schedule: (render) => render(),
+    onProjection: (next) => updateMissionControl(ui.root, next),
+    onEvent: (event) => { void receiveMissionControlAgentEvent(ui.root, event); },
+  });
+  context.after(() => stream.unlisten());
+  await selectMissionControlRun(ui.root, "A");
+  assert.match(ui.boxes["[data-mc-detail]"].innerHTML, /data-agent-action="approve"/);
+  latest = "B";
+  await receive({ payload: events.B[0] });
+  assert.equal(stream.getProjection().runId, "B");
+  assert.equal(ui.root.dataset.selectedRun, "A");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /WAITING/);
+  events.A.push({ runId: "A", seq: 4, kind: "permission.resolved", payload: { planHash: "hash", nodeIds: ["report"], approved: true } });
+  await receive({ payload: events.A[3] });
+  await flush();
+  assert.doesNotMatch(ui.boxes["[data-mc-detail]"].innerHTML, /mc-confirmation/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /RUNNING/);
+  events.A.push({ runId: "A", seq: 5, kind: "node.completed", nodeId: "report", payload: { result: "日报已生成" } }, { runId: "A", seq: 6, kind: "run.completed" });
+  await receive({ payload: events.A[5] });
+  await flush();
+  assert.ok(requests.some((args) => args.runId === "A" && args.afterSeq === 4));
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /1\/1/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 6/);
+  await receive({ payload: { runId: "A", seq: 7, kind: "permission.requested", payload: { planHash: "late", nodeIds: ["report"] } } });
+  await flush();
+  assert.doesNotMatch(ui.boxes["[data-mc-detail]"].innerHTML, /data-agent-action/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.equal(stream.getProjection().runId, "B");
+  await selectMissionControlRun(ui.root, "");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /RUNNING/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 1/);
+  assert.equal(subscriptions, 1);
+});
+
+test("selected-run restoration buffers live events and ignores late gap replies after switching", async (context) => {
+  const ui = missionRoot(context);
+  const initial = deferred(), gap = deferred();
+  const requests = [];
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command, args) => {
+    if (command !== "agent_events") return [];
+    requests.push(args);
+    if (args.runId === "A") return args.afterSeq === 0 ? initial.promise : gap.promise;
+    return [{ runId: "B", seq: 1, kind: "run.started" }];
+  });
+  const loading = selectMissionControlRun(ui.root, "A");
+  await receiveMissionControlAgentEvent(ui.root, { runId: "A", seq: 2, kind: "run.paused" });
+  initial.resolve([{ runId: "A", seq: 1, kind: "run.started" }]);
+  await loading;
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /PAUSED/);
+  const missing = receiveMissionControlAgentEvent(ui.root, { runId: "A", seq: 5, kind: "run.completed" });
+  await flush();
+  assert.deepEqual(requests.at(-1), { runId: "A", afterSeq: 2 });
+  await selectMissionControlRun(ui.root, "B");
+  gap.resolve([{ runId: "A", seq: 3, kind: "run.resumed" }, { runId: "A", seq: 4, kind: "node.completed", nodeId: "report" }, { runId: "A", seq: 5, kind: "run.completed" }]);
+  await missing;
+  await receiveMissionControlAgentEvent(ui.root, { runId: "A", seq: 6, kind: "run.failed" });
+  assert.equal(ui.root.dataset.selectedRun, "B");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /RUNNING/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 1/);
+});
+
+test("selected-run gap errors are visible and a later event can recover in order", async (context) => {
+  const ui = missionRoot(context);
+  let unavailable = true;
+  mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command, args) => {
+    if (command !== "agent_events") return [];
+    if (args.afterSeq === 0) return [{ runId: "A", seq: 1, kind: "run.started" }];
+    if (unavailable) throw new Error("sync unavailable");
+    return [{ runId: "A", seq: 2, kind: "node.completed", nodeId: "report" }, { runId: "A", seq: 3, kind: "run.completed" }];
+  });
+  await selectMissionControlRun(ui.root, "A");
+  await receiveMissionControlAgentEvent(ui.root, { runId: "A", seq: 3, kind: "run.completed" });
+  assert.match(ui.boxes["[data-mc-history-error]"].textContent, /sync unavailable/);
+  unavailable = false;
+  await receiveMissionControlAgentEvent(ui.root, { runId: "A", seq: 3, kind: "run.completed" });
+  assert.equal(ui.boxes["[data-mc-history-error]"].textContent, "");
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /COMPLETED/);
+  assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 3/);
+});
+
 test("a pinned history run retains live updates and returning to latest renders immediately", async (context) => {
   const ui = missionRoot(context);
   mountMissionControl(ui.root, { ...projection, runId: "live" }, async (command) => command === "agent_events" ? completedEvents("historical") : []);
@@ -145,12 +319,14 @@ test("out-of-order history responses cannot replace a newer selection or follow-
   });
   const loadingA = ui.select("A");
   const loadingB = ui.select("B");
+  await flush();
   requests.get("B").resolve(completedEvents("B result", 9));
   await loadingB;
   requests.get("A").resolve(completedEvents("A result", 3));
   await loadingA;
   assert.match(ui.boxes["[data-mc-metrics]"].innerHTML, /seq 9/);
   const loadingC = ui.select("C");
+  await flush();
   updateMissionControl(ui.root, { ...projection, runId: "live", seq: 7, status: "failed" });
   await ui.select("");
   requests.get("C").resolve(completedEvents("C result", 20));

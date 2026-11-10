@@ -951,8 +951,9 @@ pub(super) async fn voice_toggle(
 
 /// 鼠标发起的停止：胶囊会立刻消失，顺手告诉用户怎么把它叫回来。
 fn stop_with_recall_hint(app: &AppHandle, state: &DesktopState) -> Result<VoiceStatusDto, String> {
+    super::capsule_commands::stop_associated_task(app)?;
     let status = stop_host(app, state)?;
-    cancel_active_agent_sessions(app, state)?;
+    hide_capsule_window(app);
     emit_capsule_recall_hint(app, &status.config.shortcut);
     Ok(status)
 }
@@ -1423,9 +1424,9 @@ fn emit_voice_state(app: &AppHandle, runtime: &VoiceRuntime, reason: Option<Stri
     let _ = app.emit("lumo://voice-state", payload);
 }
 
-/// 悬浮胶囊的逻辑尺寸：常态 / 二次确认展开态。
-const CAPSULE_SIZE: (f64, f64) = (360.0, 64.0);
-const CAPSULE_CONFIRM_SIZE: (f64, f64) = (480.0, 220.0);
+/// 悬浮胶囊的逻辑尺寸：紧凑态 / 用户展开的任务面板。
+const CAPSULE_SIZE: (f64, f64) = (310.0, 76.0);
+const CAPSULE_EXPANDED_SIZE: (f64, f64) = (390.0, 390.0);
 /// 默认落位距屏幕底部的留白（Spotlight / Siri 式的贴底居中）。
 const CAPSULE_BOTTOM_MARGIN: f64 = 96.0;
 /// 记忆位置至少要有这么多像素露在某块屏幕内才继续沿用。
@@ -1448,18 +1449,40 @@ pub(super) struct ScreenRect {
 }
 
 fn sync_capsule_window(app: &AppHandle, state: VoiceState) {
-    let Some(window) = app.get_webview_window("voice-capsule") else {
-        return;
-    };
-    let size = if state == VoiceState::Confirming {
-        CAPSULE_CONFIRM_SIZE
+    let (expanded, task_active) = super::capsule_commands::window_state(app);
+    update_capsule_window(
+        app,
+        capsule_size(expanded),
+        state.is_active() || task_active || expanded,
+    );
+}
+
+fn capsule_size(expanded: bool) -> (f64, f64) {
+    if expanded {
+        CAPSULE_EXPANDED_SIZE
     } else {
         CAPSULE_SIZE
+    }
+}
+
+pub(super) fn show_capsule_window(app: &AppHandle) {
+    let (expanded, _) = super::capsule_commands::window_state(app);
+    update_capsule_window(app, capsule_size(expanded), true);
+}
+
+fn hide_capsule_window(app: &AppHandle) {
+    super::capsule_commands::reset_expansion(app);
+    update_capsule_window(app, CAPSULE_SIZE, false);
+}
+
+fn update_capsule_window(app: &AppHandle, size: (f64, f64), show: bool) {
+    let Some(window) = app.get_webview_window("voice-capsule") else {
+        return;
     };
     let previous_height = logical_window_height(&window);
     let visible = window.is_visible().unwrap_or(false);
     let _ = window.set_size(tauri::LogicalSize::new(size.0, size.1));
-    if state.is_active() {
+    if show {
         // 只在「从隐藏到显示」时落位，否则中途切到确认态会把用户拖动的位置弹回去。
         if visible {
             reflow_capsule_after_resize(&window, previous_height, size);
@@ -1619,7 +1642,12 @@ fn resolve_capsule_placement(
 ) -> Option<CapsulePlacement> {
     if let Some(placement) = saved {
         if placement_is_visible(placement, screens, size) {
-            return Some(placement);
+            // A remembered collapsed placement may be offscreen when expanded.
+            // Keep it on its original display and pull the whole panel inside.
+            return screens
+                .iter()
+                .find(|screen| placement_is_visible(placement, &[**screen], size))
+                .map(|screen| clamp_placement(placement, *screen, size));
         }
     }
     screens
@@ -2399,12 +2427,19 @@ pub(super) fn report_agent_start_failure(app: &AppHandle, error: &str) {
 pub(super) fn announce_agent_status(app: &AppHandle, message: impl Into<String>) {
     let message = message.into();
     let ok = !(message.contains("失败") || message.contains("未能"));
-    let moment = if ok {
+    announce_agent_outcome(app, message, ok);
+}
+
+pub(super) fn agent_outcome_moment(ok: bool) -> PersonaMoment {
+    if ok {
         PersonaMoment::Success
     } else {
         PersonaMoment::Failure
-    };
-    announce_feedback(app, moment, &message, true, true);
+    }
+}
+
+pub(super) fn announce_agent_outcome(app: &AppHandle, message: impl Into<String>, ok: bool) {
+    announce_feedback(app, agent_outcome_moment(ok), &message.into(), true, true);
 }
 
 /// 统一结果反馈通道：胶囊状态（reporting/error）+ `lumo://voice-feedback` +
@@ -2525,7 +2560,7 @@ async fn schedule_follow_up(app: AppHandle, timeout_seconds: u64) {
     let _ = start_host_with_cancel(&app, &state, Some(cancel), None, true).await;
 }
 
-fn state_name(state: VoiceState) -> String {
+pub(super) fn state_name(state: VoiceState) -> String {
     format!("{state:?}").to_ascii_lowercase()
 }
 
@@ -3010,20 +3045,36 @@ mod tests {
     }
 
     #[test]
-    fn confirm_state_keeps_the_capsule_bottom_edge_in_place() {
+    fn expanded_panel_keeps_the_capsule_bottom_edge_in_place() {
         let parked = default_capsule_placement(screen(0.0, 0.0), CAPSULE_SIZE);
         // 变高：下边缘不动，所以整体上移，不会捅出屏幕底部。
-        let expanded = bottom_anchored_placement(parked, CAPSULE_SIZE.1, CAPSULE_CONFIRM_SIZE.1);
+        let expanded = bottom_anchored_placement(parked, CAPSULE_SIZE.1, CAPSULE_EXPANDED_SIZE.1);
         assert_eq!(
-            expanded.y + CAPSULE_CONFIRM_SIZE.1,
+            expanded.y + CAPSULE_EXPANDED_SIZE.1,
             parked.y + CAPSULE_SIZE.1
         );
-        assert!(expanded.y + CAPSULE_CONFIRM_SIZE.1 <= 900.0);
+        assert!(expanded.y + CAPSULE_EXPANDED_SIZE.1 <= 900.0);
         // 收回常态：原样回到停放点，多轮确认也不会一点点往上漂。
         assert_eq!(
-            bottom_anchored_placement(expanded, CAPSULE_CONFIRM_SIZE.1, CAPSULE_SIZE.1),
+            bottom_anchored_placement(expanded, CAPSULE_EXPANDED_SIZE.1, CAPSULE_SIZE.1),
             parked
         );
+    }
+
+    #[test]
+    fn remembered_collapsed_placement_is_clamped_for_expanded_panel() {
+        let screen = screen(0.0, 0.0);
+        let placement = resolve_capsule_placement(
+            Some(CapsulePlacement {
+                x: 1200.0,
+                y: 810.0,
+            }),
+            &[screen],
+            CAPSULE_EXPANDED_SIZE,
+        )
+        .unwrap();
+        assert!(placement.x + CAPSULE_EXPANDED_SIZE.0 <= screen.width);
+        assert!(placement.y + CAPSULE_EXPANDED_SIZE.1 <= screen.height);
     }
 
     #[test]
@@ -3034,9 +3085,9 @@ mod tests {
             x: 1400.0,
             y: 880.0,
         };
-        let clamped = clamp_placement(dragged, screen, CAPSULE_CONFIRM_SIZE);
-        assert_eq!(clamped.x, 1440.0 - CAPSULE_CONFIRM_SIZE.0);
-        assert_eq!(clamped.y, 900.0 - CAPSULE_CONFIRM_SIZE.1);
+        let clamped = clamp_placement(dragged, screen, CAPSULE_EXPANDED_SIZE);
+        assert_eq!(clamped.x, 1440.0 - CAPSULE_EXPANDED_SIZE.0);
+        assert_eq!(clamped.y, 900.0 - CAPSULE_EXPANDED_SIZE.1);
         // 已经在屏幕里的位置不动。
         let inside = CapsulePlacement { x: 200.0, y: 200.0 };
         assert_eq!(clamp_placement(inside, screen, CAPSULE_SIZE), inside);

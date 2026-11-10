@@ -74,7 +74,7 @@ export function renderQuickCommandRow(command = {}) {
 // 悬浮胶囊是一个可以被关掉的独立窗口，这里把「怎么叫回来」写在设置最上方。
 export function renderVoiceSummonGuide(settings = {}, macos = undefined) {
   const shortcut = formatAccelerator(activeVoiceShortcut(settings), macos);
-  return `<section class="voice-summon-guide"><header><span>HOW TO SUMMON</span><h4>三种方式唤起 Lumo 语音</h4></header><ol><li><strong>全局快捷键</strong><em data-voice-summon-shortcut>${escapeHtml(shortcut)}</em><span>任何应用里都能按，再按一次收起</span></li><li><strong>顶栏「语音」按钮</strong><em>标题栏右侧</em><span>常驻入口，圆点亮起表示正在收音</span></li><li><strong>系统托盘菜单</strong><em>唤起 / 收起 Lumo 语音</em><span>主窗口关着也能用</span></li></ol><p>悬浮胶囊可以直接按住拖到任意位置，位置会被记住；点胶囊上的 × 只是停止收音并收起，用上面任一方式都能叫回来。</p></section>`;
+  return `<section class="voice-summon-guide"><header><span>HOW TO SUMMON</span><h4>Lumo 任务助手与语音入口</h4></header><ol><li><strong>语音全局快捷键</strong><em data-voice-summon-shortcut>${escapeHtml(shortcut)}</em><span>启用语音后，在任何应用里按下开始收音，再按一次停止</span></li><li><strong>顶栏「任务助手」按钮</strong><em>标题栏右侧</em><span>打开文字输入面板，无需启用语音或麦克风</span></li><li><strong>系统托盘菜单</strong><em>唤起 / 收起 Lumo 语音</em><span>语音已启用时，主窗口关着也能用</span></li></ol><p>悬浮胶囊可以直接按住拖到任意位置，位置会被记住；点胶囊上的 × 会停止收音及当前助手任务并收起。文字面板随时可从顶栏「任务助手」重新打开。</p></section>`;
 }
 
 export function renderVoiceSettings(settings = {}) {

@@ -99,6 +99,9 @@ fn build_provider(p: &ProviderProfile) -> Option<Arc<dyn LlmProvider>> {
     match p.kind.as_str() {
         "openai" => Some(Arc::new(OpenAiProvider::from_profile(p))),
         "anthropic" => Some(Arc::new(AnthropicProvider::from_profile(p))),
+        // Local OCR profiles are consumed by the offline model worker, not
+        // the chat router. They are a supported configuration kind.
+        "local" => None,
         other => {
             tracing::warn!("provider `{}`: unknown kind `{}`, skipping", p.name, other);
             None

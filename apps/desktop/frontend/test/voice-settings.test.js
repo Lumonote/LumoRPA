@@ -114,10 +114,12 @@ test("voice settings lead with the three ways to summon the capsule", () => {
   const html = renderVoiceSettings({ shortcuts: [{ id: "b", action: "voice_toggle", accelerator: "Alt+L", enabled: true }] });
   assert.match(html, /voice-summon-guide/);
   assert.match(html, /全局快捷键/);
-  assert.match(html, /顶栏「语音」按钮/);
+  assert.match(html, /顶栏「任务助手」按钮/);
+  assert.match(html, /无需启用语音或麦克风/);
   assert.match(html, /系统托盘菜单/);
   assert.match(html, /data-voice-summon-shortcut/);
   assert.match(html, /拖到任意位置/);
+  assert.match(html, /× 会停止收音及当前助手任务并收起/);
   // 引导块排在设置项之前，用户一进面板就能看到。
   assert.ok(html.indexOf("voice-summon-guide") < html.indexOf("voice-settings-grid"));
 });

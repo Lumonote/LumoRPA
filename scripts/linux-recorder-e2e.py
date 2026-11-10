@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 
+from acceptance_errors import run_acceptance
+
 APP = r'''
 import gi
 gi.require_version("Gtk", "3.0")
@@ -102,4 +104,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_acceptance(main, "Linux native recorder acceptance")

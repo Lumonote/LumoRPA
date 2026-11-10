@@ -1,7 +1,8 @@
-import { applyAgentEvent, createRunProjection, readyTopology } from "./agent-events.js";
+import { readyTopology } from "./agent-events.js";
 import { renderConfirmation, renderRunControls, runAgentControl } from "./agent-confirmation.js";
 import { renderAgentLog } from "./agent-feedback.js";
 import { mountInvocationUsage } from "./invocation-usage.js";
+import { restoreAndSubscribeAgentEvents } from "./app-events.js";
 
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const secretKey = (key) => /(token|secret|password|authorization|cookie|api.?key)/i.test(key);
@@ -134,6 +135,83 @@ async function refreshRunHistory(state) {
   }
 }
 
+export async function selectMissionControlRun(root, runId) {
+  const state = missions.get(root);
+  if (!state || typeof runId !== "string") return;
+  const selected = runId;
+  const { selector } = state;
+  const revision = ++state.selectionRevision;
+  state.selectedEvents?.dispose();
+  state.selectedEvents = null;
+  root.dataset.selectedRun = selected;
+  clearNodeSelection(root);
+  state.selectionError = "";
+  showHistoryError(state);
+  selector.setAttribute("aria-busy", "false");
+  renderHistory(state);
+  if (!selected) { renderProjection(root, state.latest); return; }
+  const cached = state.cache.get(selected);
+  if (cached) renderProjection(root, cached);
+  else {
+    projections.delete(root);
+    root.querySelector("[data-mc-topology]").innerHTML = '<div class="mc-empty">正在加载运行记录…</div>';
+    root.querySelector("[data-mc-detail]").innerHTML = "";
+    root.querySelector("[data-mc-metrics]").innerHTML = "";
+    root.querySelector("[data-mc-log]").innerHTML = "";
+    root.classList.toggle("is-replanning", false);
+  }
+  selector.setAttribute("aria-busy", "true");
+  // Reuse the main window's event subscription through a local relay. An
+  // explicitly selected run must keep advancing when another run is latest.
+  const watcher = { handler: null, controller: null, disposed: false,
+    dispose() { this.disposed = true; this.handler = null; this.controller?.unlisten(); },
+  };
+  state.selectedEvents = watcher;
+  try {
+    watcher.controller = await restoreAndSubscribeAgentEvents({
+      runId: selected, call: state.call,
+      listen: async (_name, handler) => {
+        if (!watcher.disposed) watcher.handler = handler;
+        return () => { watcher.handler = null; };
+      },
+      schedule: (render) => render(),
+      onProjection: (projection) => {
+        if (watcher.disposed || revision !== state.selectionRevision) return;
+        const fresh = state.cache.get(selected);
+        if (fresh && fresh.seq >= projection.seq) projection = fresh;
+        state.selectionError = "";
+        showHistoryError(state);
+        state.cache.set(selected, projection);
+        if (state.latest?.runId === selected) updateMissionControl(root, projection);
+        else renderProjection(root, projection);
+        renderHistory(state);
+        if (terminal(projection)) watcher.dispose();
+      },
+    });
+    if (watcher.disposed || revision !== state.selectionRevision) watcher.dispose();
+  } catch (error) {
+    if (revision !== state.selectionRevision) return;
+    state.selectionError = `加载运行记录失败：${error instanceof Error ? error.message : String(error)}`;
+    showHistoryError(state);
+  } finally {
+    if (revision === state.selectionRevision) selector.setAttribute("aria-busy", "false");
+  }
+}
+
+export async function receiveMissionControlAgentEvent(root, event) {
+  const state = missions.get(root);
+  const watcher = state?.selectedEvents;
+  if (!watcher?.handler || watcher.disposed) return;
+  const revision = state.selectionRevision;
+  try {
+    await watcher.handler({ payload: event });
+  } catch (error) {
+    if (watcher.disposed || revision !== state.selectionRevision) return;
+    state.selectionError = `同步运行记录失败：${error instanceof Error ? error.message : String(error)}`;
+    showHistoryError(state);
+  }
+}
+
 export function updateMissionControl(root, projection) {
   if (!root || !projection) return;
   const state = missions.get(root);
@@ -166,46 +244,7 @@ export function mountMissionControl(root, projection, call = async () => {}) {
   mountInvocationUsage(root, call, () => root.dataset.selectedRun || state.latest?.runId);
   root.dataset.selectedRun = "";
   renderHistory(state);
-  selector.addEventListener("change", async () => {
-    const selected = selector.value;
-    const revision = ++state.selectionRevision;
-    root.dataset.selectedRun = selected;
-    clearNodeSelection(root);
-    state.selectionError = "";
-    showHistoryError(state);
-    selector.setAttribute("aria-busy", "false");
-    renderHistory(state);
-    if (!selected) { renderProjection(root, state.latest); return; }
-    const cached = state.cache.get(selected);
-    if (cached) renderProjection(root, cached);
-    else {
-      projections.delete(root);
-      root.querySelector("[data-mc-topology]").innerHTML = '<div class="mc-empty">正在加载运行记录…</div>';
-      root.querySelector("[data-mc-detail]").innerHTML = "";
-      root.querySelector("[data-mc-metrics]").innerHTML = "";
-      root.querySelector("[data-mc-log]").innerHTML = "";
-      root.classList.toggle("is-replanning", false);
-    }
-    selector.setAttribute("aria-busy", "true");
-    try {
-      const events = await call("agent_events", { runId: selected, afterSeq: 0 });
-      if (revision !== state.selectionRevision) return;
-      let currentProjection = createRunProjection(selected);
-      for (const event of events || []) currentProjection = applyAgentEvent(currentProjection, event);
-      const fresh = state.cache.get(selected);
-      if (fresh && fresh.seq >= currentProjection.seq) currentProjection = fresh;
-      state.cache.set(selected, currentProjection);
-      if (state.latest?.runId === selected) updateMissionControl(root, currentProjection);
-      else renderProjection(root, currentProjection);
-      renderHistory(state);
-    } catch (error) {
-      if (revision !== state.selectionRevision) return;
-      state.selectionError = `加载运行记录失败：${error instanceof Error ? error.message : String(error)}`;
-      showHistoryError(state);
-    } finally {
-      if (revision === state.selectionRevision) selector.setAttribute("aria-busy", "false");
-    }
-  });
+  selector.addEventListener("change", () => selectMissionControlRun(root, selector.value));
   root.addEventListener("click", async (event) => {
     const zoom = event.target.closest("[data-mc-zoom]");
     if (zoom) {

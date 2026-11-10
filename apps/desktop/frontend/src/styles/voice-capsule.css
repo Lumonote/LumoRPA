@@ -455,7 +455,7 @@ body {
 
 @keyframes vc-waveform {
   0%, 100% { height: 2px; opacity: 0.3; }
-  50% { height: calc(2px + var(--amplitude, 2px)); opacity: 1; }
+  50% { height: calc(2px + var(--voice-level, 0) * var(--wave-scale, 3) * 1px); opacity: 1; }
 }
 
 @keyframes vc-progress-flow {
@@ -483,4 +483,190 @@ body {
   .vc-actions button {
     transition: none;
   }
+}
+
+
+/* The compact drag surface remains stable while the task composer updates. */
+main[data-voice-capsule] {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.voice-companion {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+}
+.voice-companion.is-expanded {
+  height: 100%;
+}
+.voice-companion.is-expanded .voice-capsule {
+  flex-shrink: 0;
+  width: 100%;
+}
+.vc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  border: 1px solid rgba(74, 222, 255, 0.3);
+  border-radius: 15px;
+  color: #edfaff;
+  background: linear-gradient(145deg, #0b1928, #060e18);
+  box-shadow: 0 6px 20px #0005;
+}
+.vc-panel[hidden], .vc-task-message[hidden], .vc-result[hidden], .vc-error[hidden] {
+  display: none;
+}
+.vc-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.vc-panel-heading > span {
+  color: var(--cyan);
+  font-size: 10px;
+}
+.vc-task-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  user-select: text;
+}
+.vc-task-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.vc-task-label:empty {
+  display: none;
+}
+.vc-task-message {
+  margin: 0;
+  color: #b5cddd;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.vc-result {
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  color: #d9f5ff;
+  background: #020a13;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.vc-task-actions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  flex-shrink: 0;
+}
+.vc-panel form {
+  flex-shrink: 0;
+  margin: 0;
+}
+.vc-panel button {
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid #28506a;
+  border-radius: 7px;
+  color: #c8e8f5;
+  background: #102538;
+  font-size: 10px;
+  cursor: pointer;
+}
+.vc-panel button:hover:not(:disabled) {
+  border-color: var(--cyan);
+  color: #fff;
+}
+.vc-panel button:disabled, .vc-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.vc-panel button:focus-visible, .vc-panel textarea:focus-visible, .vc-task-content:focus-visible, .vc-actions button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+.vc-panel label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.vc-panel label span {
+  color: #7896aa;
+  font-size: 10px;
+}
+.vc-panel textarea {
+  display: block;
+  width: 100%;
+  height: 50px;
+  min-height: 50px;
+  max-height: 80px;
+  resize: vertical;
+  padding: 7px;
+  border: 1px solid #2c536b;
+  border-radius: 8px;
+  color: #eefaff;
+  background: #050e18;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  user-select: text;
+}
+.vc-panel textarea::placeholder {
+  color: #6c8b9f;
+}
+.vc-compose-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.vc-compose-footer small {
+  color: #7896aa;
+  font-size: 9px;
+}
+.vc-panel button[type="submit"] {
+  min-width: 54px;
+  color: #03141e;
+  background: var(--cyan);
+  border-color: var(--cyan);
+}
+.vc-error {
+  flex-shrink: 0;
+  max-height: 48px;
+  overflow: auto;
+  margin: 0;
+  color: #ffa9b8;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.voice-companion.is-background *, .voice-companion.is-background *::before, .voice-companion.is-background *::after,
+.voice-capsule.is-idle *, .voice-capsule.is-idle::before, .voice-capsule.is-idle::after,
+.voice-capsule.is-muted *, .voice-capsule.is-muted::before, .voice-capsule.is-muted::after {
+  animation-play-state: paused !important;
 }

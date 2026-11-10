@@ -37,7 +37,7 @@ export function formatAccelerator(accelerator, macos = isMacPlatform()) {
   return parts.map((part) => table[part.toLowerCase()] || part).join(macos ? "" : "+");
 }
 
-// 语音被停掉时，胶囊会整个消失，这句话负责告诉用户怎么把它请回来。
+// 快捷键仍用于语音，顶栏入口则始终可打开文字面板。
 export function recallHint(status, macos = isMacPlatform()) {
-  return `按 ${formatAccelerator(activeVoiceShortcut(status), macos)} 或点击顶栏「语音」重新唤起`;
+  return `点击顶栏「任务助手」打开文字面板；语音输入可按 ${formatAccelerator(activeVoiceShortcut(status), macos)}`;
 }

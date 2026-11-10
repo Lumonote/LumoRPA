@@ -23,6 +23,10 @@ jobs:
       - uses: ./.github/actions/linux-deps
       - name: Install isolated desktop and native recorder prerequisites
         run: sudo apt-get install -y xvfb dbus-x11 xinput xdotool python3-gi gir1.2-atspi-2.0 gir1.2-gtk-3.0 at-spi2-core libatk-adaptor
+      - name: Verify helper focus and password boundaries
+        run: |
+          python3 -m unittest discover -s scripts -p test_linux_recorder.py -v
+          python3 -m unittest discover -s scripts -p test_acceptance_errors.py -v
       - name: Build native recorder acceptance harness
         run: cargo build -p lumo-recorder --locked --example desktop_capture
       - name: Run native capture in an isolated virtual desktop

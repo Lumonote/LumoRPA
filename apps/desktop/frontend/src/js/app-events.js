@@ -2,6 +2,18 @@ import { applyAgentEvent, createRunProjection } from "./agent-events.js";
 
 const LOG_LIMIT = 1000;
 
+export async function bindCapsuleRunNavigation({ listen, openRun, onError }) {
+  return listen("lumo://capsule-open-run", async (event) => {
+    const runId = event?.payload?.runId;
+    if (typeof runId !== "string" || !runId.trim()) return;
+    try {
+      await openRun(runId);
+    } catch (error) {
+      onError(error);
+    }
+  });
+}
+
 export function normalizeToastEvent(payload = {}) {
   const rawKind = String(payload.kind || "ok").toLowerCase();
   const kind = rawKind === "warning" ? "warn" : rawKind === "error" ? "bad" : rawKind;
@@ -36,7 +48,7 @@ export function reduceRunProgress(previous, event = {}) {
   return next;
 }
 
-export async function restoreAndSubscribeAgentEvents({ runId, call, listen, onProjection, schedule = (fn) => requestAnimationFrame(fn) }) {
+export async function restoreAndSubscribeAgentEvents({ runId, call, listen, onProjection, onEvent, schedule = (fn) => requestAnimationFrame(fn) }) {
   const followLatest = runId === "latest";
   let projection = createRunProjection(runId);
   let renderQueued = false;
@@ -99,6 +111,7 @@ export async function restoreAndSubscribeAgentEvents({ runId, call, listen, onPr
   // Listen first and buffer while restoring, closing the snapshot/subscribe
   // gap where a fast run could otherwise finish without ever being displayed.
   const stopListening = await listen("lumo://agent-event", ({ payload }) => {
+    onEvent?.(payload);
     if (!ready) { buffered.push(payload); return; }
     return enqueue(payload);
   });

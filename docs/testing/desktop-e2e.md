@@ -74,3 +74,20 @@ in [the recorder README](../../crates/lumo-recorder/README.md). Linux Tauri and
 Linux native recorder execution still require a Linux runner; no pass is
 inferred from the macOS regression suite. Representative local OCR devices can
 run [the offline accuracy and memory acceptance tool](local-ocr.md).
+
+## First Linux CI result for `ffd4bc5`
+
+The [real Chrome job](https://github.com/Lumonote/LumoRPA/actions/runs/42750642598/job/129613172325)
+passed on Ubuntu. The [Tauri job](https://github.com/Lumonote/LumoRPA/actions/runs/42750642598/job/129613172084)
+built the application but failed in the production IPC/webview acceptance step.
+The separate [Linux recorder job](https://github.com/Lumonote/LumoRPA/actions/runs/42750642631/job/129613171822)
+also built its harness and failed in native capture acceptance. These are failed
+native acceptance results, not unavailable tests or passes. Public job annotations
+only supplied exit code 1; detailed logs require GitHub sign-in, and the development
+host has neither a running Linux environment nor an authenticated GitHub CLI.
+
+Both Python entry points now publish the original exception as a GitHub Actions
+error annotation while retaining the traceback and nonzero exit status. Workflow
+command characters are escaped so page text cannot create additional annotations.
+This makes future native failures actionable from public job summaries; it does
+not establish that either outstanding native failure is fixed.

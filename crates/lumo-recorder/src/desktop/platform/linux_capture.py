@@ -21,6 +21,59 @@ def emit(kind, **payload):
         print(json.dumps({"kind": kind, "payload": payload}, ensure_ascii=False), flush=True)
 
 
+def make_accessibility_handler(Atspi, focus, emit):
+    def accessibility(event, *_user_data):
+        try:
+            focus_changed = event.type.startswith("object:state-changed:focused")
+            if focus_changed:
+                # Focus-loss events precede focus gain in another application.
+                # Never retain the old field's permission during that gap.
+                focus["safe"] = False
+            source = event.source
+            states = source.get_state_set()
+            if not states.contains(Atspi.StateType.FOCUSED):
+                return
+            role = source.get_role_name() or ""
+            name = source.get_name() or ""
+            sensitive = (source.get_role() == Atspi.Role.PASSWORD_TEXT
+                         or any(word in (role + " " + name).lower()
+                                for word in ("password", "passwd", "protected", "secure", "密码", "口令")))
+            if sensitive:
+                focus["safe"] = False
+            application = source.get_application()
+            app = application.get_name() if application is not None else ""
+            if focus_changed:
+                focus["safe"] = not sensitive
+                emit("focus_field", app=app, pid=0, window_title="", focused_role=role,
+                     focused_name=name, focused_value="")
+                return
+            if sensitive or not states.contains(Atspi.StateType.EDITABLE):
+                return
+            text = source.get_text_iface()
+            if text is None or text.get_character_count() > 262144:
+                return
+            value = text.get_text(0, -1)
+            emit("text", field=app + ":" + str(hash(source)), text=value, safe=True, replace=True,
+                 select_all="ctrl+a")
+        except Exception:
+            # Inaccessible/vanished controls fail closed: never read keystrokes
+            # as a fallback for password or custom widgets.
+            focus["safe"] = False
+            return
+
+    return accessibility
+
+
+def capture_key(key, modifiers, safe):
+    """Serialize shortcuts/navigation only, with positive focus authorization."""
+    navigation = {"enter", "esc", "tab", "backspace", "delete", "home", "end", "pageup", "pagedown",
+                  "up", "down", "left", "right"}
+    shortcut = bool(set(modifiers) & {"ctrl", "alt", "cmd"})
+    function = re.fullmatch(r"f(?:[1-9]|1[0-2])", key) is not None
+    known = (len(key) == 1 and key.isascii() and key.isalnum()) or key == "space" or key in navigation or function
+    return safe and known and (shortcut or key in navigation or function)
+
+
 def main():
     if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or not os.environ.get("DISPLAY"):
         raise RuntimeError("Desktop recording currently requires an X11 session. Wayland global recording is not supported.")
@@ -56,35 +109,7 @@ def main():
     listeners = []
     focus = {"safe": False}
 
-    def accessibility(event, *_user_data):
-        try:
-            source = event.source
-            states = source.get_state_set()
-            if not states.contains(Atspi.StateType.FOCUSED):
-                return
-            role = source.get_role_name() or ""
-            name = source.get_name() or ""
-            sensitive = any(word in (role + " " + name).lower()
-                            for word in ("password", "passwd", "protected", "secure", "密码", "口令"))
-            application = source.get_application()
-            app = application.get_name() if application is not None else ""
-            if event.type.startswith("object:state-changed:focused"):
-                focus["safe"] = not sensitive
-                emit("focus_field", app=app, pid=0, window_title="", focused_role=role,
-                     focused_name=name, focused_value="")
-                return
-            if sensitive or not states.contains(Atspi.StateType.EDITABLE):
-                return
-            text = source.get_text_iface()
-            if text is None or text.get_character_count() > 262144:
-                return
-            value = text.get_text(0, -1)
-            emit("text", field=app + ":" + str(hash(source)), text=value, safe=True, replace=True,
-                 select_all="ctrl+a")
-        except Exception:
-            # Inaccessible/vanished controls fail closed: never read keystrokes
-            # as a fallback for password or custom widgets.
-            return
+    accessibility = make_accessibility_handler(Atspi, focus, emit)
 
     for event_name in ("object:text-changed", "object:state-changed:focused"):
         listener = Atspi.EventListener.new(accessibility)
@@ -122,6 +147,8 @@ def main():
                      x=float(point.group(1)), y=float(point.group(2)))
             return
         # Capture shortcuts/navigation only. Text is exclusively AT-SPI data.
+        if not focus["safe"]:
+            return
         effective = re.search(r"effective:\s*(0x[0-9a-fA-F]+|\d+)", data)
         mask = int(effective.group(1), 0) if effective else 0
         modifiers = [name for flag, name in ((1, "shift"), (4, "ctrl"), (8, "alt"), (64, "cmd")) if mask & flag]
@@ -130,8 +157,8 @@ def main():
             return
         symbol = symbol.decode("ascii", "ignore")
         key = aliases.get(symbol, symbol.lower())
-        if (len(key) == 1 and key.isalnum()) or key in aliases.values() or re.fullmatch(r"f(?:[1-9]|1[0-2])", key):
-            emit("key", key=key, modifiers=modifiers, secure=not focus["safe"])
+        if capture_key(key, modifiers, focus["safe"]):
+            emit("key", key=key, modifiers=modifiers, secure=False)
 
     def read_input():
         block = []

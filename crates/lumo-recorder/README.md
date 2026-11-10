@@ -63,3 +63,17 @@ recording; verify no listener/helper process remains. On Linux also check that a
 Wayland or missing-AT-SPI session fails with the actionable startup error.
 Real desktop acceptance needs an interactive session and OS permissions; unit
 tests do not establish native platform input accuracy.
+
+Linux helper privacy contracts also run without an X server:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_linux_recorder.py -v
+```
+
+These cover loss of focus, inaccessible controls, localized password roles,
+Unicode edits, deletion and excluding literal/unknown keyboard symbols. The
+helper revokes a previous field's authorization as soon as focus is lost and
+never sends printable raw keys to the Rust process. Native Linux CI for commit
+`ffd4bc5` built successfully but failed in capture acceptance; see
+[the recorded Linux result](../../docs/testing/desktop-e2e.md#first-linux-ci-result-for-ffd4bc5)
+for evidence and current diagnostic limitations.

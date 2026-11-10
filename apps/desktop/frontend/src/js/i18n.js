@@ -46,6 +46,12 @@ const zhCN = {
   "nav.features": "能力地图",
   "nav.capability_hub": "能力中枢",
   "nav.settings": "设置",
+  "nav.task_assistant": "任务助手",
+  "companion.open_hint": "打开 Lumo 任务助手 · 文字输入无需麦克风 · {voice} · 悬浮窗可拖动",
+  "companion.voice_shortcut": "语音输入快捷键",
+  "companion.voice_disabled": "语音已关闭，文字仍可用",
+  "companion.microphone_blocked": "麦克风不可用，文字仍可用",
+  "companion.open_failed": "无法打开任务助手",
 
   // ── 能力中枢 ──────────────────────────────────────────────────────────
   "hub.kicker": "LUMO 控制平面 / 01",
@@ -211,6 +217,12 @@ const en = {
   "nav.features": "Capability Map",
   "nav.capability_hub": "Capability Hub",
   "nav.settings": "Settings",
+  "nav.task_assistant": "Task assistant",
+  "companion.open_hint": "Open Lumo task assistant · Text input needs no microphone · {voice} · Drag the floating window to move it",
+  "companion.voice_shortcut": "Voice input shortcut",
+  "companion.voice_disabled": "Voice is disabled; text remains available",
+  "companion.microphone_blocked": "Microphone unavailable; text remains available",
+  "companion.open_failed": "Unable to open task assistant",
 
   "hub.kicker": "LUMO CONTROL PLANE / 01",
   "hub.title": "Capability Hub",

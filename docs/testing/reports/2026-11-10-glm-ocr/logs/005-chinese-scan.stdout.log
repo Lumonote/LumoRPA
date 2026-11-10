@@ -1,0 +1,33 @@
+2026-11-10T04:31:07.592203Z  WARN provider `acceptance-local`: unknown kind `local`, skipping
+2026-11-10T04:31:07.593947Z  WARN provider `acceptance-local`: unknown kind `local`, skipping
+
+✓ run=01M71VJQA9AS6442PP2SQQXV5E state=ok steps_ok=1 executed=1 declared=1 skipped=0 retried=0 caught=0 failed=0 duration=3669ms
+outputs: {
+  "recognize": {
+    "result": {
+      "text": "自动化任务验收\n订单编号：LUMO20261110\n商品数量：12\n合计金额：1280.50元",
+      "lines": [
+        {
+          "text": "自动化任务验收",
+          "confidence": 0.75
+        },
+        {
+          "text": "订单编号：LUMO20261110",
+          "confidence": 0.75
+        },
+        {
+          "text": "商品数量：12",
+          "confidence": 0.75
+        },
+        {
+          "text": "合计金额：1280.50元",
+          "confidence": 0.75
+        }
+      ],
+      "engine": "ocrlocal",
+      "source": "ocr_local",
+      "left_machine": false,
+      "low_confidence_lines": 0
+    }
+  }
+}

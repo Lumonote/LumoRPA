@@ -19,6 +19,8 @@ import time
 import urllib.error
 import urllib.request
 
+from acceptance_errors import run_acceptance
+
 
 class WebDriverError(RuntimeError):
     pass
@@ -337,4 +339,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_acceptance(main, "Tauri native acceptance")

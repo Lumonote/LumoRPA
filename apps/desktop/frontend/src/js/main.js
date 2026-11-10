@@ -42,9 +42,9 @@ import { openFlowHistory } from "./flow-history.js";
 import { mountCapabilityHub } from "./capability-hub.js";
 import { createJobScheduler } from "./job-scheduler.js";
 import { applyStaticTranslations, subscribeLocale } from "./i18n.js";
-import { mountMissionControl, refreshVoiceHistory, updateMissionControl } from "./mission-control.js";
+import { mountMissionControl, receiveMissionControlAgentEvent, refreshVoiceHistory, selectMissionControlRun, updateMissionControl } from "./mission-control.js";
 import { mountVoiceLauncher } from "./voice-launcher.js";
-import { normalizeToastEvent, restoreAndSubscribeAgentEvents } from "./app-events.js";
+import { bindCapsuleRunNavigation, normalizeToastEvent, restoreAndSubscribeAgentEvents } from "./app-events.js";
 import { createDraftController, observeEditorState, handleEditorExit, chooseEditorAction } from "./editor-drafts.js";
 
 let bootStarted = false;
@@ -69,6 +69,19 @@ async function bindAppEvents() {
         switchTopView(view);
         document.querySelector(`[data-view="${CSS.escape(view)}"]`)?.click();
       }
+    });
+    await bindCapsuleRunNavigation({
+      listen,
+      openRun: async (runId) => {
+        document.querySelector('.tabs .tab[data-view="mission-control"]')?.click();
+        const mission = $("missionControlView");
+        if (!state.missionControlMounted) {
+          mountMissionControl(mission, state.agentProjection, call);
+          state.missionControlMounted = true;
+        }
+        await selectMissionControlRun(mission, runId);
+      },
+      onError: reportError,
     });
     await listen("lumo://editor-exit-request", async (event) => {
       const request = event?.payload;
@@ -505,7 +518,9 @@ async function boot() {
   ensureHumanPromptListener();
   await bindAppEvents();
   const agentListen = window.__TAURI__?.event?.listen;
-  if (agentListen) restoreAndSubscribeAgentEvents({ runId: "latest", call, listen: agentListen, onProjection: (projection) => {
+  if (agentListen) restoreAndSubscribeAgentEvents({ runId: "latest", call, listen: agentListen, onEvent: (event) => {
+    if (state.missionControlMounted) void receiveMissionControlAgentEvent($("missionControlView"), event);
+  }, onProjection: (projection) => {
     state.agentProjection = projection;
     if (state.missionControlMounted) updateMissionControl($("missionControlView"), projection);
   } }).catch(() => {});

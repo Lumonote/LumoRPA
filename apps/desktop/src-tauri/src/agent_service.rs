@@ -83,17 +83,7 @@ impl TauriDesktopAgentEventEmitter {
 impl DesktopAgentEventEmitter for TauriDesktopAgentEventEmitter {
     fn emit(&self, event: &AgentEvent) {
         let _ = self.app.emit("lumo://agent-event", event);
-        match event.kind {
-            AgentEventKind::RunCompleted => {
-                super::voice_commands::record_agent_outcome(&self.app, "任务执行完成");
-                super::voice_commands::announce_agent_status(&self.app, "任务执行完成")
-            }
-            AgentEventKind::RunFailed => {
-                super::voice_commands::record_agent_outcome(&self.app, "任务执行失败");
-                super::voice_commands::announce_agent_status(&self.app, "任务执行失败")
-            }
-            _ => {}
-        }
+        super::capsule_commands::observe_agent_event(&self.app, event);
     }
 }
 
@@ -206,13 +196,24 @@ impl DesktopAgentService {
         }
     }
 
+    #[cfg(test)]
     pub async fn start(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
-        self.start_inner(input, true, None).await
+        self.start_inner(input, true, None, CancelToken::new())
+            .await
+    }
+
+    pub(super) async fn start_cancellable(
+        &self,
+        input: AgentStartInput,
+        cancel: CancelToken,
+    ) -> Result<AgentExecution, String> {
+        self.start_inner(input, true, None, cancel).await
     }
 
     #[cfg(test)]
     pub async fn start_background(&self, input: AgentStartInput) -> Result<AgentExecution, String> {
-        self.start_inner(input, false, None).await
+        self.start_inner(input, false, None, CancelToken::new())
+            .await
     }
 
     pub(super) async fn start_job(
@@ -221,8 +222,13 @@ impl DesktopAgentService {
         job: AgentJobRow,
         worker_id: &str,
     ) -> Result<AgentExecution, String> {
-        self.start_inner(input, false, Some((job, worker_id.into())))
-            .await
+        self.start_inner(
+            input,
+            false,
+            Some((job, worker_id.into())),
+            CancelToken::new(),
+        )
+        .await
     }
 
     pub(super) async fn publish_event(&self, draft: AgentEventDraft) -> Result<(), String> {
@@ -433,22 +439,36 @@ impl DesktopAgentService {
         input: AgentStartInput,
         interactive: bool,
         job: Option<(AgentJobRow, String)>,
+        cancel: CancelToken,
     ) -> Result<AgentExecution, String> {
+        if cancel.is_cancelled() {
+            return Err("agent planning was cancelled".into());
+        }
         let utterance = input.utterance.trim();
         if utterance.is_empty() {
             return Err("agent utterance must not be empty".into());
         }
-        let catalog = self.factory.catalog(input.profile_id.as_deref()).await?;
-        let profile = self.factory.profile(input.profile_id.as_deref()).await?;
-        let adapters = self.factory.adapters(&profile).await?;
+        let catalog =
+            cancellable_preparation(&cancel, self.factory.catalog(input.profile_id.as_deref()))
+                .await?;
+        let profile =
+            cancellable_preparation(&cancel, self.factory.profile(input.profile_id.as_deref()))
+                .await?;
+        let adapters = cancellable_preparation(&cancel, self.factory.adapters(&profile)).await?;
         let mut plan = match input.supplied_plan {
             Some(plan) => plan,
             None => {
-                self.factory
-                    .plan(utterance, &input.conversation_context, &catalog, &profile)
-                    .await?
+                cancellable_preparation(
+                    &cancel,
+                    self.factory
+                        .plan(utterance, &input.conversation_context, &catalog, &profile),
+                )
+                .await?
             }
         };
+        if cancel.is_cancelled() {
+            return Err("agent planning was cancelled".into());
+        }
         if let Some((job, _)) = &job {
             plan.metadata.insert("jobId".into(), job.id.clone().into());
         }
@@ -471,7 +491,7 @@ impl DesktopAgentService {
         if !plan.metadata.contains_key(lumo_agent::SOURCE_SNAPSHOTS_KEY)
             && job.as_ref().is_none_or(|(job, _)| job.run_id.is_none())
         {
-            self.factory.pin_sources(&mut plan, &catalog).await?;
+            cancellable_preparation(&cancel, self.factory.pin_sources(&mut plan, &catalog)).await?;
         }
         if let Some(versions) = plan.metadata.get("capabilityVersions") {
             let versions = versions
@@ -578,7 +598,6 @@ impl DesktopAgentService {
             }
         }
 
-        let cancel = CancelToken::new();
         let control = interactive.then(AgentRunControl::default);
         let mut engine = LoopEngine::new(catalog, profile.clone(), adapters)
             .with_usage_ledger(self.repo.clone())
@@ -647,6 +666,19 @@ impl DesktopAgentService {
                     .payload(json!({ "plan": plan })),
             )
             .await
+    }
+}
+
+/// Only use before the first durable mutation. Dropping an in-progress
+/// persistent start would leave a run record without its executor.
+async fn cancellable_preparation<T>(
+    cancel: &CancelToken,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("agent planning was cancelled".into()),
+        result = operation => result,
     }
 }
 
@@ -1497,6 +1529,117 @@ spec:
         assert_eq!(state, "completed");
         assert!(finished_at.is_some());
         assert!(error.is_none());
+    }
+
+    #[tokio::test]
+    async fn companion_cancel_racing_with_persisted_start_never_dispatches_a_node() {
+        struct CancelOnPlan(CancelToken);
+        impl DesktopAgentEventEmitter for CancelOnPlan {
+            fn emit(&self, event: &AgentEvent) {
+                if event.kind == AgentEventKind::PlanCreated {
+                    self.0.cancel();
+                }
+            }
+        }
+        let repo = Repo::open_in_memory().unwrap();
+        let cancel = CancelToken::new();
+        let service = DesktopAgentService::new(
+            Arc::new(FakeFactory::new()),
+            repo.clone(),
+            Arc::new(CancelOnPlan(cancel.clone())),
+        );
+        let execution = service
+            .start_cancellable(
+                AgentStartInput {
+                    utterance: "运行日报".into(),
+                    profile_id: None,
+                    supplied_plan: None,
+                    conversation_id: None,
+                    conversation_context: Vec::new(),
+                },
+                cancel,
+            )
+            .await
+            .unwrap();
+        let run_id = execution.run_id().to_string();
+        assert_eq!(
+            execution.wait().await.unwrap().status,
+            LoopStatus::Cancelled
+        );
+        let events = repo.list_agent_events(&run_id, 0).unwrap();
+        assert!(!events.iter().any(|event| event.kind == "node.started"));
+        assert!(events.iter().any(|event| event.kind == "run.cancelled"));
+    }
+
+    #[tokio::test]
+    async fn companion_cancel_interrupts_a_pending_planner_without_persisting_a_run() {
+        struct WaitingPlanner {
+            factory: FakeFactory,
+            entered: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl DesktopAgentFactory for WaitingPlanner {
+            async fn catalog(&self, profile_id: Option<&str>) -> Result<CapabilityCatalog, String> {
+                self.factory.catalog(profile_id).await
+            }
+            async fn profile(&self, profile_id: Option<&str>) -> Result<AgentProfile, String> {
+                self.factory.profile(profile_id).await
+            }
+            async fn adapters(&self, profile: &AgentProfile) -> Result<AdapterRegistry, String> {
+                self.factory.adapters(profile).await
+            }
+            async fn plan(
+                &self,
+                _utterance: &str,
+                _context: &[String],
+                _catalog: &CapabilityCatalog,
+                _profile: &AgentProfile,
+            ) -> Result<AgentPlan, String> {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+        let repo = Repo::open_in_memory().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let service = DesktopAgentService::new(
+            Arc::new(WaitingPlanner {
+                factory: FakeFactory::new(),
+                entered: entered.clone(),
+            }),
+            repo.clone(),
+            Arc::new(NoopDesktopAgentEventEmitter),
+        );
+        let cancel = CancelToken::new();
+        let start_cancel = cancel.clone();
+        let start = tokio::spawn(async move {
+            service
+                .start_cancellable(
+                    AgentStartInput {
+                        utterance: "运行日报".into(),
+                        profile_id: None,
+                        supplied_plan: None,
+                        conversation_id: None,
+                        conversation_context: Vec::new(),
+                    },
+                    start_cancel,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), start)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(error) if error.contains("cancelled")));
+        let persisted: i64 = repo
+            .with_raw(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM agent_runs", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(persisted, 0);
     }
 
     fn approval_input() -> AgentStartInput {

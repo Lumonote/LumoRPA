@@ -1,0 +1,2 @@
+# Preserve the small, synthetic-document evidence beside its captured report.
+!logs/*.log

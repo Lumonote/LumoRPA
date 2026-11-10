@@ -33,6 +33,7 @@ use tauri::{
 mod agent_commands;
 mod agent_management_commands;
 mod agent_service;
+mod capsule_commands;
 mod desktop_update_commands;
 mod dto;
 mod element_library;
@@ -71,6 +72,10 @@ use agent_management_commands::{
     reject_improvement, rollback_improvement,
 };
 use agent_service::DesktopAgentService;
+use capsule_commands::{
+    capsule_control, capsule_resize, capsule_status, capsule_submit_text, setup_capsule_host,
+    CapsuleRuntime,
+};
 use desktop_update_commands::{
     desktop_update_check, desktop_update_install, desktop_update_restart, desktop_update_status,
 };
@@ -1318,6 +1323,7 @@ pub fn run() {
             setup_job_worker(&handle).map_err(|error| anyhow::anyhow!(error))?;
             setup_voice_host(&handle).map_err(|error| anyhow::anyhow!(error))?;
             setup_voice_daemon(&handle).map_err(|error| anyhow::anyhow!(error))?;
+            setup_capsule_host(&handle).map_err(|error| anyhow::anyhow!(error))?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1421,6 +1427,10 @@ pub fn run() {
             voice_stop,
             voice_toggle,
             capsule_expand,
+            capsule_status,
+            capsule_submit_text,
+            capsule_control,
+            capsule_resize,
             voice_devices,
             voice_daemon_status,
             voice_daemon_set_enabled,

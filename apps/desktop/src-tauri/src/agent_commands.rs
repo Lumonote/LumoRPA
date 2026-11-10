@@ -47,7 +47,7 @@ pub(super) struct DesktopAgentRuntime {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AgentSessionDto {
-    run_id: String,
+    pub(super) run_id: String,
     state: AgentRuntimeState,
     paused: bool,
     approval: Option<Value>,
@@ -97,14 +97,12 @@ pub(super) fn setup_agent_service(app: &AppHandle) -> Result<(), String> {
         let app = listener_app.clone();
         tauri::async_runtime::spawn(async move {
             let result = match input {
-                Ok(input) => {
-                    let state = app.state::<DesktopState>();
-                    start_agent_request(&state, input).await.map(|_| ())
-                }
+                Ok(input) => super::capsule_commands::start_companion_request(&app, input, "voice")
+                    .await
+                    .map(|_| ()),
                 Err(error) => Err(format!("invalid agent start request: {error}")),
             };
             if let Err(error) = result {
-                super::voice_commands::report_agent_start_failure(&app, &error);
                 let _ = app.emit("lumo://agent-start-failed", json!({ "error": error }));
             }
         });
@@ -112,9 +110,17 @@ pub(super) fn setup_agent_service(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-async fn start_agent_request(
+pub(super) async fn start_agent_request(
     state: &DesktopState,
     input: AgentStartInput,
+) -> Result<AgentSessionDto, String> {
+    start_agent_request_cancellable(state, input, CancelToken::new()).await
+}
+
+pub(super) async fn start_agent_request_cancellable(
+    state: &DesktopState,
+    input: AgentStartInput,
+    cancel: CancelToken,
 ) -> Result<AgentSessionDto, String> {
     let service = state
         .agent_service
@@ -122,7 +128,7 @@ async fn start_agent_request(
         .map_err(|_| "desktop agent service is unavailable".to_string())?
         .clone()
         .ok_or_else(|| "desktop agent service is not initialized".to_string())?;
-    let execution = service.start(input).await?;
+    let execution = service.start_cancellable(input, cancel).await?;
     let (run_id, plan, cancel, control) = execution.into_session_parts();
     let mut runtime = lock_runtime(state)?;
     start_session(&mut runtime, run_id, plan, cancel, control)
@@ -558,6 +564,22 @@ fn cancel_session(
     Ok(session_dto(run_id, session))
 }
 
+/// Companion controls only have authority over their explicitly associated run.
+pub(super) fn cancel_agent_session(
+    state: &DesktopState,
+    run_id: &str,
+) -> Result<AgentSessionDto, String> {
+    let mut runtime = lock_runtime(state)?;
+    let session = require_session(&mut runtime, run_id)?;
+    if matches!(
+        session_state(session),
+        AgentRuntimeState::Completed | AgentRuntimeState::Failed | AgentRuntimeState::Cancelled
+    ) {
+        return Ok(session_dto(run_id, session));
+    }
+    cancel_session(&mut runtime, run_id)
+}
+
 #[cfg(test)]
 fn approve_session(
     runtime: &mut DesktopAgentRuntime,
@@ -842,6 +864,31 @@ mod tests {
             assert!(pause_session(&mut runtime, "run-1").is_err());
             assert!(resume_session(&mut runtime, "run-1").is_err());
             assert!(cancel_session(&mut runtime, "run-1").is_err());
+        }
+    }
+
+    #[test]
+    fn cancelling_one_companion_session_preserves_unrelated_agent_sessions() {
+        let state = DesktopState::default();
+        for id in ["companion", "mission-control", "other"] {
+            start_session(
+                &mut lock_runtime(&state).unwrap(),
+                id.into(),
+                plan(RiskLevel::L0),
+                CancelToken::new(),
+                Some(AgentRunControl::default()),
+            )
+            .unwrap();
+        }
+        cancel_agent_session(&state, "companion").unwrap();
+        let runtime = lock_runtime(&state).unwrap();
+        assert!(runtime.sessions["companion"].cancel.is_cancelled());
+        for id in ["mission-control", "other"] {
+            assert!(!runtime.sessions[id].cancel.is_cancelled());
+            assert_eq!(
+                session_state(&runtime.sessions[id]),
+                AgentRuntimeState::Running
+            );
         }
     }
 

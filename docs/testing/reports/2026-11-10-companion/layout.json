@@ -1,0 +1,236 @@
+[
+  {
+    "scenario": "idle",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 107,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  },
+  {
+    "scenario": "completed",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 107,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  },
+  {
+    "scenario": "long-result",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 1079,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  },
+  {
+    "scenario": "long-result-scrolled",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 1079,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  },
+  {
+    "scenario": "failed",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 107,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  },
+  {
+    "scenario": "final-completed",
+    "actions": {
+      "bottom": 257,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 19,
+      "right": 371,
+      "top": 229,
+      "width": 352
+    },
+    "content": {
+      "height": 107,
+      "scrollHeight": 107,
+      "scrollWidth": 352,
+      "width": 352
+    },
+    "height": 390,
+    "injectedElements": 0,
+    "input": {
+      "bottom": 337,
+      "fullyVisible": true,
+      "height": 50,
+      "left": 19,
+      "right": 371,
+      "top": 287,
+      "width": 352
+    },
+    "send": {
+      "bottom": 371,
+      "fullyVisible": true,
+      "height": 28,
+      "left": 317,
+      "right": 371,
+      "top": 343,
+      "width": 54
+    },
+    "width": 390
+  }
+]
