@@ -92,14 +92,116 @@ export function childStepBlocks(step) {
   return blocks;
 }
 
-export function walkSteps(steps, cb, parent = null, depth = 0) {
+export function walkSteps(steps, cb, parent = null, depth = 0, ancestors = new Set()) {
+  if (!Array.isArray(steps)) throw new Error("流程 steps 必须是步骤列表");
   steps.forEach((step, idx) => {
+    if (ancestors.has(step)) throw new Error("流程包含循环 YAML 引用，请先展开后编辑");
     const path = parent ? [...parent, idx] : [idx];
     cb(step, { parent, idx, depth, path });
+    const nextAncestors = new Set([...ancestors, step]);
     childStepBlocks(step).forEach((block) => {
-      walkSteps(block.steps, cb, [...path, ...block.path], depth + 1);
+      walkSteps(block.steps, cb, [...path, ...block.path], depth + 1, nextAncestors);
     });
   });
+}
+
+// Retain scalar positions as well as object positions. This lets identity edits
+// change only actual YAML values, leaving comments and unrelated text intact.
+function yamlDocument(source) {
+  const stack = [], spans = new WeakMap();
+  let root;
+  const ast = loadYaml(source, { listener(event, item) {
+    if (event === "open") stack.push({ start: item.position, children: [] });
+    else {
+      const node = stack.pop();
+      Object.assign(node, { end: Math.min(item.position, source.length), kind: item.kind, value: item.result });
+      if (node.value && typeof node.value === "object") spans.set(node.value, node);
+      if (stack.length) stack.at(-1).children.push(node); else root = node;
+    }
+  } });
+  return { ast, root, spans };
+}
+
+/** Rewrite static steps.foo / steps['foo'] lookups, excluding quoted literals. */
+export function rewriteStepExpression(expression, renames) {
+  let result = "", quote = null;
+  for (let index = 0; index < expression.length;) {
+    const character = expression[index];
+    if (quote) {
+      result += character; index++;
+      if (character === "\\" && index < expression.length) result += expression[index++];
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") { quote = character; result += character; index++; continue; }
+    if (expression.startsWith("steps", index) && !/[\w.$]/.test(expression[index - 1] || "")) {
+      const access = /^steps\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*\])/.exec(expression.slice(index));
+      if (access) {
+        let id = access[1];
+        if (id === undefined) {
+          try { id = access[2][0] === '"' ? JSON.parse(access[2]) : access[2].slice(1, -1).replace(/\\(['\\])/g, "$1"); }
+          catch { id = null; }
+        }
+        if (renames.has(id)) {
+          const next = renames.get(id);
+          result += access[1] && /^[A-Za-z_][A-Za-z0-9_]*$/.test(next) ? `steps.${next}` : `steps[${JSON.stringify(next)}]`;
+          index += access[0].length; continue;
+        }
+      }
+    }
+    result += character; index++;
+  }
+  return result;
+}
+
+function rewriteYamlStepValues(source, renames, { renameIds = false, stepsRoot = false } = {}) {
+  if (!renames.size) return source;
+  const { ast, root } = yamlDocument(source);
+  const steps = stepsRoot ? ast : extractSteps(ast);
+  const stepObjects = new Set(), conditions = new Set();
+  walkSteps(steps, (step) => {
+    stepObjects.add(step);
+    if (["control.if", "control.while"].includes(step?.action) && step.with && typeof step.with === "object") conditions.add(step.with);
+  });
+  const edits = [];
+  const visit = (node, parent, key) => {
+    if (node.children.length === 1 && node.children[0].value === node.value && ["mapping", "sequence"].includes(node.kind)) visit(node.children[0], parent, key);
+    else if (node.kind === "mapping") {
+      for (let index = 0; index + 1 < node.children.length; index += 2) visit(node.children[index + 1], node.value, node.children[index].value);
+    } else if (node.kind === "sequence") node.children.forEach((child, index) => visit(child, node.value, index));
+    else if (typeof node.value === "string") {
+      const bare = stepObjects.has(parent) && key === "when" || conditions.has(parent) && key === "cond";
+      const next = renameIds && stepObjects.has(parent) && key === "id" && renames.has(node.value)
+        ? renames.get(node.value)
+        : bare && !node.value.includes("{{") ? rewriteStepExpression(node.value, renames)
+          : node.value.replace(/\{\{([\s\S]*?)\}\}/g, (_all, expression) => `{{${rewriteStepExpression(expression, renames)}}}`);
+      if (next === node.value) return;
+      let start = node.start, end = node.end;
+      while (start < end && /\s/.test(source[start])) start++;
+      while (end > start && /\s/.test(source[end - 1])) end--;
+      edits.push({ start, end, text: renameIds && stepObjects.has(parent) && key === "id" ? yamlScalar(next) : JSON.stringify(next) });
+    }
+  };
+  visit(root, null, null);
+  let result = source;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+  loadYaml(result);
+  return result;
+}
+
+/** Apply the node form and migrate its static references as one source edit. */
+export function mutateStepWithReferences(source, path, patch) {
+  const steps = extractSteps(parseYaml(source));
+  const original = findStepByPath(steps, path);
+  if (!original) throw new Error("选中的节点已不存在，请重新选择");
+  const renamed = original.id !== patch.id;
+  if (renamed) {
+    let oldCount = 0, newCount = 0;
+    walkSteps(steps, (step) => { if (step.id === original.id) oldCount++; if (step.id === patch.id) newCount++; });
+    if (oldCount !== 1 || newCount) throw new Error("重命名需要唯一的节点 ID，请先修复重复 ID");
+  }
+  const updated = mutateStepAtPath(source, path, patch);
+  return renamed ? rewriteYamlStepValues(updated, new Map([[original.id, patch.id]])) : updated;
 }
 
 export function findStepByPath(steps, path) {
@@ -471,10 +573,6 @@ export function yamlInline(v) {
 // All operate on the YAML source text so comments inside untouched regions
 // survive, mirroring the mutation helpers above.
 
-function escapeRegExp(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Every step id in the flow, including nested do/else/catch/finally/branches. */
 export function collectStepIds(source) {
   const ids = new Set();
@@ -488,7 +586,11 @@ export function collectStepIds(source) {
 export function extractStepBlock(source, id) {
   const lines = source.split(/\r?\n/);
   const range = findStepRange(lines, id);
-  if (!range) return null;
+  if (!range) {
+    const matches = [];
+    walkSteps(extractSteps(parseYaml(source)), (step) => { if (step.id === id) matches.push(step); });
+    return matches.length === 1 ? { text: dumpYaml(matches, { noRefs: true, lineWidth: -1 }), baseIndent: 0 } : null;
+  }
   const text = lines
     .slice(range.startIdx, range.endIdx)
     .map((l) => (l.trim() === "" ? "" : l.slice(range.baseIndent)))
@@ -497,35 +599,47 @@ export function extractStepBlock(source, id) {
   return { text, baseIndent: range.baseIndent };
 }
 
+export function extractStepBlockAtPath(source, path) {
+  const steps = extractSteps(parseYaml(source));
+  const step = findStepByPath(steps, path);
+  if (!step) return null;
+  let occurrences = 0;
+  walkSteps(steps, (candidate) => { if (candidate.id === step.id) occurrences++; });
+  return occurrences === 1 ? extractStepBlock(source, step.id)
+    : { text: dumpYaml([step], { noRefs: true, lineWidth: -1 }), baseIndent: 0 };
+}
+
+function clipboardRenames(stepLists, existingIds) {
+  const taken = new Set(existingIds), seen = new Set(), renames = new Map();
+  for (const steps of stepLists) walkSteps(steps, (step) => {
+    if (!step || typeof step.id !== "string" || !step.id.trim()) throw new Error("复制内容包含无效节点 ID");
+    if (seen.has(step.id)) throw new Error("复制内容包含重复节点 ID，无法安全迁移内部引用");
+    seen.add(step.id);
+  });
+  for (const steps of stepLists) walkSteps(steps, (step) => {
+    const id = step.id;
+    let next = id;
+    if (taken.has(id)) {
+      const base = id.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "step";
+      let number = 1;
+      while (taken.has(`${base}_c${number}`) || seen.has(`${base}_c${number}`)) number++;
+      next = `${base}_c${number}`;
+      renames.set(id, next);
+    }
+    taken.add(next);
+  });
+  return renames;
+}
+
 /**
  * Rename ids in a dedented block that collide with `existingIds` (nested ids
  * too), and rewrite `steps.<oldId>` template references inside the block so a
  * pasted copy keeps referring to its own steps. Returns { text, renames }.
  */
 export function uniquifyStepIds(blockText, existingIds) {
-  const taken = new Set(existingIds);
-  const renames = new Map();
-  const lines = blockText.split("\n").map((line) => {
-    const m = line.match(/^(\s*-\s+id:\s*)("([^"]*)"|'([^']*)'|[^#]*?)(\s*(?:#.*)?)$/);
-    if (!m) return line;
-    const rawId = (m[3] ?? m[4] ?? m[2]).trim();
-    if (!rawId) return line;
-    if (!taken.has(rawId)) {
-      taken.add(rawId);
-      return line;
-    }
-    const base = rawId.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "step";
-    let n = 1;
-    while (taken.has(`${base}_c${n}`)) n++;
-    const newId = `${base}_c${n}`;
-    taken.add(newId);
-    renames.set(rawId, newId);
-    return `${m[1]}${yamlScalar(newId)}${m[5] || ""}`;
-  });
-  let text = lines.join("\n");
-  for (const [oldId, newId] of renames) {
-    text = text.replace(new RegExp(`\\bsteps\\.${escapeRegExp(oldId)}\\b`, "g"), `steps.${newId}`);
-  }
+  const steps = loadYaml(blockText);
+  const renames = clipboardRenames([steps], existingIds);
+  const text = rewriteYamlStepValues(blockText, renames, { renameIds: true, stepsRoot: true });
   return { text, renames };
 }
 
@@ -542,41 +656,72 @@ export function insertStepBlockAfter(source, targetId, blockText) {
   return lines.slice(0, range.endIdx).concat(blockLines).concat(lines.slice(range.endIdx)).join("\n");
 }
 
-function topStepIdOfBlock(blockText) {
-  const m = blockText.match(/^\s*-\s+id:\s*("([^"]*)"|'([^']*)'|\S+)/);
-  if (!m) return null;
-  return (m[2] ?? m[3] ?? m[1]).trim();
-}
-
 /**
  * Paste `blocks` (dedented step blocks) in order after `targetId`; a null
  * target appends after the last top-level step. Colliding ids are renamed
  * before each insert.
  */
 export function insertStepBlocks(source, targetId, blocks) {
-  let out = source;
-  let anchor = targetId;
-  if (anchor == null) {
-    const steps = extractSteps(parseYaml(out));
-    anchor = steps.length ? String(steps[steps.length - 1].id) : null;
+  let targetPath = null;
+  if (targetId != null) {
+    const paths = [];
+    walkSteps(extractSteps(parseYaml(source)), (step, info) => { if (String(step.id) === targetId) paths.push(info.path); });
+    if (paths.length !== 1) throw new Error("粘贴目标不存在或 ID 不唯一，请重新选择节点");
+    [targetPath] = paths;
   }
-  for (const block of blocks) {
-    const { text } = uniquifyStepIds(block, collectStepIds(out));
-    const topId = topStepIdOfBlock(text);
-    if (!topId) continue;
-    let next = anchor == null ? null : insertStepBlockAfter(out, anchor, text);
-    if (next == null) {
-      const pad = " ".repeat(4);
-      const blockLines = text
-        .replace(/\n+$/, "")
-        .split("\n")
-        .map((l) => (l === "" ? "" : pad + l));
-      next = out.replace(/\n*$/, "\n") + blockLines.join("\n") + "\n";
+  return planStepBlockInsertion(source, targetPath, blocks).source;
+}
+
+/** Plan one insertion for the complete selection, with one shared ID mapping. */
+export function planStepBlockInsertion(source, targetPath, blocks) {
+  const document = yamlDocument(source), ast = document.ast || {};
+  const steps = extractSteps(ast);
+  const lists = blocks.map((block) => loadYaml(block));
+  const renames = clipboardRenames(lists, collectStepIds(source));
+  const texts = blocks.map((block) => rewriteYamlStepValues(block, renames, { renameIds: true, stepsRoot: true }));
+  const inserted = texts.flatMap((text) => loadYaml(text));
+  if (!inserted.length) return { source, insertedCount: 0, ids: [] };
+  const list = targetPath ? targetPath.slice(0, -1).reduce((value, part) => value?.[part], steps) : steps;
+  if (!Array.isArray(list) || targetPath && !findStepByPath(steps, targetPath)) throw new Error("粘贴目标已不存在，请重新选择节点");
+  const index = targetPath ? targetPath.at(-1) + 1 : list.length;
+  const expected = [...list.slice(0, index), ...inserted, ...list.slice(index)];
+  const ids = inserted.map((step) => step.id);
+  const matches = (candidate) => {
+    try {
+      const nextSteps = extractSteps(parseYaml(candidate));
+      const nextList = targetPath ? targetPath.slice(0, -1).reduce((value, part) => value?.[part], nextSteps) : nextSteps;
+      return JSON.stringify(nextList) === JSON.stringify(expected);
+    } catch { return false; }
+  };
+  const span = document.spans.get(list);
+  if (!span) {
+    if (targetPath || steps.length) throw new Error("无法定位步骤列表，请先展开 YAML 引用");
+    const next = { ...ast, spec: { ...ast.spec, steps: inserted } };
+    return { source: dumpYaml(next, { noRefs: true, lineWidth: -1 }), insertedCount: inserted.length, ids };
+  }
+  let start = span.start, end = span.end;
+  while (start < end && /\s/.test(source[start])) start++;
+  while (end > start && /\s/.test(source[end - 1])) end--;
+  const column = start - source.lastIndexOf("\n", start - 1) - 1;
+  const inline = source[start] === "[";
+  if (!inline) {
+    const next = list[index], nextSpan = next && document.spans.get(next);
+    let insertion = end;
+    if (nextSpan) {
+      let nextStart = nextSpan.start;
+      while (/\s/.test(source[nextStart] || "")) nextStart++;
+      insertion = source.lastIndexOf("\n", nextStart - 1) + 1;
     }
-    out = next;
-    anchor = topId;
+    const rendered = texts.map((text) => text.replace(/\n+$/, "")).join("\n").replace(/\n/g, `\n${" ".repeat(column)}`);
+    const addition = nextSpan ? `${" ".repeat(column)}${rendered}\n` : `\n${" ".repeat(column)}${rendered}`;
+    const candidate = source.slice(0, insertion) + addition + source.slice(insertion);
+    if (matches(candidate)) return { source: candidate, insertedCount: inserted.length, ids };
   }
-  return out;
+  const serialized = dumpYaml(expected, { noRefs: true, lineWidth: -1, indent: 2, ...(inline ? { flowLevel: 0 } : {}) }).replace(/\n$/, "");
+  const replacement = inline ? serialized : serialized.replace(/\n/g, `\n${" ".repeat(column)}`);
+  const candidate = source.slice(0, start) + replacement + source.slice(end);
+  if (!matches(candidate)) throw new Error("无法安全粘贴步骤，请先在代码视图展开步骤列表");
+  return { source: candidate, insertedCount: inserted.length, ids };
 }
 
 /** Delete the blocks of every id in `ids` (top-level or nested). */
@@ -597,7 +742,8 @@ export function orderPathKeysByDocument(source, keys) {
   const orderedIds = [];
   walkSteps(extractSteps(parseYaml(source)), (step, info) => {
     const key = pathKey(info.path);
-    if (want.has(key)) {
+    const ancestorSelected = info.path.some((_part, index) => index > 0 && want.has(pathKey(info.path.slice(0, index))));
+    if (want.has(key) && !ancestorSelected) {
       orderedKeys.push(key);
       orderedIds.push(String(step.id));
     }

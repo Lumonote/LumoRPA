@@ -1,6 +1,7 @@
 name: desktop acceptance
 
 on:
+  workflow_call:
   push:
     branches: [main, dev]
   pull_request:

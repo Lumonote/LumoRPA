@@ -2,16 +2,17 @@
 
 import { $, html, toast } from "../dom.js";
 import { state } from "../state.js";
-import { extractSteps, findStepByPath, mutateStepAtPath, parseYaml, pathKey, stepIdChain, walkSteps } from "../yaml.js";
+import { extractSteps, findStepByPath, mutateStepWithReferences, parseYaml, pathKey, stepIdChain, walkSteps } from "../yaml.js";
 import { loadSchema, renderSchemaFields } from "./schema.js";
 import { applyAdvancedValues, readAdvancedFields, renderAdvancedFields, wireAdvancedFields } from "./advanced-fields.js";
 import { ACTION_PRESETS } from "../constants.js";
 import { renderActiveView } from "./render.js";
-import { updateGraphSelection } from "./graph.js";
+import { graphLayoutKey, saveGraphLayouts, updateGraphSelection } from "./graph.js";
 import { renderTree } from "./tree.js";
 import { runStep } from "../runs.js";
 import { isBreakpoint, toggleBreakpoint } from "../debug.js";
 import { snapshotSource } from "./history.js";
+import { buildStepIdentityMap, migrateBreakpointIdentities, migrateGraphIdentities } from "./step-identity.js";
 
 let inspectorRenderToken = 0;
 
@@ -28,6 +29,9 @@ export function selectStep(path, { preserveMulti = false } = {}) {
     }
   }
   if (state.viewMode === "tree") renderTree();
+  if (typeof document.dispatchEvent === "function" && typeof CustomEvent === "function") {
+    document.dispatchEvent(new CustomEvent("lumo:step-selected", { detail: { flowPath: state.flowPath, path: path ? [...path] : null, stepId: state.selectedStepId } }));
+  }
   if (!sameSelection) return renderInspector();
 }
 
@@ -143,11 +147,21 @@ export async function renderInspector() {
       if (newId !== step.id && duplicate) throw new Error("该节点 ID 已被使用，请选择其他名称");
       const original = schemaAction === step.action ? step.with || {} : {};
       const next = applyAdvancedValues({ ...step, id: newId, action: schemaAction, with: readParameters(form, original, schema) }, readAdvancedFields(form));
-      const updated = mutateStepAtPath(state.source, path, next);
+      const updated = mutateStepWithReferences(state.source, path, next);
       const ast = parseYaml(updated);
+      const identities = newId !== step.id ? buildStepIdentityMap(state.ast, ast) : null;
+      const flowKey = graphLayoutKey();
+      const layouts = identities ? migrateGraphIdentities(state.graphLayouts?.[flowKey] || {}, identities.layoutKeys) : null;
+      const breakpoints = identities ? migrateBreakpointIdentities(state.breakpoints, identities.runtimePaths) : null;
       snapshotSource("inspector");
       state.source = updated;
       state.ast = ast;
+      if (identities) {
+        state.graphLayouts[flowKey] = layouts;
+        state.breakpoints = breakpoints;
+        saveGraphLayouts();
+        if (typeof document.dispatchEvent === "function" && typeof CustomEvent === "function") document.dispatchEvent(new CustomEvent("lumo:step-renamed", { detail: { flowKey, oldId: step.id, newId, layoutKeys: [...identities.layoutKeys], runtimePaths: [...identities.runtimePaths] } }));
+      }
       state.selectedStepId = newId;
       state.draftController?.capture();
       toast("节点设置已应用", "保存流程后生效", "ok");

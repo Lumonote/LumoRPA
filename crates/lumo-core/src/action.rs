@@ -43,6 +43,12 @@ pub trait Action: Send + Sync + 'static {
         &EMPTY
     }
 
+    /// Optional JSON Schema for `ActionResult::output`. Unknown or dynamic
+    /// outputs stay unspecified; Studio must not infer a type from samples.
+    fn output_schema(&self) -> Option<&'static serde_json::Value> {
+        None
+    }
+
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError>;
 }
 

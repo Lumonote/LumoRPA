@@ -45,6 +45,9 @@ impl Action for GetPathAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetIn {
             value,
@@ -95,6 +98,9 @@ impl Action for SetPathAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SetIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SetIn {
@@ -163,6 +169,9 @@ impl Action for MergeAction {
         });
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::object())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let MergeIn { a, b } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.merge invalid: {e}")))?;
@@ -198,6 +207,9 @@ impl Action for KeysAction {
     fn schema(&self) -> &'static Value {
         value_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::strings())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ValueIn { value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json.keys invalid: {e}")))?;
@@ -220,6 +232,9 @@ impl Action for ValuesAction {
     }
     fn schema(&self) -> &'static Value {
         value_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ValueIn { value } = serde_json::from_value(input)
@@ -250,6 +265,9 @@ impl Action for DeleteAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DelIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let DelIn { mut value, path } = serde_json::from_value(input)

@@ -82,7 +82,7 @@ test("layout-only movement and arrange undo/redo retain identical executable sou
   assert.equal(undoEdit(), true);
   assert.deepEqual(state.graphLayouts, initialLayouts);
   assert.equal(state.source, source);
-  assert.deepEqual(JSON.parse(ui.storage.get("lumo.graphLayouts")), initialLayouts);
+  assert.deepEqual(JSON.parse(ui.storage.get(`lumo.graphLayout.v1:${flowPath}`)), initialLayouts[flowPath]);
   assert.equal(ui.ids.get("undoBtn").disabled, true);
 
   assert.equal(redoEdit(), true);
@@ -128,7 +128,7 @@ test("source insertion and layout coordinates undo together while branch selecti
   assert.equal(state.selectedStepId, "shared");
   assert.equal(positions().get("1").step.id, inserted.id);
   assert.equal(positions().get("2/:else/0").x, 130);
-  assert.deepEqual(JSON.parse(ui.storage.get("lumo.graphLayouts")), editedLayouts);
+  assert.deepEqual(JSON.parse(ui.storage.get(`lumo.graphLayout.v1:${flowPath}`)), editedLayouts[flowPath]);
   await Promise.resolve();
 });
 
@@ -144,5 +144,23 @@ test("history snapshots own deep layout copies across repeated restore and subse
   assert.equal(undoEdit(), true);
   assert.equal(state.graphLayouts[flowPath]["id:first"].x, -999);
   assert.equal(initialLayouts[flowPath]["id:first"].x, -240);
+  await Promise.resolve();
+});
+
+test("undo restores only the current flow layout and breakpoints", async (context) => {
+  mount(context);
+  state.breakpoints = new Set(["gate/shared"]);
+  snapshotSource("rename");
+  state.graphLayouts[flowPath]["id:first"].x = 999;
+  state.breakpoints = new Set(["renamed/shared"]);
+  state.graphLayouts["/flows/other.yaml"]["id:untouched"].x = 1001;
+  assert.equal(undoEdit(), true);
+  assert.equal(state.graphLayouts[flowPath]["id:first"].x, -240);
+  assert.equal(state.graphLayouts["/flows/other.yaml"]["id:untouched"].x, 1001);
+  assert.deepEqual([...state.breakpoints], ["gate/shared"]);
+  assert.equal(redoEdit(), true);
+  assert.equal(state.graphLayouts[flowPath]["id:first"].x, 999);
+  assert.equal(state.graphLayouts["/flows/other.yaml"]["id:untouched"].x, 1001);
+  assert.deepEqual([...state.breakpoints], ["renamed/shared"]);
   await Promise.resolve();
 });

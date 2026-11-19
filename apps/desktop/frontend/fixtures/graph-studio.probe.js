@@ -1,12 +1,14 @@
 /* global window, document */
 // Browser-only fixture: real editor modules/DOM/CSS, mocked Tauri and execution.
 const schemas = {
-  "file.read": { properties: { path: { type: "string" }, encoding: { type: "string" } }, required: ["path"] },
+  "file.read": { properties: { path: { type: "string" }, encoding: { type: "string" } }, required: ["path"], "x-lumo-output": { type: "string" } },
   "json.parse": { properties: { text: { type: "string" } }, required: ["text"] },
-  "ai.chat": { properties: { prompt: { type: "string" }, model: { type: "string" } }, required: ["prompt"] },
+  "ai.chat": { properties: { prompt: { type: "string" }, model: { type: "string" } }, required: ["prompt"], "x-lumo-output": { type: "string" } },
   "file.write": { properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   "control.log": { properties: { message: { type: "string" } } },
   "control.if": { properties: { condition: { type: "string" } } },
+  "control.for": { properties: { from: { type: "integer" }, to: { type: "integer" } } },
+  "http.get": { properties: { url: { type: "string" } }, required: ["url"], "x-lumo-output": { type: "object", required: ["status", "text", "json"], properties: { status: { type: "integer" }, text: { type: "string" }, json: {} } } },
 };
 window.__TAURI__ = { core: { invoke: async (command, args) => {
   if (command === "action_schema") return schemas[args.id] || { properties: {} };
@@ -16,6 +18,8 @@ window.__TAURI__ = { core: { invoke: async (command, args) => {
 const { state } = await import("../src/js/state.js");
 const { parseYaml } = await import("../src/js/yaml.js");
 const { renderGraph, bindGraphPan, refreshGraphRunState } = await import("../src/js/editor/graph.js");
+const { applyRunResponse } = await import("../src/js/runs.js");
+const { createGraphRunContext } = await import("../src/js/editor/graph-run-state.js");
 const { switchEditorMode } = await import("../src/js/views.js");
 const { undoEdit, redoEdit } = await import("../src/js/editor/history.js");
 const { renderActions } = await import("../src/js/actions.js");
@@ -51,6 +55,19 @@ control("重置示例", () => reset(sample, "content_pipeline"));
 control("分支示例", () => reset(`spec:\n  steps:\n    - id: gate\n      action: control.if\n      with: {condition: true}\n      do:\n        - {id: yes, action: control.log, with: {message: accepted}}\n      else:\n        - {id: no, action: control.log, with: {message: rejected}}\n    - {id: done, action: control.log, with: {message: finished}}\n`, "branches"));
 control("空画布", () => reset("spec: {steps: []}\n", "empty"));
 control("80 节点", () => reset(`spec:\n  steps:\n${Array.from({ length: 80 }, (_, i) => `    - {id: step_${i}, action: control.log, with: {message: 'node ${i}'}}`).join("\n")}\n`, "scale"));
+for (const count of [200, 300, 1000]) control(`${count} 节点`, () => reset(`spec:\n  steps:\n${Array.from({ length: count }, (_, i) => `    - {id: step_${i}, action: control.log, with: {message: 'node ${i}'}}`).join("\n")}\n`, `scale_${count}`));
+control("类型端口", () => reset('spec:\n  steps:\n    - {id: fetch, action: http.get, with: {url: "https://example.test/brief"}}\n    - {id: save, action: file.write, with: {path: output/brief.txt, content: ""}}\n', "typed"));
+control("循环结果", async () => {
+  reset('spec:\n  steps:\n    - id: batch\n      action: control.for\n      with: {from: 0, to: 3}\n      do:\n        - {id: row, action: control.log, with: {message: "{{ loop.index }}"}}\n    - {id: done, action: control.log, with: {message: finished}}\n', "loop_results");
+  state.editorRunContext = createGraphRunContext({ source: state.source, flowPath: state.flowPath, runId: "probe-loop-run" });
+  await applyRunResponse({ run: { id: "probe-loop-run", state: "ok" }, report: { runId: "probe-loop-run", success: true, stepsTotal: 5, stepsOk: 5, stepsFailed: 0, durationMs: 124, outputs: {} }, steps: [
+    { stepId: "row", path: "batch[0]/row", seq: 1, state: "ok", durationMs: 12, outputJson: false },
+    { stepId: "row", path: "batch[1]/row", seq: 2, state: "ok", durationMs: 14, outputJson: 0 },
+    { stepId: "row", path: "batch[2]/row", seq: 3, state: "ok", durationMs: 16, outputJson: [{ name: "镜头一", duration: 4 }, { name: "镜头二", duration: 6 }] },
+    { stepId: "batch", path: "batch", seq: 4, state: "ok", durationMs: 100, outputJson: null },
+    { stepId: "done", path: "done", seq: 5, state: "ok", durationMs: 24, outputJson: "" },
+  ] });
+});
 control("撤销", undoEdit); control("重做", redoEdit);
 control("模拟执行状态", () => { state.editorRunContext = { source: state.source, flowPath: state.flowPath, runId: "probe", stepStates: Object.fromEntries([...document.querySelectorAll(".graph-node")].map((element, index) => [element.querySelector(".graph-node-title").textContent, { state: index === 0 ? "ok" : index === 1 ? "running" : "idle" }])) }; refreshGraphRunState(); });
 control("切换主题", () => document.documentElement.classList.toggle("theme-dark"));

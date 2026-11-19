@@ -53,6 +53,9 @@ impl Action for UpperAction {
     fn schema(&self) -> &'static Value {
         text_only_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.upper invalid: {e}")))?;
@@ -71,6 +74,9 @@ impl Action for LowerAction {
     }
     fn schema(&self) -> &'static Value {
         text_only_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
@@ -91,6 +97,9 @@ impl Action for TrimAction {
     fn schema(&self) -> &'static Value {
         text_only_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.trim invalid: {e}")))?;
@@ -109,6 +118,9 @@ impl Action for LengthAction {
     }
     fn schema(&self) -> &'static Value {
         text_only_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::integer())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let TextIn { text } = serde_json::from_value(input)
@@ -142,6 +154,9 @@ impl Action for SplitAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SplitIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::strings())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SplitIn { text, sep, limit } = serde_json::from_value(input)
@@ -179,6 +194,9 @@ impl Action for JoinAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<JoinIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let JoinIn { items, sep } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.join invalid: {e}")))?;
@@ -214,6 +232,9 @@ impl Action for ReplaceAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ReplaceIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ReplaceIn {
@@ -257,6 +278,9 @@ impl Action for ContainsAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ContainsIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::boolean())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ContainsIn {
             text,
@@ -292,6 +316,9 @@ impl Action for StartsWithAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<StartsIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::boolean())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let StartsIn { text, prefix } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.starts_with invalid: {e}")))?;
@@ -317,6 +344,9 @@ impl Action for EndsWithAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<EndsIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::boolean())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let EndsIn { text, suffix } = serde_json::from_value(input)
@@ -345,6 +375,9 @@ impl Action for SubstringAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SubIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SubIn { text, start, end } = serde_json::from_value(input)
@@ -385,6 +418,9 @@ impl Action for RepeatAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RepIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RepIn { text, times } = serde_json::from_value(input)
@@ -444,6 +480,9 @@ impl Action for PadLeftAction {
     fn schema(&self) -> &'static Value {
         pad_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PadIn { text, width, pad } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("string.pad_left invalid: {e}")))?;
@@ -463,6 +502,9 @@ impl Action for PadRightAction {
     }
     fn schema(&self) -> &'static Value {
         pad_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PadIn { text, width, pad } = serde_json::from_value(input)
@@ -492,6 +534,9 @@ impl Action for FormatAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<FmtIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let FmtIn { template, values } = serde_json::from_value(input)
@@ -553,6 +598,9 @@ impl Action for EncodeConvertAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<EncodeConvertIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         use base64::Engine;

@@ -71,20 +71,26 @@ pub(super) async fn execute_flow(
     let report = result.map_err(|e| e.to_string())?;
     let run = repo
         .as_ref()
-        .and_then(|r| r.get_run(&report.run_id).ok().flatten())
+        .and_then(|r| r.get_run_summary(&report.run_id).ok().flatten())
         .map(run_dto);
     let steps = repo
         .as_ref()
-        .and_then(|r| r.list_steps(&report.run_id).ok())
+        .and_then(|r| r.list_step_summaries(&report.run_id, None, u32::MAX).ok())
         .unwrap_or_default()
         .into_iter()
-        .map(step_dto)
+        .map(step_summary_dto)
         .collect();
-    Ok(RunResponse {
-        report: report_dto(report),
-        run,
-        steps,
-    })
+    let mut report = report_dto(report);
+    if !no_store
+        && report
+            .outputs
+            .as_ref()
+            .is_some_and(exceeds_result_preview_budget)
+    {
+        report.outputs = None;
+        report.outputs_deferred = true;
+    }
+    Ok(RunResponse { report, run, steps })
 }
 
 /// Shared host environment for editor runs and Agent-invoked flows/skills.
@@ -346,10 +352,23 @@ spec:
             !r1.steps.iter().any(|s| s.path == "two"),
             "the un-run breakpoint step `two` must not be persisted"
         );
-        let vars = one
+        assert!(
+            one.details_deferred,
+            "execution response carries lightweight step summaries"
+        );
+        assert!(
+            one.vars_json.is_none(),
+            "vars payload is read only on selection"
+        );
+        let stored = lumo_storage::Repo::open(home.join("lumo.db"))
+            .unwrap()
+            .get_step(&r1.report.run_id, one.seq)
+            .unwrap()
+            .unwrap();
+        let vars = stored
             .vars_json
             .as_ref()
-            .expect("F-19: per-step vars snapshot present");
+            .expect("F-19: per-step vars checkpoint is available on demand");
         assert!(
             vars.get("x").is_some(),
             "vars snapshot carries `x` after set_var, got: {vars}"

@@ -32,6 +32,9 @@ impl Action for JsonParseAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ParseIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ParseIn { text } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("json_parse input invalid: {e}")))?;
@@ -61,6 +64,9 @@ impl Action for JsonFormatAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<FmtIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let FmtIn { value, pretty } = serde_json::from_value(input)

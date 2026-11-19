@@ -1,0 +1,290 @@
+{
+  "description": "Pure Node/V8 logic benchmark. No Rust/SQLite, IPC, DOM or WebView measurement. One warmup and five samples; medians reported.",
+  "environment": {
+    "node": "v22.22.2",
+    "arch": "arm64",
+    "platform": "darwin",
+    "gcExposed": true
+  },
+  "fixture": "Three child nodes under batch control.for_each; 0.1% failed rows; StepRunDto fields including timestamps; deferred outputJson/varsJson are null. Heap fixture is deserialized JSON. Progress paths share summary string references, so released-chain size is a conservative synthetic estimate.",
+  "results": [
+    {
+      "records": 10000,
+      "canonicalNodes": 3,
+      "jsonBytes": 3227205,
+      "jsonMiB": 3.078,
+      "bytesPerRecord": 322.721,
+      "serialization": {
+        "medianMs": 2.896,
+        "samplesMs": [
+          2.896,
+          2.878,
+          2.898,
+          2.962,
+          2.86
+        ]
+      },
+      "parsing": {
+        "medianMs": 3.944,
+        "samplesMs": [
+          4.108,
+          3.857,
+          3.944,
+          4.016,
+          3.817
+        ]
+      },
+      "completion": {
+        "medianMs": 5.675,
+        "samplesMs": [
+          6.048,
+          5.462,
+          5.529,
+          5.775,
+          5.675
+        ]
+      },
+      "coldGraphIndex": {
+        "medianMs": 5.69,
+        "samplesMs": [
+          7.037,
+          5.69,
+          5.58,
+          5.869,
+          5.669
+        ]
+      },
+      "hotGraphIndex1000Reads": {
+        "medianMs": 0.158,
+        "samplesMs": [
+          0.158,
+          0.175,
+          0.219,
+          0.083,
+          0.089
+        ]
+      },
+      "oldInstancePage": {
+        "medianMs": 3.261,
+        "samplesMs": [
+          3.596,
+          3.261,
+          3.113,
+          3.279,
+          3.115
+        ]
+      },
+      "coldInstanceIndex": {
+        "medianMs": 3.292,
+        "samplesMs": [
+          3.398,
+          3.343,
+          3.292,
+          3.229,
+          3.23
+        ]
+      },
+      "hotInstanceIndex1000Reads": {
+        "medianMs": 0.153,
+        "samplesMs": [
+          0.153,
+          0.151,
+          0.155,
+          0.162,
+          0.072
+        ]
+      },
+      "indexedInstancePage": {
+        "medianMs": 0.008,
+        "samplesMs": [
+          0.068,
+          0.014,
+          0.007,
+          0.008,
+          0.008
+        ]
+      },
+      "latestSelectionScan": {
+        "medianMs": 0.01,
+        "samplesMs": [
+          0.024,
+          0.007,
+          0.015,
+          0.01,
+          0.008
+        ]
+      },
+      "missingSelectionScan": {
+        "medianMs": 3.178,
+        "samplesMs": [
+          3.178,
+          3.223,
+          3.197,
+          3.173,
+          3.018
+        ]
+      },
+      "indexedLatestSelection": {
+        "medianMs": 0.003,
+        "samplesMs": [
+          0.007,
+          0.003,
+          0.002,
+          0.002,
+          0.004
+        ]
+      },
+      "retainedHeapMiB": {
+        "parsedSummaries": 3.327,
+        "completedContextExtra": 1.056,
+        "graphAggregateIndexExtra": 0.339,
+        "instanceNumberIndexExtra": 0.12
+      },
+      "progressRetention": {
+        "progressEvents": 20000,
+        "completedPlusRetainedProgressMiB": 4.842,
+        "completedPlusIdentityOnlyMiB": 1.104,
+        "releasedProgressChainMiB": 3.738
+      }
+    },
+    {
+      "records": 100000,
+      "canonicalNodes": 3,
+      "jsonBytes": 32572398,
+      "jsonMiB": 31.063,
+      "bytesPerRecord": 325.724,
+      "serialization": {
+        "medianMs": 29.291,
+        "samplesMs": [
+          28.186,
+          29.291,
+          29.356,
+          29.972,
+          29.264
+        ]
+      },
+      "parsing": {
+        "medianMs": 47.124,
+        "samplesMs": [
+          48.778,
+          50.078,
+          47.124,
+          46.875,
+          46.31
+        ]
+      },
+      "completion": {
+        "medianMs": 82.992,
+        "samplesMs": [
+          80.772,
+          84.043,
+          82.992,
+          80.919,
+          85.47
+        ]
+      },
+      "coldGraphIndex": {
+        "medianMs": 85.916,
+        "samplesMs": [
+          91.999,
+          90.104,
+          85.576,
+          85.916,
+          84.509
+        ]
+      },
+      "hotGraphIndex1000Reads": {
+        "medianMs": 0.022,
+        "samplesMs": [
+          0.055,
+          0.076,
+          0.022,
+          0.016,
+          0.016
+        ]
+      },
+      "oldInstancePage": {
+        "medianMs": 37.167,
+        "samplesMs": [
+          37.034,
+          37.298,
+          37.167,
+          37.276,
+          36.727
+        ]
+      },
+      "coldInstanceIndex": {
+        "medianMs": 36.24,
+        "samplesMs": [
+          36.041,
+          36.24,
+          35.732,
+          36.666,
+          36.374
+        ]
+      },
+      "hotInstanceIndex1000Reads": {
+        "medianMs": 0.066,
+        "samplesMs": [
+          0.121,
+          0.159,
+          0.062,
+          0.066,
+          0.066
+        ]
+      },
+      "indexedInstancePage": {
+        "medianMs": 0.038,
+        "samplesMs": [
+          0.038,
+          0.031,
+          0.024,
+          0.04,
+          0.04
+        ]
+      },
+      "latestSelectionScan": {
+        "medianMs": 0.021,
+        "samplesMs": [
+          0.021,
+          0.151,
+          0.029,
+          0.019,
+          0.012
+        ]
+      },
+      "missingSelectionScan": {
+        "medianMs": 33.626,
+        "samplesMs": [
+          33.735,
+          33.626,
+          34.174,
+          32.923,
+          33.25
+        ]
+      },
+      "indexedLatestSelection": {
+        "medianMs": 0.007,
+        "samplesMs": [
+          0.007,
+          0.009,
+          0.016,
+          0.005,
+          0.005
+        ]
+      },
+      "retainedHeapMiB": {
+        "parsedSummaries": 33.494,
+        "completedContextExtra": 12.876,
+        "graphAggregateIndexExtra": 5.238,
+        "instanceNumberIndexExtra": 0.777
+      },
+      "progressRetention": {
+        "progressEvents": 200000,
+        "completedPlusRetainedProgressMiB": 50.25,
+        "completedPlusIdentityOnlyMiB": 12.866,
+        "releasedProgressChainMiB": 37.384
+      }
+    }
+  ]
+}

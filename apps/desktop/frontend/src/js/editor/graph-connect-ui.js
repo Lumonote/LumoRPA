@@ -35,7 +35,7 @@ export function connectGraphPorts(options) {
   try {
     const source = state.source, flowKey = graphLayoutKey();
     const execution = options.kind === "execution";
-    const plan = execution ? planGraphSequence(source, options) : planGraphConnection(source, options);
+    const plan = execution ? planGraphSequence(source, options) : planGraphConnection(source, { ...options, schemas: state.schemaCache });
     if (!plan.requiresReplace && !options.disconnect) { commit(plan, source, flowKey); return; }
     pending = { plan, source, flowKey };
     const box = $("graphConnectConfirm");

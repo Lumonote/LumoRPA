@@ -119,7 +119,7 @@ fn build_env() -> Environment<'static> {
 fn render_inner(env: &Environment, input: &Json, ctx: &TemplateCtx) -> Result<Json, TemplateError> {
     match input {
         Json::String(s) if s.contains("{{") || s.contains("{%") => {
-            // Fast-path 1: `{{ a.b.c }}` — pure variable lookup, no filters/ops.
+            // Fast-path 1: static dot/bracket lookup, no filters/operators.
             // Return the original JSON value without any string round-trip,
             // preserving arrays/objects/numbers exactly.
             if let Some(path) = pure_lookup_path(s) {
@@ -177,24 +177,77 @@ fn is_single_expression(s: &str) -> bool {
     true
 }
 
-/// If `s` is exactly `{{ <ident.path> }}` (pure dotted lookup, no filters,
-/// no operators), return the path components.
+/// Parse static dot/bracket lookups. This preserves JSON types for field ports
+/// and hyphenated step IDs: rendering a string such as "42" through minijinja
+/// and parsing it back would otherwise silently turn it into a number.
 fn pure_lookup_path(s: &str) -> Option<Vec<String>> {
     if !is_single_expression(s) {
         return None;
     }
     let t = s.trim();
-    let inner = t[2..t.len() - 2].trim();
-    if inner.is_empty() {
-        return None;
+    let mut rest = t[2..t.len() - 2].trim();
+    let identifier = |text: &str| -> Option<usize> {
+        let first = text.chars().next()?;
+        if !(first.is_alphabetic() || first == '_') {
+            return None;
+        }
+        Some(
+            text.char_indices()
+                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                .map(|(index, c)| index + c.len_utf8())
+                .last()
+                .unwrap_or(0),
+        )
+    };
+    let end = identifier(rest)?;
+    let mut path = vec![rest[..end].to_string()];
+    rest = rest[end..].trim_start();
+    while !rest.is_empty() {
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            rest = after_dot.trim_start();
+            let end = identifier(rest)?;
+            path.push(rest[..end].to_string());
+            rest = rest[end..].trim_start();
+            continue;
+        }
+        rest = rest.strip_prefix('[')?.trim_start();
+        let first = rest.chars().next()?;
+        if first == '\'' || first == '"' {
+            let mut escaped = false;
+            let mut end = None;
+            for (index, character) in rest.char_indices().skip(1) {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if character == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if character == first {
+                    end = Some(index + character.len_utf8());
+                    break;
+                }
+            }
+            let end = end?;
+            // The lexer above accepts one literal only, so expressions and
+            // dynamic indexing stay on the existing minijinja evaluation path.
+            let literal = global_env().compile_expression(&rest[..end]).ok()?;
+            let value = literal.eval(()).ok()?;
+            path.push(value.as_str()?.to_string());
+            rest = rest[end..].trim_start();
+        } else {
+            let end = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if end == 0 {
+                return None;
+            }
+            let index: usize = rest[..end].parse().ok()?;
+            path.push(index.to_string());
+            rest = rest[end..].trim_start();
+        }
+        rest = rest.strip_prefix(']')?.trim_start();
     }
-    if inner
-        .chars()
-        .any(|c| !(c.is_alphanumeric() || c == '.' || c == '_'))
-    {
-        return None;
-    }
-    Some(inner.split('.').map(|p| p.to_string()).collect())
+    Some(path)
 }
 
 /// Walk `path` against the template context's namespaces. The first segment
@@ -236,6 +289,7 @@ pub(crate) fn lookup_path(ctx: &TemplateCtx, path: &[String]) -> Option<Json> {
     for seg in rest {
         cur = match cur {
             Json::Object(m) => m.get(seg).unwrap_or(&JSON_NULL),
+            Json::Array(items) => items.get(seg.parse::<usize>().ok()?).unwrap_or(&JSON_NULL),
             _ => return None,
         };
     }
@@ -298,6 +352,74 @@ fn preprocess_vault(src: &str, vault_names: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_field_links_preserve_real_json_types() {
+        for expected in [
+            serde_json::json!("42"),
+            serde_json::json!("true"),
+            serde_json::json!("null"),
+            serde_json::json!(42),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"ready": true}),
+            serde_json::json!([1, "2"]),
+        ] {
+            let ctx = TemplateCtx {
+                steps: TemplateCtx::ns(serde_json::json!({
+                    "read-file": { "result": { "items": [{ "user-name": expected }] } }
+                })),
+                ..Default::default()
+            };
+            for expression in [
+                "{{ steps[\"read-file\"].result.items[0][\"user-name\"] }}",
+                "{{ steps [ 'read-file' ] [ 'result' ].items [ 0 ] [ 'user-name' ] }}",
+            ] {
+                assert_eq!(
+                    render(&serde_json::json!(expression), &ctx).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_static_fields_decode_escapes_but_dynamic_expressions_stay_outside_lookup() {
+        let ctx = TemplateCtx {
+            steps: TemplateCtx::ns(serde_json::json!({ "read": { "result": {
+                "quoted\"key": "42", "单引'号": ["true"]
+            } } })),
+            ..Default::default()
+        };
+        assert_eq!(
+            render(
+                &serde_json::json!("{{ steps.read.result[\"quoted\\\"key\"] }}"),
+                &ctx
+            )
+            .unwrap(),
+            serde_json::json!("42")
+        );
+        assert_eq!(
+            render(
+                &serde_json::json!("{{ steps.read.result['单引\\'号'][0] }}"),
+                &ctx
+            )
+            .unwrap(),
+            serde_json::json!("true")
+        );
+        for expression in [
+            "{{ steps.read.result[inputs.field] }}",
+            "{{ steps.read.result | tojson }}",
+            "{{ steps.read.result[0 + 1] }}",
+            "prefix {{ steps.read.result }}",
+            "{{ steps.read.result['value'] + 'suffix' }}",
+        ] {
+            assert!(
+                pure_lookup_path(expression).is_none(),
+                "must retain expression evaluation: {expression}"
+            );
+        }
+    }
 
     #[test]
     fn vault_multiple_placeholders_in_one_string() {

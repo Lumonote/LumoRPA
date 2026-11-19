@@ -101,3 +101,100 @@ fn step_vars_json_round_trips() {
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].vars_json, Some(serde_json::json!({ "v": 0 })));
 }
+
+#[test]
+fn summary_pages_skip_payloads_and_preserve_cursor_order() {
+    let repo = Repo::open_in_memory().unwrap();
+    for index in 0..4 {
+        let mut run = make_run(&format!("page-{index}"));
+        run.started_at = Some(chrono::DateTime::from_timestamp_millis(1000).unwrap());
+        run.inputs = serde_json::json!({"secret": "large-input"});
+        run.outputs = Some(serde_json::json!({"large": "payload"}));
+        repo.create_run(&run).unwrap();
+    }
+    let first = repo.list_runs_page(2, 0).unwrap();
+    let second = repo.list_runs_page(2, 2).unwrap();
+    assert_eq!(
+        first.iter().map(|r| &*r.id).collect::<Vec<_>>(),
+        ["page-3", "page-2"]
+    );
+    assert_eq!(
+        second.iter().map(|r| &*r.id).collect::<Vec<_>>(),
+        ["page-1", "page-0"]
+    );
+    assert!(first
+        .iter()
+        .all(|r| r.outputs.is_none() && r.inputs == serde_json::json!({})));
+    for seq in [1, 2, 4, 7] {
+        repo.insert_step(&make_step("page-0", seq, &format!("step-{seq}")))
+            .unwrap();
+    }
+    let page = repo.list_step_summaries("page-0", Some(2), 2).unwrap();
+    assert_eq!(page.iter().map(|s| s.seq).collect::<Vec<_>>(), [4, 7]);
+    assert!(page
+        .iter()
+        .all(|s| s.output_json.is_none() && s.vars_json.is_none()));
+    assert!(repo
+        .get_run_summary("page-0")
+        .unwrap()
+        .unwrap()
+        .outputs
+        .is_none());
+    assert!(repo.get_run("page-0").unwrap().unwrap().outputs.is_some());
+}
+
+#[test]
+fn selected_step_restores_only_its_nearest_variable_checkpoint() {
+    let repo = Repo::open_in_memory().unwrap();
+    repo.create_run(&make_run("checkpoints")).unwrap();
+    for seq in 0..6 {
+        let mut step = make_step("checkpoints", seq, &format!("loop[{seq}]/read"));
+        step.vars_json = match seq {
+            0 => Some(serde_json::json!({"version":1})),
+            3 => Some(serde_json::json!({"version":2})),
+            _ => None,
+        };
+        step.output_json = Some(serde_json::json!(false));
+        repo.insert_step(&step).unwrap();
+    }
+    let earlier = repo.get_step("checkpoints", 2).unwrap().unwrap();
+    let later = repo.get_step("checkpoints", 5).unwrap().unwrap();
+    assert_eq!(earlier.vars_json, Some(serde_json::json!({"version":1})));
+    assert_eq!(later.vars_json, Some(serde_json::json!({"version":2})));
+    assert_eq!(later.output_json, Some(serde_json::json!(false)));
+    assert!(repo.get_step("checkpoints", 99).unwrap().is_none());
+}
+
+#[test]
+fn ai_cost_pages_are_bounded_and_isolated_by_run() {
+    let repo = Repo::open_in_memory().unwrap();
+    for run_id in ["cost-a", "cost-b"] {
+        repo.create_run(&make_run(run_id)).unwrap();
+        for index in 0..205 {
+            repo.record_ai_call(lumo_storage::AiCallInsert {
+                flow_run_id: run_id,
+                step_id: Some("loop/read"),
+                helper: "test",
+                provider: "test",
+                model: "test",
+                input_tokens: index,
+                output_tokens: 1,
+                latency_ms: 1,
+                cost_usd_micro: 1,
+            })
+            .unwrap();
+        }
+    }
+    let first = repo.list_ai_calls_page("cost-a", None, 1000).unwrap();
+    assert_eq!(first.len(), 200);
+    let second = repo
+        .list_ai_calls_page("cost-a", Some(first.last().unwrap().id), 200)
+        .unwrap();
+    assert_eq!(second.len(), 5);
+    assert!(second.iter().all(|row| row.flow_run_id == "cost-a"));
+    assert!(second[0].id > first.last().unwrap().id);
+    assert!(repo
+        .list_ai_calls_page("cost-a", Some(second.last().unwrap().id), 200)
+        .unwrap()
+        .is_empty());
+}

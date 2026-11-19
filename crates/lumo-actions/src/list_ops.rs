@@ -60,6 +60,9 @@ impl Action for LengthAction {
     fn schema(&self) -> &'static Value {
         list_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::integer())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.length invalid: {e}")))?;
@@ -85,6 +88,9 @@ impl Action for AppendAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AppendIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let AppendIn { mut items, value } = serde_json::from_value(input)
@@ -115,6 +121,9 @@ impl Action for SortAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SortIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SortIn {
@@ -164,6 +173,9 @@ impl Action for UniqueAction {
     fn schema(&self) -> &'static Value {
         list_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.unique invalid: {e}")))?;
@@ -205,6 +217,9 @@ impl Action for RangeAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RangeIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RangeIn { start, end, step } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.range invalid: {e}")))?;
@@ -245,6 +260,9 @@ impl Action for ContainsAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ContainsIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::boolean())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ContainsIn { items, value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.contains invalid: {e}")))?;
@@ -272,6 +290,9 @@ impl Action for GetAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetIn { items, index } = serde_json::from_value(input)
@@ -308,6 +329,9 @@ impl Action for SliceAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SliceIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SliceIn { items, start, end } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.slice invalid: {e}")))?;
@@ -339,6 +363,9 @@ impl Action for ReverseAction {
     fn schema(&self) -> &'static Value {
         list_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { mut items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.reverse invalid: {e}")))?;
@@ -365,6 +392,9 @@ impl Action for PluckAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PluckIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PluckIn { items, key } = serde_json::from_value(input)
@@ -408,6 +438,9 @@ impl Action for CreateListAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<CreateListIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let CreateListIn { length, value } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.create invalid: {e}")))?;
@@ -437,6 +470,9 @@ impl Action for GetElemAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetElemIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetElemIn {
@@ -486,6 +522,9 @@ impl Action for SetElemAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SetElemIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SetElemIn {
             mut items,
@@ -521,6 +560,9 @@ impl Action for GetLenAction {
     fn schema(&self) -> &'static Value {
         list_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::integer())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.get_len invalid: {e}")))?;
@@ -547,6 +589,9 @@ impl Action for GetIndexAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetIndexIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::integer())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetIndexIn { items, value } = serde_json::from_value(input)
@@ -582,6 +627,9 @@ impl Action for AppendOrInsertAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AppendOrInsertIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let AppendOrInsertIn {
@@ -627,6 +675,9 @@ impl Action for ExtendAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ExtendIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ExtendIn { mut items, other } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.extend invalid: {e}")))?;
@@ -657,6 +708,9 @@ impl Action for RemoveAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RemoveIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RemoveIn {
@@ -702,6 +756,9 @@ impl Action for RemoveListAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RemoveListIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RemoveListIn { items, values } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("list.remove_list invalid: {e}")))?;
@@ -722,6 +779,9 @@ impl Action for ClearAction {
     }
     fn schema(&self) -> &'static Value {
         list_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         // 解析入参只为 schema 校验与错误信息一致;结果恒为空数组。
@@ -744,6 +804,9 @@ impl Action for RemoveDuplicateAction {
     }
     fn schema(&self) -> &'static Value {
         list_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
@@ -770,6 +833,9 @@ impl Action for GetDuplicateAction {
     }
     fn schema(&self) -> &'static Value {
         list_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ItemsIn { items } = serde_json::from_value(input)
@@ -812,6 +878,9 @@ impl Action for ShuffleAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<ShuffleIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ShuffleIn { mut items, seed } = serde_json::from_value(input)

@@ -43,6 +43,7 @@ mod flow_drafts;
 mod flow_history;
 mod flow_library;
 mod flow_schedule_commands;
+mod graph_layout;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
@@ -56,6 +57,7 @@ mod skill_commands;
 mod state;
 #[allow(dead_code)]
 mod update_commands;
+mod updater_config;
 mod voice_commands;
 mod voice_daemon;
 mod voice_intents;
@@ -87,6 +89,7 @@ use flow_drafts::{
     editor_cancel_exit, editor_confirm_exit, editor_draft_delete, editor_draft_list,
     editor_draft_upsert,
 };
+use graph_layout::{graph_layout_read, graph_layout_write};
 use job_commands::{
     job_cancel, job_list, job_pause, job_resolve_unknown, job_resume, job_schedule,
     job_unknown_nodes, setup_job_worker, JobRuntime,
@@ -610,6 +613,7 @@ async fn run_step(
     state: State<'_, DesktopState>,
     path: String,
     step_id: String,
+    step_path: Option<Vec<Value>>,
     inputs_json: String,
     no_store: bool,
     run_id: Option<String>,
@@ -617,9 +621,13 @@ async fn run_step(
     let home = app_home(&app)?;
     let flow_path = Path::new(&path);
     let mut flow = parse_and_validate(&home, flow_path)?;
-    let extracted = extract_step(&flow.spec.steps, &step_id)
-        .ok_or_else(|| format!("step `{step_id}` not found in flow"))?
-        .clone();
+    let extracted = if let Some(path) = step_path.as_deref() {
+        extract_step_at_path(&flow.spec.steps, path).filter(|step| step.id == step_id)
+    } else {
+        extract_step(&flow.spec.steps, &step_id)
+    }
+    .ok_or_else(|| format!("step `{step_id}` not found at selected path"))?
+    .clone();
     flow.spec.steps = vec![extracted];
     // Rewrite the id so the persisted run is identifiable as a sub-run.
     flow.metadata.id = format!("{}::{step_id}", flow.metadata.id);
@@ -716,10 +724,10 @@ fn cancel_run_inner(cancels: &CancelMap, run_id: &str) -> bool {
 }
 
 #[tauri::command]
-fn list_runs(app: AppHandle, limit: u32) -> Result<Vec<RunDto>, String> {
+fn list_runs(app: AppHandle, limit: u32, offset: Option<u32>) -> Result<Vec<RunDto>, String> {
     let repo = open_repo(&app)?;
     Ok(repo
-        .list_runs(limit)
+        .list_runs_page(limit, offset.unwrap_or(0))
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(run_dto)
@@ -727,31 +735,80 @@ fn list_runs(app: AppHandle, limit: u32) -> Result<Vec<RunDto>, String> {
 }
 
 #[tauri::command]
-fn show_run(app: AppHandle, run_id: String) -> Result<RunDetail, String> {
+fn show_run(app: AppHandle, run_id: String, summary: Option<bool>) -> Result<RunDetail, String> {
     let repo = open_repo(&app)?;
-    let run = repo
-        .get_run(&run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("run `{run_id}` not found"))?;
-    let steps = repo
-        .list_steps(&run_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(step_dto)
-        .collect();
+    let run = if summary.unwrap_or(false) {
+        repo.get_run_summary(&run_id)
+    } else {
+        repo.get_run(&run_id)
+    }
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("run `{run_id}` not found"))?;
+    let steps = if summary.unwrap_or(false) {
+        repo.list_step_summaries(&run_id, None, 200)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(step_summary_dto)
+            .collect()
+    } else {
+        repo.list_steps(&run_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(step_dto)
+            .collect()
+    };
     Ok(RunDetail {
         run: run_dto(run),
         steps,
     })
 }
 
+#[tauri::command]
+fn list_run_steps(
+    app: AppHandle,
+    run_id: String,
+    after_seq: Option<i64>,
+    limit: u32,
+) -> Result<Vec<StepRunDto>, String> {
+    Ok(open_repo(&app)?
+        .list_step_summaries(&run_id, after_seq, limit.min(200))
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(step_summary_dto)
+        .collect())
+}
+
+#[tauri::command]
+fn read_run_step(app: AppHandle, run_id: String, seq: i64) -> Result<StepRunDto, String> {
+    open_repo(&app)?
+        .get_step(&run_id, seq)
+        .map_err(|e| e.to_string())?
+        .map(step_dto)
+        .ok_or_else(|| format!("step {seq} not found in run {run_id}"))
+}
+
+#[tauri::command]
+fn read_run_outputs(app: AppHandle, run_id: String) -> Result<Option<Value>, String> {
+    Ok(open_repo(&app)?
+        .get_run(&run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("run {run_id} not found"))?
+        .outputs)
+}
+
 /// X-10: every LLM/vision call this run made, with token + USD breakdown.
 /// Studio renders the rows under the timeline so the user can see exactly
 /// where the budget went.
 #[tauri::command]
-fn run_cost(app: AppHandle, run_id: String) -> Result<Vec<lumo_storage::AiCallRow>, String> {
+fn run_cost(
+    app: AppHandle,
+    run_id: String,
+    after_id: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<lumo_storage::AiCallRow>, String> {
     let repo = open_repo(&app)?;
-    repo.list_ai_calls(&run_id).map_err(|e| e.to_string())
+    repo.list_ai_calls_page(&run_id, after_id, limit.unwrap_or(200))
+        .map_err(|e| e.to_string())
 }
 
 /// X-07 Time-Travel: every blob artifact (screenshot, DOM, HAR) captured during
@@ -822,7 +879,13 @@ fn action_schema(app: AppHandle, id: String) -> Result<Value, String> {
     let action = registry
         .get(&id)
         .ok_or_else(|| format!("action `{id}` not found"))?;
-    Ok(action.schema().clone())
+    let mut schema = action.schema().clone();
+    if let Some(output) = action.output_schema() {
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("x-lumo-output".into(), output.clone());
+        }
+    }
+    Ok(schema)
 }
 
 #[tauri::command]
@@ -1286,7 +1349,7 @@ fn autostart_set(app: tauri::AppHandle<tauri::Wry>, enabled: bool) -> Result<boo
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let updater_pubkey = std::env::var("LUMO_UPDATER_PUBKEY").unwrap_or_default();
+    let updater_pubkey = updater_config::pubkey().unwrap_or_default();
     tauri::Builder::default()
         .plugin(
             tauri_plugin_updater::Builder::new()
@@ -1352,6 +1415,8 @@ pub fn run() {
             save_element_library,
             inspect_flow,
             read_flow_source,
+            graph_layout_read,
+            graph_layout_write,
             reveal_flow_file,
             save_flow_source,
             get_flow_capabilities,
@@ -1365,6 +1430,9 @@ pub fn run() {
             human_respond,
             list_runs,
             show_run,
+            list_run_steps,
+            read_run_step,
+            read_run_outputs,
             run_cost,
             list_artifacts,
             read_artifact_blob,
@@ -1684,6 +1752,27 @@ fn validate_generated_flow_yaml(home: &Path, yaml: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn extract_step_at_path<'a>(steps: &'a [Step], path: &[Value]) -> Option<&'a Step> {
+    let index = usize::try_from(path.first()?.as_u64()?).ok()?;
+    let step = steps.get(index)?;
+    if path.len() == 1 {
+        return Some(step);
+    }
+    let kind = path.get(1)?.as_str()?;
+    let children = match kind {
+        "do" => step.do_.as_deref()?,
+        "else" => step.else_.as_deref()?,
+        "catch" => step.catch_.as_deref()?,
+        "finally" => step.finally_.as_deref()?,
+        "branches" => {
+            let branch = usize::try_from(path.get(2)?.as_u64()?).ok()?;
+            return extract_step_at_path(step.branches.as_ref()?.get(branch)?, path.get(3..)?);
+        }
+        _ => return None,
+    };
+    extract_step_at_path(children, path.get(2..)?)
+}
+
 fn extract_step<'a>(steps: &'a [Step], id: &str) -> Option<&'a Step> {
     for step in steps {
         if step.id == id {
@@ -1758,4 +1847,57 @@ fn looks_like_env_var_name(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod selected_step_path_tests {
+    use super::*;
+
+    #[test]
+    fn precise_selection_distinguishes_same_named_children_and_parallel_branches() {
+        let flow = lumo_dsl::parse_str(
+            r#"
+apiVersion: lumorpa.io/v1
+kind: Flow
+metadata: { id: selection }
+spec:
+  steps:
+    - id: gate
+      action: control.if
+      do:
+        - { id: child, action: control.log, with: { message: first } }
+      else:
+        - { id: child, action: control.log, with: { message: second } }
+    - id: parallel
+      action: control.parallel
+      branches:
+        - [{ id: child, action: control.log, with: { message: branch0 } }]
+        - [{ id: child, action: control.log, with: { message: branch1 } }]
+"#,
+        )
+        .unwrap();
+        let selected = extract_step_at_path(
+            &flow.spec.steps,
+            &[Value::from(0), Value::from("else"), Value::from(0)],
+        )
+        .unwrap();
+        assert_eq!(selected.with["message"].as_str(), Some("second"));
+        let selected = extract_step_at_path(
+            &flow.spec.steps,
+            &[
+                Value::from(1),
+                Value::from("branches"),
+                Value::from(1),
+                Value::from(0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(selected.with["message"].as_str(), Some("branch1"));
+        assert!(extract_step_at_path(
+            &flow.spec.steps,
+            &[Value::from(0), Value::from("missing"), Value::from(0)]
+        )
+        .is_none());
+        assert!(extract_step_at_path(&flow.spec.steps, &[Value::from(-1)]).is_none());
+    }
 }

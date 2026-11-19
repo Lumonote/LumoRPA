@@ -149,6 +149,26 @@ impl Repo {
         Ok(out)
     }
 
+    /// Desktop history metadata without loading potentially large inputs/outputs.
+    pub fn list_runs_page(&self, limit: u32, offset: u32) -> Result<Vec<FlowRunRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT id,flow_id,flow_version,trigger_kind,'{}',NULL,state,worker_id,started_at,finished_at,cost_token,cost_usd_micro,trace_id \
+             FROM flow_runs ORDER BY started_at DESC NULLS LAST,id DESC LIMIT ? OFFSET ?",
+        )?;
+        let rows = stmt.query_map(params![limit.min(200), offset], row_to_flow_run)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_run_summary(&self, id: &str) -> Result<Option<FlowRunRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT id,flow_id,flow_version,trigger_kind,'{}',NULL,state,worker_id,started_at,finished_at,cost_token,cost_usd_micro,trace_id \
+             FROM flow_runs WHERE id=?",
+        )?;
+        Ok(stmt.query_row([id], row_to_flow_run).optional()?)
+    }
+
     pub fn get_run(&self, id: &str) -> Result<Option<FlowRunRow>, StorageError> {
         let c = self.inner.lock();
         let mut stmt = c.prepare(
@@ -212,6 +232,47 @@ impl Repo {
             }
         }
         Ok(out)
+    }
+
+    /// Lightweight cursor page: no result JSON parse and no repeated vars clones.
+    pub fn list_step_summaries(
+        &self,
+        run_id: &str,
+        after_seq: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<StepRunRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,NULL,error,started_at,finished_at,span_id,NULL \
+             FROM step_runs WHERE flow_run_id=? AND (? IS NULL OR seq>?) ORDER BY seq ASC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(
+            params![run_id, after_seq, after_seq, limit],
+            row_to_step_run,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Read exactly one payload and its nearest preceding variable checkpoint.
+    pub fn get_step(&self, run_id: &str, seq: i64) -> Result<Option<StepRunRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT flow_run_id,seq,path,parent_path,depth,step_id,idx,state,attempt,input_hash,output_json,error,started_at,finished_at,span_id,vars_json \
+             FROM step_runs WHERE flow_run_id=? AND seq=?",
+        )?;
+        let mut row = stmt
+            .query_row(params![run_id, seq], row_to_step_run)
+            .optional()?;
+        if let Some(step) = &mut row {
+            if step.vars_json.is_none() {
+                let previous: Option<String> = c.query_row(
+                    "SELECT vars_json FROM step_runs WHERE flow_run_id=? AND seq<=? AND vars_json IS NOT NULL ORDER BY seq DESC LIMIT 1",
+                    params![run_id, seq], |r| r.get(0),
+                ).optional()?;
+                step.vars_json = previous.as_deref().map(serde_json::from_str).transpose()?;
+            }
+        }
+        Ok(row)
     }
 
     // ─── runs retention (架构 P2) ───────────────────────────────────────────
@@ -405,6 +466,23 @@ impl Repo {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Cursor page for the desktop history inspector. Keep the full-list API
+    /// for CLI reporting, but never transfer an unbounded cost table to the UI.
+    pub fn list_ai_calls_page(
+        &self,
+        run_id: &str,
+        after_id: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<AiCallRow>, StorageError> {
+        let c = self.inner.lock();
+        let mut stmt = c.prepare(
+            "SELECT id,flow_run_id,step_id,helper,provider,model,input_tokens,output_tokens,latency_ms,cost_usd_micro,created_at \
+             FROM ai_calls WHERE flow_run_id=?1 AND (?2 IS NULL OR id>?2) ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![run_id, after_id, limit.min(200)], row_to_ai_call)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Roll up the ai_calls bucket into the flow_runs cost columns. Called by

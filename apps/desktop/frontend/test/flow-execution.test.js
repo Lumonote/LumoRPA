@@ -1,29 +1,50 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+const { EventTarget, Event } = globalThis;
 
 // Exercise the real editor/run modules across the IPC boundary. The host below
 // represents disk + Tauri; rendering only needs these small DOM surfaces.
-class Element {
+class Element extends EventTarget {
   value = "";
   textContent = "";
-  innerHTML = "";
+  _innerHTML = "";
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) { this._innerHTML = value; this.timelineSource = null; this.children = new Map(); this.prepended = null; }
   style = {};
   dataset = {};
   classList = { toggle() {}, add() {}, remove() {} };
-  querySelectorAll() { return []; }
-  addEventListener() {}
+  querySelectorAll(selector) {
+    if (selector !== ".timeline-step") return [];
+    if (this.timelineSource !== this.innerHTML) {
+      this.timelineSource = this.innerHTML;
+      this.timelineSteps = [...this.innerHTML.matchAll(/data-idx="(\d+)"/g)].map((match) => {
+        const element = new Element(); element.dataset.idx = match[1]; return element;
+      });
+    }
+    return this.timelineSteps || [];
+  }
+  querySelector(selector) {
+    this.children ||= new Map();
+    if (!this.children.has(selector)) this.children.set(selector, new Element());
+    return this.children.get(selector);
+  }
   appendChild() {}
+  prepend(child) { this.prepended = child; }
   remove() {}
 }
 const elements = new Map();
-globalThis.document = {
+globalThis.document = Object.assign(new EventTarget(), {
   getElementById(id) {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
   },
   querySelectorAll: () => [],
   createElement: () => new Element(),
+});
+globalThis.CustomEvent ||= class CustomEvent extends Event {
+  constructor(type, options = {}) { super(type); this.detail = options.detail; }
 };
+const { document, CustomEvent } = globalThis;
 globalThis.localStorage = { getItem: () => null };
 let invoke;
 globalThis.window = { __TAURI__: { core: { invoke: (...args) => invoke(...args) } } };
@@ -425,4 +446,292 @@ test("background and delayed progress cannot overwrite the editor result", () =>
   globalThis.document.getElementById("outputBox").textContent = "final outputs";
   updateRunProgress({ runId: "editor", type: "log", line: "late event" });
   assert.equal(globalThis.document.getElementById("outputBox").textContent, "final outputs");
+});
+
+test("scalar JSON values are visible in both timeline and historical results", async () => {
+  const { showHistoricalRun } = await import("../src/js/runs.js");
+  for (const value of [false, 0, "", null, {}, []]) {
+    reset();
+    const step = { seq: 1, path: "scalar", state: "ok", outputJson: value, hasOutput: true };
+    invoke = async (cmd) => {
+      if (cmd === "show_run") return { run: { id: "scalar", flowId: "scalar" }, steps: [step] };
+      return [];
+    };
+    await applyRunResponse({ ...response("scalar"), steps: [step] });
+    assert.match(globalThis.document.getElementById("timelineDetail").innerHTML, /data-result-preview/);
+    await showHistoricalRun("scalar");
+    assert.match(globalThis.document.getElementById("histStepDetail").innerHTML, /data-result-preview/);
+  }
+});
+
+test("historical selection stays consistent when older cost responses finish late", async () => {
+  const { showHistoricalRun } = await import("../src/js/runs.js");
+  reset();
+  const aCosts = deferred();
+  const requested = deferred();
+  invoke = async (cmd, { runId }) => {
+    if (cmd === "show_run") return { run: { id: runId, flowId: `flow-${runId}` }, steps: [{ seq: 1, path: `step-${runId}`, state: "ok", outputJson: runId }] };
+    if (cmd === "run_cost" && runId === "A") { requested.resolve(); return aCosts.promise; }
+    return [];
+  };
+  const older = showHistoricalRun("A");
+  await requested.promise;
+  await showHistoricalRun("B");
+  aCosts.resolve([]);
+  await older;
+  assert.equal(state.activeRun.id, "B");
+  assert.match(globalThis.document.getElementById("runDetail").innerHTML, /flow-B/);
+  assert.doesNotMatch(globalThis.document.getElementById("runDetail").innerHTML, /flow-A/);
+  assert.match(globalThis.document.getElementById("histStepDetail").innerHTML, /step-B/);
+});
+
+test("node result selection keeps loop instances and source identity isolated", async () => {
+  const { selectNodeRunResult } = await import("../src/js/runs.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "loop", action: "control.for_each", do: [{ id: "read" }] }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  const reads = [];
+  const steps = [0, 1].map((index) => ({ seq: index, path: `loop[${index}]/read`, state: "ok", detailsDeferred: true }));
+  invoke = async (cmd, args) => {
+    if (cmd === "read_run_step") { reads.push(args.seq); return { ...steps[args.seq], detailsDeferred: false, outputJson: args.seq, hasOutput: true }; }
+    return [];
+  };
+  await applyRunResponse({ ...response(runId), steps });
+  assert.equal(selectNodeRunResult([0, "do", 0]), true);
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.equal(state.activeStepRun.path, "loop[1]/read");
+  assert.match(globalThis.document.getElementById("timelineDetail").innerHTML, /data-result-preview/);
+  assert.ok(reads.includes(1));
+  state.source += "# changed";
+  assert.equal(selectNodeRunResult([0, "do", 0]), false);
+});
+
+test("history and step pages request explicit cursors without full payload calls", async () => {
+  const { refreshRuns, showHistoricalRun } = await import("../src/js/runs.js");
+  reset();
+  const calls = [];
+  invoke = async (cmd, args) => {
+    calls.push([cmd, args]);
+    if (cmd === "list_runs") return [{ id: "page" }];
+    if (cmd === "show_run") return { run: { id: "page" }, steps: [{ seq: 200, path: "step", state: "ok", detailsDeferred: true }] };
+    if (cmd === "list_run_steps") return [{ seq: 201, path: "next", state: "ok", detailsDeferred: true }];
+    if (cmd === "read_run_step") return { seq: args.seq, path: "loaded", outputJson: false, hasOutput: true };
+    return [];
+  };
+  await refreshRuns({ offset: 60 });
+  await showHistoricalRun("page");
+  await showHistoricalRun("page", { afterSeq: 200, previous: [null] });
+  assert.deepEqual(calls.find(([cmd]) => cmd === "list_runs")[1], { limit: 60, offset: 60 });
+  assert.equal(calls.find(([cmd]) => cmd === "show_run")[1].summary, true);
+  assert.deepEqual(calls.find(([cmd]) => cmd === "list_run_steps")[1], { runId: "page", afterSeq: 200, limit: 200 });
+  assert.ok(calls.filter(([cmd]) => cmd === "read_run_step").length === 2);
+  assert.ok(!calls.some(([cmd]) => cmd === "read_run_outputs"));
+});
+
+test("large table preview renders a bounded number of rows and columns", async () => {
+  reset();
+  invoke = async () => [];
+  const rows = Array.from({ length: 10000 }, (_, index) => ({ id: index, message: "x".repeat(1000) }));
+  await applyRunResponse({ ...response("table"), steps: [{ seq: 1, path: "table", state: "ok", outputJson: rows }] });
+  const detail = globalThis.document.getElementById("timelineDetail").innerHTML;
+  assert.match(detail, /data-result-table/);
+  assert.equal((detail.match(/<tr>/g) || []).length, 21);
+  assert.match(detail, /data-result-export/);
+  assert.ok(detail.length < 30000);
+});
+
+test("nested single-step IPC includes exact selection path and maps its response", async () => {
+  reset();
+  state.savedSource = state.source;
+  state.ast = { spec: { steps: [{ id: "gate", action: "control.if", do: [{ id: "child", action: "control.log" }], else: [{ id: "child", action: "control.log" }] }] } };
+  state.selectedStepPath = [0, "else", 0];
+  let request;
+  invoke = async (cmd, args) => {
+    if (cmd === "run_step") { request = args; return { ...response(args.runId), steps: [{ path: "child", state: "ok", outputJson: false }] }; }
+    return [];
+  };
+  await runStep("child");
+  assert.deepEqual(request.stepPath, [0, "else", 0]);
+  assert.equal(state.editorRunContext.selectedRuntimePath, "gate/else/child");
+  const { getGraphRunState } = await import("../src/js/editor/graph-run-state.js");
+  assert.equal(getGraphRunState({ runtimePath: "gate/else/child" }, state).state, "ok");
+  assert.equal(getGraphRunState({ runtimePath: "gate/do/child" }, state).state, "idle");
+});
+
+test("late per-step payload replies cannot replace the newer selected result", async () => {
+  const { selectNodeRunResult } = await import("../src/js/runs.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "first" }, { id: "second" }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  const older = deferred();
+  const requested = deferred();
+  invoke = async (cmd, args) => {
+    if (cmd === "read_run_step" && args.seq === 1) { requested.resolve(); return older.promise; }
+    if (cmd === "read_run_step") return { seq: 2, path: "second", outputJson: "newer", hasOutput: true };
+    return [];
+  };
+  await applyRunResponse({ ...response(runId), steps: [{ seq: 1, path: "first", detailsDeferred: true }, { seq: 2, path: "second", detailsDeferred: true }] });
+  await requested.promise;
+  selectNodeRunResult([1]);
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  older.resolve({ seq: 1, path: "first", outputJson: "older", hasOutput: true });
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.match(globalThis.document.getElementById("timelineDetail").innerHTML, /newer/);
+  assert.doesNotMatch(globalThis.document.getElementById("timelineDetail").innerHTML, /older/);
+  assert.match(globalThis.document.getElementById("graphResultDetail").innerHTML, /newer/);
+});
+
+test("result focus round trip preserves the selected loop instance", async () => {
+  const { selectNodeRunResult } = await import("../src/js/runs.js");
+  const { selectStep } = await import("../src/js/editor/inspector.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "loop", action: "control.for_each", do: [{ id: "read" }] }] } };
+  state.selectedStepPath = [0, "do", 0];
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  invoke = async () => [];
+  const focused = [];
+  const roundTrip = (event) => { focused.push(event.detail.path); selectStep([0, "do", 0]); };
+  document.addEventListener("lumo:focus-node", roundTrip);
+  try {
+    await applyRunResponse({ ...response(runId), steps: [0, 1].map((index) => ({ seq: index, path: `loop[${index}]/read`, state: "ok", outputJson: `instance-${index}` })) });
+    assert.equal(selectNodeRunResult([0, "do", 0]), true);
+    assert.equal(state.activeStepRun.path, "loop[1]/read");
+    document.getElementById("timelineTrack").querySelectorAll(".timeline-step")[0].dispatchEvent(new Event("click"));
+    await Promise.resolve();
+    assert.deepEqual(focused, ["loop/read"]);
+    assert.equal(state.activeStepRun.path, "loop[0]/read");
+    assert.match(document.getElementById("timelineDetail").innerHTML, /instance-0/);
+    assert.doesNotMatch(document.getElementById("timelineDetail").innerHTML, /instance-1/);
+  } finally { document.removeEventListener("lumo:focus-node", roundTrip); }
+});
+
+test("loop instance pages retain every result and navigate using exact global row indices", async () => {
+  const { selectNodeRunResult } = await import("../src/js/runs.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "loop", action: "control.for_each", do: [{ id: "read" }, { id: "save" }] }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  invoke = async () => [];
+  const steps = Array.from({ length: 1001 }, (_, index) => ["read", "save"].map((id, offset) => ({ seq: index * 2 + offset + 1, path: `loop[${index}]/${id}`, state: "ok", outputJson: `${id}-${index}` }))).flat();
+  await applyRunResponse({ ...response(runId), steps });
+  assert.equal(selectNodeRunResult([0, "do", 0]), true);
+  const box = document.getElementById("graphResultDetail");
+  assert.equal(state.activeRunSteps, steps);
+  assert.equal(state.activeRunSteps.length, 2002);
+  assert.equal(state.activeStepRun.path, "loop[1000]/read");
+  assert.match(box.prepended.innerHTML, /运行实例 1001–1001 \/ 1001/);
+  assert.equal((box.prepended.innerHTML.match(/<option /g) || []).length, 1);
+  box.prepended.querySelector("[data-instance-prev]").dispatchEvent(new Event("click"));
+  assert.equal(state.activeStepRun.path, "loop[800]/read");
+  assert.match(box.prepended.innerHTML, /运行实例 801–1000 \/ 1001/);
+  assert.equal((box.prepended.innerHTML.match(/<option /g) || []).length, 200);
+  const select = box.prepended.querySelector("select"); select.value = String(805 * 2);
+  select.dispatchEvent(new Event("change"));
+  assert.equal(state.activeStepRun.path, "loop[805]/read");
+  assert.match(box.innerHTML, /read-805/);
+  assert.match(box.prepended.innerHTML, /value="1610" selected/);
+  box.prepended.querySelector("[data-instance-next]").dispatchEvent(new Event("click"));
+  assert.equal(state.activeStepRun.path, "loop[1000]/read");
+});
+
+test("selecting an unrun node invalidates an older deferred result", async () => {
+  reset();
+  state.ast = { spec: { steps: [{ id: "old" }, { id: "unrun" }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  const older = deferred();
+  invoke = async (cmd) => cmd === "read_run_step" ? older.promise : [];
+  await applyRunResponse({ ...response(runId), steps: [{ seq: 1, path: "old", detailsDeferred: true }] });
+  document.dispatchEvent(new CustomEvent("lumo:step-selected", { detail: { flowPath: state.flowPath, path: [1] } }));
+  older.resolve({ seq: 1, path: "old", outputJson: "stale-payload", hasOutput: true });
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.equal(state.activeStepRun, null);
+  assert.match(document.getElementById("graphResultDetail").innerHTML, /没有运行结果/);
+  assert.doesNotMatch(document.getElementById("graphResultDetail").innerHTML, /stale-payload/);
+});
+
+test("closing the result drawer cancels its pending payload", async () => {
+  const { selectNodeRunResult } = await import("../src/js/runs.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "old" }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  const older = deferred();
+  invoke = async (cmd) => cmd === "read_run_step" ? older.promise : [];
+  await applyRunResponse({ ...response(runId), steps: [{ seq: 1, path: "old", detailsDeferred: true }] });
+  selectNodeRunResult([0]);
+  document.getElementById("graphResultDrawer").hidden = true;
+  document.getElementById("graphResultDetail").innerHTML = "closed";
+  document.dispatchEvent(new CustomEvent("lumo:graph-result-closed"));
+  older.resolve({ seq: 1, path: "old", outputJson: "stale-payload", hasOutput: true });
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.equal(document.getElementById("graphResultDrawer").hidden, true);
+  assert.equal(document.getElementById("graphResultDetail").innerHTML, "closed");
+});
+
+test("an empty history page retains navigation to the previous page", async () => {
+  const { refreshRuns } = await import("../src/js/runs.js");
+  reset();
+  const offsets = [];
+  invoke = async (_cmd, { offset }) => { offsets.push(offset); return []; };
+  await refreshRuns({ offset: 60 });
+  const list = document.getElementById("runsList");
+  assert.match(list.innerHTML, /data-runs-prev >上一页/);
+  list.onclick({ target: { closest: (selector) => selector === "[data-runs-prev]" ? {} : null } });
+  await Promise.resolve();
+  assert.deepEqual(offsets, [60, 0]);
+});
+
+test("AI cost rows use bounded cursor pages and preserve previous navigation", async () => {
+  const { showHistoricalRun } = await import("../src/js/runs.js");
+  reset();
+  const costs = Array.from({ length: 25000 }, (_, index) => ({ id: index + 1, step_id: `cost-${index}`, provider: "p", model: "m", cost_usd_micro: 1 }));
+  const requests = [];
+  invoke = async (cmd, args) => {
+    if (cmd === "show_run") return { run: { id: "costs" }, steps: [] };
+    if (cmd === "run_cost") { requests.push(args); return args.afterId ? [] : costs; }
+    return [];
+  };
+  await showHistoricalRun("costs");
+  const panel = document.getElementById("runCostDetail");
+  assert.equal((panel.innerHTML.match(/<tr/g) || []).length, 201);
+  assert.ok(panel.innerHTML.length < 120000);
+  assert.deepEqual(requests[0], { runId: "costs", afterId: null, limit: 200 });
+  panel.querySelector("[data-cost-next]").dispatchEvent(new Event("click"));
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.deepEqual(requests[1], { runId: "costs", afterId: 200, limit: 200 });
+  assert.match(panel.innerHTML, /data-cost-prev >上一页/);
+  panel.querySelector("[data-cost-prev]").dispatchEvent(new Event("click"));
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+  assert.deepEqual(requests[2], { runId: "costs", afterId: null, limit: 200 });
+});
+
+test("history defaults do not focus graph and async output retains its button", async () => {
+  const { showHistoricalRun } = await import("../src/js/runs.js");
+  reset();
+  state.ast = { spec: { steps: [{ id: "read" }] } };
+  setRunInFlight(true);
+  const runId = state.inFlightRunId;
+  const outputs = deferred();
+  invoke = async (cmd) => {
+    if (cmd === "show_run") return { run: { id: runId }, steps: [{ seq: 1, path: "read", outputJson: false }] };
+    if (cmd === "read_run_outputs") return outputs.promise;
+    return [];
+  };
+  let focuses = 0;
+  const onFocus = () => { focuses++; };
+  document.addEventListener("lumo:focus-node", onFocus);
+  try {
+    await showHistoricalRun(runId);
+    assert.equal(focuses, 0);
+    const button = document.getElementById("runDetail").querySelector("[data-load-run-output]");
+    button.dispatchEvent(new Event("click"));
+    outputs.resolve(false);
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+    assert.equal(button.textContent, "已加载输出预览");
+    assert.equal(document.getElementById("runDetail").querySelector("[data-run-output]").textContent, "false");
+  } finally { document.removeEventListener("lumo:focus-node", onFocus); }
 });

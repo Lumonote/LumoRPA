@@ -58,14 +58,16 @@ class Driver:
         }}})
         self.session = value["sessionId"]
         self.command("POST", "/timeouts", {"script": 30000, "pageLoad": 60000, "implicit": 0})
-        # The app also owns a hidden voice-capsule webview; select the main one.
-        def select_main():
+        self.switch_to("#newFlowBtn")
+
+    def switch_to(self, selector):
+        def select_window():
             for handle in self.command("GET", "/window/handles"):
                 self.command("POST", "/window", {"handle": handle})
-                if self.evaluate("Boolean(document.querySelector('#newFlowBtn'))"):
-                    return True
-            return False
-        wait_for("the main Studio webview", select_main, timeout=60)
+                if self.evaluate("Boolean(document.querySelector(arguments[0]))", selector):
+                    return handle
+            return None
+        return wait_for(f"webview containing {selector}", select_window, timeout=60)
 
     def evaluate(self, expression, *args):
         result = self.command("POST", "/execute/async", {
@@ -99,6 +101,34 @@ class Driver:
 
     def text(self, selector):
         return self.command("GET", f"/element/{self.element(selector)}/text")
+
+    def drag(self, selector, dx, dy):
+        rect = self.command("GET", f"/element/{self.element(selector)}/rect")
+        x, y = round(rect['x'] + rect['width'] / 2), round(rect['y'] + rect['height'] / 2)
+        try:
+            self.command("POST", "/actions", {"actions": [{
+                "type": "pointer", "id": "canvas-mouse", "parameters": {"pointerType": "mouse"},
+                "actions": [
+                    {"type": "pointerMove", "duration": 0, "origin": "viewport", "x": x, "y": y},
+                    {"type": "pointerDown", "button": 0},
+                    {"type": "pointerMove", "duration": 300, "origin": "viewport", "x": x + dx, "y": y + dy},
+                    {"type": "pointerUp", "button": 0},
+                ],
+            }]})
+        finally:
+            self.command("DELETE", "/actions")
+
+    def chord(self, key):
+        try:
+            self.command('POST', '/actions', {'actions': [{
+                'type': 'key', 'id': 'keyboard', 'actions': [
+                    {'type': 'keyDown', 'value': '\ue009'},
+                    {'type': 'keyDown', 'value': key}, {'type': 'keyUp', 'value': key},
+                    {'type': 'keyUp', 'value': '\ue009'},
+                ],
+            }]})
+        finally:
+            self.command('DELETE', '/actions')
 
     def capture(self, directory):
         if not self.session:
@@ -225,6 +255,126 @@ def schedule_acceptance(driver, path):
              for item in driver.invoke("job_list")))
 
 
+def canvas_acceptance(driver, path, restore_source):
+    source = flow_source("desktop-e2e-canvas") + """    - id: capture
+      action: control.set_var
+      with:
+        name: captured
+        value: before
+"""
+    driver.fill("#codeEditor", source)
+    driver.click('#viewSwitch [data-mode="graph"]')
+    driver.click("#graphFit")
+    wait_for("two canvas nodes", lambda: driver.evaluate("document.querySelectorAll('.graph-node').length") == 2)
+    # Exercise palette insertion and undo through the shipped editor handlers.
+    driver.click("#graphAddNode")
+    driver.fill("#graphActionSearch", "control.log")
+    driver.click('[data-graph-action="control.log"]')
+    wait_for("palette node insertion", lambda: driver.evaluate("document.querySelectorAll('.graph-node').length") == 3)
+    driver.click("#undoBtn")
+    wait_for("undo palette insertion", lambda: driver.evaluate("document.querySelectorAll('.graph-node').length") == 2)
+    driver.click("#graphFit")
+    position = "(() => { const node = document.querySelector('.graph-node[data-step-path=\"0\"]').closest('foreignObject'); return [node.getAttribute('x'), node.getAttribute('y')]; })()"
+    before = driver.evaluate(position)
+    driver.drag('.graph-node[data-step-path="0"] .graph-node-title', 64, 48)
+    wait_for("canvas node drag", lambda: driver.evaluate(position) != before)
+    driver.click("#undoBtn")
+    wait_for("canvas layout undo", lambda: driver.evaluate(position) == before)
+    driver.click('button[data-node-key="0"][data-port-kind="data"][data-port-direction="output"][data-port-output="[]"]')
+    driver.click('button[data-node-key="1"][data-port-kind="data"][data-port-input="value"]')
+    wait_for("binding replacement confirmation", lambda: driver.evaluate("!document.querySelector('#graphConnectConfirm').hidden"))
+    driver.click("#graphConnectApply")
+    wait_for("YAML data binding", lambda: driver.state("source")
+                      if "steps.echo.result" in driver.state("source") else None)
+    driver.click('.graph-node[data-step-path="0"] .graph-node-title')
+    driver.click('#rightTabs [data-section="inspector"]')
+    wait_for('loaded node inspector', lambda: driver.evaluate("!document.querySelector('#applyStepBtn').disabled"))
+    driver.fill('[data-prop="id"]', 'renamed_echo')
+    driver.click('#applyStepBtn')
+    linked = wait_for('renamed data binding', lambda: driver.state('source')
+                      if 'steps.renamed_echo.result' in driver.state('source') else None)
+    # Keyboard copy/paste must create a real node and be atomically undoable.
+    driver.click('.graph-node[data-step-path="1"] .graph-node-title')
+    driver.chord('c')
+    driver.chord('v')
+    wait_for('canvas paste', lambda: driver.evaluate("document.querySelectorAll('.graph-node').length") == 3)
+    driver.click('#undoBtn')
+    wait_for('canvas paste undo', lambda: driver.state('source') == linked)
+    previous_ids = {run['id'] for run in driver.invoke('list_runs', limit=60)}
+    driver.click("#runBtn")
+    wait_for("canvas result", lambda: "desktop-e2e-canvas" in driver.text("#outputBox")
+             and driver.evaluate("!document.querySelector('#runBtn').disabled"))
+    assert driver.invoke('read_flow_source', path=path) == linked
+    run = next(item for item in driver.invoke('list_runs', limit=60)
+               if item['id'] not in previous_ids and item['flowId'] == 'desktop-e2e')
+    detail = driver.invoke('show_run', runId=run['id'])
+    assert detail['run']['state'] == 'ok' and len(detail['steps']) == 2, detail
+    assert all(step['state'] == 'ok' for step in detail['steps']), detail
+    assert 'desktop-e2e-canvas' in json.dumps(detail['steps'][1]), detail
+    driver.click('.graph-node[data-step-path="1"] .graph-node-title')
+    wait_for('canvas node result inspection', lambda: 'desktop-e2e-canvas' in driver.text('#timelineDetail [data-result-preview]'))
+    driver.click('#viewSwitch [data-mode="code"]')
+    driver.fill("#codeEditor", restore_source)
+    driver.click("#saveFlowBtn")
+    wait_for("fixture restored after canvas acceptance", lambda: driver.invoke('read_flow_source', path=path) == restore_source)
+
+
+def companion_acceptance(driver, path, source):
+    # The unique saved flow alias routes locally through the production router.
+    # No model, microphone, fake IPC, or supplied plan is used for this request.
+    driver.click("#voiceToggleBtn")
+    driver.switch_to("[data-companion]")
+    if driver.evaluate("document.querySelector('[data-capsule-panel]').hidden"):
+        driver.click('[data-voice-action="panel"]')
+    previous = driver.invoke('capsule_status').get('activeRunId')
+    driver.fill('[data-capsule-input]', 'desktop-e2e')
+    driver.click('[data-capsule-submit]')
+    def completed():
+        status = driver.invoke('capsule_status')
+        return status if status.get('activeRunId') != previous and status.get('runState') == 'completed' else None
+    status = wait_for('companion text task completion', completed, timeout=60)
+    assert status['activeRunId'] and not status['listening'] and not status['error'], status
+    wait_for('companion result display', lambda: bool(driver.text('[data-capsule-result]').strip()))
+    assert status['result'].strip(), status
+    assert any(event['kind'] == 'run.completed' for event in driver.invoke('agent_events', runId=status['activeRunId'], afterSeq=0))
+    driver.click('[data-voice-action="expand"]')
+    driver.switch_to('#newFlowBtn')
+    wait_for('companion run selected in Mission Control', lambda:
+             driver.evaluate("document.querySelector('[data-mc-run-select]')?.value") == status['activeRunId'])
+    # A cancellable local sleep gives the native event transport time to expose
+    # running/progress before stopping, then another submission must still work.
+    driver.click('.tabs [data-view="design"]')
+    slow = source.replace('  steps:\n', '  steps:\n    - id: pause\n      action: control.sleep\n      with: {ms: 30000}\n')
+    driver.fill('#codeEditor', slow)
+    driver.click('#saveFlowBtn')
+    wait_for('saved cancellable companion fixture', lambda: driver.invoke('read_flow_source', path=path) == slow)
+    driver.click('#voiceToggleBtn')
+    driver.switch_to('[data-companion]')
+    driver.fill('[data-capsule-input]', 'desktop-e2e')
+    driver.click('[data-capsule-submit]')
+    def running():
+        snapshot = driver.invoke('capsule_status')
+        return snapshot if snapshot.get('activeRunId') != status['activeRunId'] and snapshot.get('runState') == 'running' else None
+    active = wait_for('companion running progress', running)
+    assert driver.evaluate("document.querySelector('[data-capsule-progress]').getAttribute('aria-valuenow')") is not None
+    wait_for('enabled companion stop', lambda: driver.evaluate("!document.querySelector('[data-voice-action=stop-task]').disabled"))
+    driver.click('[data-voice-action="stop-task"]')
+    wait_for('companion cancellation', lambda: driver.invoke('capsule_status').get('runState') == 'cancelled')
+    driver.switch_to('#newFlowBtn')
+    driver.fill('#codeEditor', source)
+    driver.click('#saveFlowBtn')
+    wait_for('restored companion fixture', lambda: driver.invoke('read_flow_source', path=path) == source)
+    driver.click('#voiceToggleBtn')
+    driver.switch_to('[data-companion]')
+    driver.fill('[data-capsule-input]', 'desktop-e2e')
+    driver.click('[data-capsule-submit]')
+    def retried():
+        snapshot = driver.invoke('capsule_status')
+        return snapshot if snapshot.get('activeRunId') != active['activeRunId'] and snapshot.get('runState') == 'completed' else None
+    wait_for('companion retry after cancellation', retried)
+    driver.switch_to('#newFlowBtn')
+
+
 def acceptance(driver):
     wait_for("Studio startup", lambda: driver.text("#statusText") == "就绪", timeout=60)
     previous_path = driver.state("flowPath")
@@ -259,6 +409,7 @@ def acceptance(driver):
     driver.fill("#codeEditor", source)
     driver.click("#saveFlowBtn")
     wait_for("restored executable fixture", lambda: driver.invoke("read_flow_source", path=path) == source)
+    canvas_acceptance(driver, path, source)
     schedule_acceptance(driver, path)
 
     # Supplied local plan avoids a remote model while retaining production
@@ -289,7 +440,8 @@ def acceptance(driver):
     driver.click('[data-mc-run-select] option[value=""]')
     wait_for("return to newest topology", lambda: driver.element('[data-node-id="latest-node"]'))
     assert driver.evaluate("document.querySelector('[data-mc-run-select]').value") == ""
-    print("PASS: editor save/run/autosave, failure results, history, scheduling/edit conflict, L3 approval, live/history switching")
+    companion_acceptance(driver, path, source)
+    print("PASS: editor save/run/autosave, canvas palette/drag/undo/connect/rename/copy/run/results, failure results, history, scheduling/edit conflict, L3 approval, live/history switching, companion text/progress/result/details/cancel/retry")
 
 
 def main():

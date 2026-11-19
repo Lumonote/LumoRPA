@@ -436,6 +436,9 @@ impl Action for RequestAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ReqIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::http_response())
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ReqIn {
             method,
@@ -549,6 +552,18 @@ impl Action for DownloadAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<DownloadIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["dest", "bytes", "status", "content_type"],
+                "properties": {
+                    "dest": { "type": "string" }, "bytes": { "type": "integer" },
+                    "status": { "type": "integer" }, "content_type": { "type": ["string", "null"] }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let DownloadIn {
@@ -682,6 +697,9 @@ impl Action for UploadAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<UploadIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::http_response())
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let UploadIn {
@@ -842,6 +860,18 @@ impl Action for OAuth2TokenAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<OAuth2TokenIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["access_token", "token_type", "expires_in", "scope"],
+                "properties": {
+                    "access_token": { "type": "string" }, "token_type": { "type": ["string", "null"] },
+                    "expires_in": { "type": ["integer", "null"] }, "scope": { "type": ["string", "null"] }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let OAuth2TokenIn {
@@ -1086,6 +1116,18 @@ impl Action for PaginateAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<PaginateIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["items", "pages", "truncated"],
+                "properties": {
+                    "items": { "type": "array", "items": {} },
+                    "pages": { "type": "integer" }, "truncated": { "type": "boolean" }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PaginateIn {

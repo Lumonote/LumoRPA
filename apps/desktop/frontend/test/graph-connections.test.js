@@ -115,3 +115,35 @@ test("legacy parallel do entries are isolated branches, not sequential data sour
   const text = "spec: {steps: [{id: parallel, action: control.parallel, do: [{id: a, action: file.read}, {id: b, action: control.log}]}]}";
   assert.throws(() => planGraphConnection(text, { fromPath: [0, "do", 0], toPath: [0, "do", 1], input: "message" }), /独立分支/);
 });
+
+test("field links generate safe nested access and disconnect only the selected field", () => {
+  const options = { ...connection, outputPath: ["json", "user-name", 0, 'quoted"key'] };
+  const planned = planGraphConnection(source, options);
+  assert.equal(planned.expression, '{{ steps.read.result.json["user-name"][0]["quoted\\"key"] }}');
+  assert.equal(planGraphConnection(planned.source, options).changed, false);
+  assert.throws(() => planGraphConnection(planned.source, { ...options, outputPath: ["json"], disconnect: true }), /完整的结果绑定/);
+  assert.equal(Object.hasOwn(read(planGraphConnection(planned.source, { ...options, disconnect: true }).source).with, "message"), false);
+  assert.throws(() => graphResultExpression("read", [NaN]), /字段路径/);
+  assert.throws(() => graphResultExpression("read", "json"), /字段路径/);
+  const alternate = source.replace('message: ""', `message: "{{ steps['read']['result']['text'] }}"`);
+  assert.equal(planGraphConnection(alternate, { ...connection, outputPath: ["text"] }).changed, false);
+});
+
+test("known incompatible types fail before producing a source edit; dynamic fields stay connectable", () => {
+  const schemas = new Map([
+    ["file.read", { "x-lumo-output": { type: "object", properties: { text: { type: "string" }, status: { type: "integer" }, json: {} }, additionalProperties: false } }],
+    ["control.log", { type: "object", properties: { message: { type: "string" } }, additionalProperties: false }],
+  ]);
+  assert.throws(() => planGraphConnection(source, { ...connection, schemas }), /类型不兼容/);
+  assert.throws(() => planGraphConnection(source, { ...connection, schemas, outputPath: ["status"] }), /类型不兼容/);
+  assert.throws(() => planGraphConnection(source, { ...connection, schemas, outputPath: ["absent"] }), /不存在/);
+  const text = planGraphConnection(source, { ...connection, schemas, outputPath: ["text"] });
+  assert.equal(text.compatibility.known, true);
+  assert.equal(text.expression, "{{ steps.read.result.text }}");
+  const json = planGraphConnection(source, { ...connection, schemas, outputPath: ["json", "message"] });
+  assert.equal(json.compatibility.valid, true);
+  assert.equal(json.compatibility.known, false);
+  // A changed action contract must not prevent removing an old binding.
+  const old = planGraphConnection(source, connection);
+  assert.equal(planGraphConnection(old.source, { ...connection, schemas, disconnect: true }).changed, true);
+});

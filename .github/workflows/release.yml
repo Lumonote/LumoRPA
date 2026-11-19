@@ -56,7 +56,7 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
-  contents: write # softprops/action-gh-release creates/updates releases
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,8 +65,20 @@ env:
   ARTIFACT_RETENTION_DAYS: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}
 
 jobs:
+  # Local reusable workflows resolve at the exact caller commit, including tags.
+  # A successful unrelated branch run can never authorize this release.
+  full-ci:
+    uses: ./.github/workflows/ci.yml
+  desktop-acceptance:
+    uses: ./.github/workflows/desktop-e2e.yml
+  recorder-acceptance:
+    uses: ./.github/workflows/linux-recorder-e2e.yml
+  transfer-acceptance:
+    uses: ./.github/workflows/secure-transfer-e2e.yml
+
   production-gate:
     name: Production agent gates
+    needs: [full-ci, desktop-acceptance, recorder-acceptance, transfer-acceptance]
     # Pinned to an explicit supported image, NOT the floating `macos-latest`:
     # that label already migrated once (26 floating onto a 26 image) and would
     # silently move the SDK, Xcode and preinstalled toolchains under this
@@ -80,6 +92,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v5
@@ -89,42 +104,23 @@ jobs:
           cache-dependency-path: apps/desktop/frontend/package-lock.json
       - name: Verify agent, voice, security and recovery
         run: |
-          cargo test -p lumo-storage -p lumo-agent -p lumo-voice
-          cargo test -p lumo-voice --features sherpa-native --test sherpa_native
-          cargo test -p lumorpa-desktop --lib
-          cargo clippy -p lumo-agent -p lumo-voice -p lumorpa-desktop --all-targets -- -D warnings
+          cargo test --locked -p lumo-storage -p lumo-agent -p lumo-voice
+          cargo test --locked -p lumo-voice --features sherpa-native --test sherpa_native
+          cargo test --locked -p lumorpa-desktop --lib
+          cargo clippy --locked -p lumo-agent -p lumo-voice -p lumorpa-desktop --all-targets -- -D warnings
       - name: Verify Mission Control and desktop surfaces
         working-directory: apps/desktop/frontend
         run: |
           npm ci
           npm test
           npm run lint
-      # TAG-ONLY on purpose. main pushes have no signing secrets; asserting
-      # them there would turn every main build red — and produce nothing.
-      - name: Require macOS signing and notarization secrets for tagged releases
+      - name: Check release version and required public update configuration
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE_TAG: ${{ github.ref_name }}
           LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: |
-          test -n "$APPLE_CERTIFICATE"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_SIGNING_IDENTITY"
-          test -n "$APPLE_ID"
-          test -n "$APPLE_PASSWORD"
-          test -n "$APPLE_TEAM_ID"
-          test -n "$TAURI_SIGNING_PRIVATE_KEY"
-          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
-          # Without the pubkey the bundler silently skips updater artifacts, so a
-          # tagged release would ship without .sig files and break auto-update.
-          test -n "$LUMO_UPDATER_PUBKEY"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: python3 scripts/release-manifest.py validate-version --tag "$RELEASE_TAG"
 
   macos:
     name: macOS (universal · Intel + Apple Silicon)
@@ -136,6 +132,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install Rust (+ both macOS arches)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -146,12 +145,34 @@ jobs:
       # Desktop installer + CLI archive in one step: both halves share a single
       # dependency resolve and target directory, and the step fails closed if
       # either half is missing. See scripts/package-release.sh.
+      - name: Import macOS release signing certificate
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/macos-release-signing.sh import
       - name: Package (universal .dmg + CLI archive)
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/package-release.sh universal-apple-darwin app,dmg
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          LUMO_UPDATER_PUBKEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.LUMO_UPDATER_PUBKEY || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/') && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ startsWith(github.ref, 'refs/tags/') && secrets.APPLE_TEAM_ID || '' }}
+        run: scripts/package-ci-release.sh universal-apple-darwin app,dmg
+      - name: Verify macOS signatures and notarization
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/macos-release-signing.sh verify target/universal-apple-darwin/release/bundle
+      - name: Remove temporary signing keychain
+        if: always() && startsWith(github.ref, 'refs/tags/')
+        run: scripts/macos-release-signing.sh cleanup
       # Every copy is `cp -n` (no-clobber) and every find gets `-type f`, so two
       # sources that happen to share a basename cannot silently overwrite one
       # another. The closing assertion fails the job if the staging directory is
@@ -165,6 +186,9 @@ jobs:
             \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp -n {} out/ \;
           test -n "$(ls -A out)" || { echo "error: macOS staging produced no artifacts" >&2; exit 1; }
           ls -l out
+      - name: Record artifact commit and hashes
+        shell: bash
+        run: python3 scripts/release-manifest.py stamp --platform macos-universal
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-macos-universal
@@ -180,11 +204,6 @@ jobs:
             echo "| --- | ---: |"
             find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
 
   windows:
     name: Windows (x86_64)
@@ -192,6 +211,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -201,11 +223,11 @@ jobs:
       # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
       - name: Package (.exe NSIS + .msi + CLI archive)
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          LUMO_UPDATER_PUBKEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.LUMO_UPDATER_PUBKEY || '' }}
         shell: bash
-        run: scripts/package-release.sh x86_64-pc-windows-msvc nsis,msi
+        run: scripts/package-ci-release.sh x86_64-pc-windows-msvc nsis,msi
       # Windows is a priority target, so the NSIS .exe and the .msi are staged
       # through SEPARATE find passes. Tauri's WiX output and its NSIS output can
       # carry the SAME basename, so a single flat find|cp could keep only one of
@@ -227,6 +249,9 @@ jobs:
             echo "error: no NSIS .exe staged" >&2; exit 1; }
           test -n "$(find out -maxdepth 1 -name '*.msi' -print -quit)" || {
             echo "error: no .msi staged" >&2; exit 1; }
+      - name: Record artifact commit and hashes
+        shell: bash
+        run: python3 scripts/release-manifest.py stamp --platform windows-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-windows-x86_64
@@ -243,11 +268,6 @@ jobs:
             echo "| --- | ---: |"
             find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
 
   linux-x64:
     name: Linux (x86_64 · deb/rpm/AppImage)
@@ -255,6 +275,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
@@ -267,10 +290,10 @@ jobs:
       # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
       - name: Package (.deb / .rpm / AppImage + CLI archive)
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/package-release.sh "" deb,rpm,appimage
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          LUMO_UPDATER_PUBKEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.LUMO_UPDATER_PUBKEY || '' }}
+        run: scripts/package-ci-release.sh "" deb,rpm,appimage
       - name: Stage artifacts
         run: |
           set -euo pipefail
@@ -281,6 +304,9 @@ jobs:
             -exec cp -n {} out/ \;
           test -n "$(ls -A out)" || { echo "error: Linux x86_64 staging produced no artifacts" >&2; exit 1; }
           ls -l out
+      - name: Record artifact commit and hashes
+        shell: bash
+        run: python3 scripts/release-manifest.py stamp --platform linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-linux-x86_64
@@ -296,11 +322,6 @@ jobs:
             echo "| --- | ---: |"
             find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
 
   linux-arm64:
     name: Linux (aarch64 · 麒麟 ARM 基线)
@@ -308,6 +329,9 @@ jobs:
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # GTK/WebKit for Tauri, plus the X11/xcb/pipewire and ALSA headers that
@@ -318,21 +342,24 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
       # Desktop installer + CLI archive in one step (see scripts/package-release.sh).
-      - name: Package (.deb / .rpm + CLI archive)
+      - name: Package (.deb / .rpm / AppImage + CLI archive)
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
-        run: scripts/package-release.sh "" deb,rpm
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          LUMO_UPDATER_PUBKEY: ${{ startsWith(github.ref, 'refs/tags/') && secrets.LUMO_UPDATER_PUBKEY || '' }}
+        run: scripts/package-ci-release.sh "" deb,rpm,appimage
       - name: Stage artifacts
         run: |
           set -euo pipefail
           mkdir -p out
           cp -n dist/lumorpa-*-linux-*.tar.gz out/ 2>/dev/null || true
           find target/release/bundle -type f \
-            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp -n {} out/ \;
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp -n {} out/ \;
           test -n "$(ls -A out)" || { echo "error: Linux aarch64 staging produced no artifacts" >&2; exit 1; }
           ls -l out
+      - name: Record artifact commit and hashes
+        shell: bash
+        run: python3 scripts/release-manifest.py stamp --platform linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: lumorpa-linux-aarch64
@@ -348,11 +375,6 @@ jobs:
             echo "| --- | ---: |"
             find out -type f -exec sh -c 'printf "| \`%s\` | %s |\n" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/*
 
   loongarch64:
     name: loongarch64 (龙芯 · best-effort CLI)
@@ -367,6 +389,9 @@ jobs:
     continue-on-error: true # no GitHub-hosted loong runner; informational only
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: loongarch64-unknown-linux-gnu
@@ -413,10 +438,17 @@ jobs:
           export CC_loongarch64_unknown_linux_gnu="$CROSS_CC"
           export CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_GNU_LINKER="$CROSS_CC"
           scripts/package-cli.sh loongarch64-unknown-linux-gnu
+      - name: Stage and record optional artifact provenance
+        if: steps.cross-cc.outputs.available == 'true'
+        run: |
+          mkdir -p out
+          cp dist/lumorpa-*-linux-loongarch64.tar.gz out/
+          python3 scripts/release-manifest.py stamp --platform linux-loongarch64
       - uses: actions/upload-artifact@v4
+        if: steps.cross-cc.outputs.available == 'true'
         with:
           name: lumorpa-linux-loongarch64
-          path: dist/lumorpa-*-linux-loongarch64.tar.gz
+          path: out/*
           # Intentionally `warn`, not `error`: this job is continue-on-error and
           # has no real runner, so its absence must not fail the release. The
           # publish job below likewise tolerates its absence.
@@ -431,107 +463,54 @@ jobs:
               echo "| Artifact | Size |"
               echo "| --- | ---: |"
               for f in dist/lumorpa-*-linux-loongarch64.tar.gz; do
-                printf '| \`%s\` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+                printf '| %s | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
               done
             else
               echo "_No loongarch64 CLI archive produced (expected: no hosted runner for this target)._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/lumorpa-*-linux-loongarch64.tar.gz
 
-  # MAIN CHANNEL. Runs only for branch pushes (i.e. main), never for tags: on a
-  # tag every platform job has already attached its own files to the real
-  # Release. This job collects the same artifacts into ONE rolling pre-release so
-  # a main push always leaves behind a stable, downloadable URL rather than only
-  # an expiring CI artifact.
-  publish-dev:
-    name: Publish rolling dev-latest pre-release
+  publish:
+    name: Publish complete validated release
     needs: [production-gate, macos, windows, linux-x64, linux-arm64, loongarch64]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    # Different version tags share one channel. Serialize their final mutation;
+    # the publisher also compares versions because completion order can differ.
+    concurrency:
+      group: release-publish-${{ !startsWith(github.ref, 'refs/tags/') && 'dev' || contains(github.ref_name, '-') && 'beta' || 'stable' }}
+      cancel-in-progress: false
+    # LoongArch is explicitly best-effort. All supported desktop platforms are mandatory.
+    if: >-
+      always() && !cancelled() &&
+      (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main') &&
+      needs.production-gate.result == 'success' && needs.macos.result == 'success' &&
+      needs.windows.result == 'success' && needs.linux-x64.result == 'success' &&
+      needs.linux-arm64.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
         with:
-          # `pattern: lumorpa-*` matches every platform artifact by name;
-          # merge-multiple flattens them all into one flat staging directory.
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
           pattern: lumorpa-*
-          merge-multiple: true
-          path: dev-assets
-      - name: Verify we actually have installers
+          path: release-assets
+      - name: Install updater signature verifier
+        if: startsWith(github.ref, 'refs/tags/')
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Verify complete artifacts and generate update manifest
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev-latest' }}
+          LUMO_UPDATER_PUBKEY: ${{ secrets.LUMO_UPDATER_PUBKEY }}
         run: |
-          set -euo pipefail
-          ls -lR dev-assets
-          test -n "$(find dev-assets -maxdepth 1 -type f -print -quit)" || {
-            echo "error: no artifacts were merged; refusing to publish an empty pre-release" >&2
-            exit 1
-          }
-          # The user-visible promise is "there is an installer to download", so
-          # assert at least one Windows and one macOS payload survived the merge.
-          test -n "$(find dev-assets -maxdepth 1 \( -name '*.exe' -o -name '*.msi' \) -print -quit)" || {
-            echo "error: no Windows installer (.exe/.msi) in dev-assets" >&2; exit 1; }
-          test -n "$(find dev-assets -maxdepth 1 -name '*.dmg' -print -quit)" || {
-            echo "error: no macOS .dmg in dev-assets" >&2; exit 1; }
-      - name: Summarize downloads
-        run: |
-          {
-            echo "## LumoRPA dev-latest (unofficial build)"
-            echo
-            echo "Commit: ${GITHUB_SHA}"
-            echo
-            echo "| Type | Artifact | Size |"
-            echo "| --- | --- | ---: |"
-            find dev-assets -maxdepth 1 -type f -exec sh -c 'printf "| %s | \`%s\` | %s |\n" "$(basename "$1" | sed -E "s/.*\.(exe|msi|dmg|deb|rpm|AppImage|zip|tar\.gz)$/\1/")" "$(basename "$1")" "$(du -h "$1" | cut -f1)"' _ {} \; | sort
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish rolling pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: dev-latest
-          name: LumoRPA dev-latest (unofficial, unsigned)
-          prerelease: true
-          make_latest: false
-          files: dev-assets/*
-          body: |
-
-            > **UNOFFICIAL, UNSIGNED DEVELOPMENT BUILD — NOT A RELEASE.**
-            >
-            > These installers are built automatically from the tip of `main`
-            > on every push. They are **not signed, not notarized, and not
-            > verified**. macOS will show a Gatekeeper warning and Windows will
-            > show a SmartScreen warning — that is expected.
-            > For a supported build, use a versioned release instead.
-
-            Rolling development snapshot of `main`.
-
-            - Commit: `${{ github.sha }}`
-            - Built: run `${{ github.run_number }}` of workflow run `${{ github.run_id }}`
-            - Source: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-
-            This tag is **reused** on every main push: the URL is stable, the
-            contents are replaced each time.
-
-            | Platform | What to download |
-            | --- | --- |
-            | **Windows (priority)** | `*-setup.exe` (NSIS installer) or `*.msi` (WiX/MSI) |
-            | **macOS (priority)** | `*.dmg` (universal: Intel + Apple Silicon) |
-            | Linux x86_64 | `.deb`, `.rpm`, `.AppImage` |
-            | Linux aarch64 | `.deb`, `.rpm` |
-            | CLI | `lumorpa-*-cli-*.tar.gz` / `*.zip` per platform |
-
-            Updater signatures (`.sig`) are intentionally absent from dev
-            builds: `LUMO_UPDATER_PUBKEY` is empty on main, so
-            `scripts/build-desktop.sh` skips updater artifacts rather than
-            emitting a manifest that would point at unsigned payloads.
-
-      - name: Job summary
-        run: |
-          {
-            echo
-            echo "**Published rolling pre-release \`dev-latest\`** (prerelease, not latest)."
-            echo
-            echo "Download page: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/dev-latest"
-          } >> "$GITHUB_STEP_SUMMARY"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH
+          python3 scripts/release-manifest.py assemble --artifacts release-assets --output publish-assets \
+            --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA"
+      - name: Publish after all mandatory platforms pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev-latest' }}
+        run: python3 scripts/publish-release.py --assets publish-assets --tag "$RELEASE_TAG" --sha "$GITHUB_SHA"

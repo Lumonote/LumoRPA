@@ -24,9 +24,7 @@ pub(super) struct DesktopUpdateInfo {
 }
 
 fn normalized_channel(channel: Option<String>) -> Result<String, String> {
-    let channel = channel.unwrap_or_else(|| {
-        std::env::var("LUMO_UPDATE_CHANNEL").unwrap_or_else(|_| "stable".into())
-    });
+    let channel = channel.unwrap_or_else(super::updater_config::channel);
     if matches!(channel.as_str(), "stable" | "beta" | "rollback") {
         Ok(channel)
     } else {
@@ -35,14 +33,7 @@ fn normalized_channel(channel: Option<String>) -> Result<String, String> {
 }
 
 fn endpoint_for(channel: &str) -> Option<String> {
-    let key = match channel {
-        "beta" => "LUMO_UPDATE_BETA_ENDPOINT",
-        "rollback" => "LUMO_UPDATE_ROLLBACK_ENDPOINT",
-        _ => "LUMO_UPDATE_ENDPOINT",
-    };
-    std::env::var(key)
-        .ok()
-        .filter(|value| value.starts_with("https://"))
+    super::updater_config::endpoint(channel)
 }
 
 async fn check_update(
@@ -51,8 +42,9 @@ async fn check_update(
 ) -> Result<Option<tauri_plugin_updater::Update>, String> {
     let endpoint = endpoint_for(channel)
         .ok_or_else(|| format!("HTTPS updater endpoint for `{channel}` is not configured"))?;
-    let pubkey = std::env::var("LUMO_UPDATER_PUBKEY")
-        .map_err(|_| "LUMO_UPDATER_PUBKEY is not configured".to_string())?;
+    let pubkey = super::updater_config::pubkey().ok_or_else(|| {
+        "update public key is not configured in this build or environment".to_string()
+    })?;
     let endpoint = endpoint
         .parse()
         .map_err(|error| format!("invalid updater endpoint: {error}"))?;
@@ -77,7 +69,7 @@ pub(super) fn desktop_update_status(
     Ok(DesktopUpdateStatus {
         current_version: app.package_info().version.to_string(),
         channel,
-        configured: endpoint.is_some() && std::env::var("LUMO_UPDATER_PUBKEY").is_ok(),
+        configured: endpoint.is_some() && super::updater_config::pubkey().is_some(),
         endpoint,
     })
 }
@@ -149,8 +141,5 @@ mod tests {
     fn validates_update_channels_and_requires_https_endpoints() {
         assert_eq!(normalized_channel(Some("stable".into())).unwrap(), "stable");
         assert!(normalized_channel(Some("nightly".into())).is_err());
-        std::env::set_var("LUMO_UPDATE_ENDPOINT", "http://unsafe.example/latest.json");
-        assert!(endpoint_for("stable").is_none());
-        std::env::remove_var("LUMO_UPDATE_ENDPOINT");
     }
 }

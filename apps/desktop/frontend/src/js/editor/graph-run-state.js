@@ -9,7 +9,7 @@ const normalizedState = (value) => ({ ai_healed: "ok", timeout: "failed" })[valu
 const duration = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const stepPath = (step) => typeof step?.path === "string" && step.path ? step.path : typeof step?.stepId === "string" ? step.stepId : "";
 
-export const createGraphRunContext = ({ flowPath, source, runId }) => ({ flowPath, source, runId, stepStates: {} });
+export const createGraphRunContext = ({ flowPath, source, runId, selectedRuntimePath = null }) => ({ flowPath, source, runId, selectedRuntimePath, stepStates: {} });
 
 export const recordGraphRunProgress = (context, event) => {
   if (!context?.runId || context.terminal || event?.runId !== context.runId) return context;
@@ -19,22 +19,22 @@ export const recordGraphRunProgress = (context, event) => {
   const entry = { state: event.type === "step_started" ? "running" : normalizedState(event.state) };
   const ms = duration(event.durationMs);
   if (ms !== undefined) entry.durationMs = ms;
-  return { ...context, stepStates: { ...context.stepStates, [path]: entry } };
+  return { ...context, previous: context, stepStates: null, stepDelta: { path, entry } };
 };
 
 export const finishGraphRunContext = (context, outcome = "failed") => {
   if (!context?.runId) return context;
   const final = normalizedState(outcome);
-  const stepStates = Object.fromEntries(Object.entries(context.stepStates || {}).map(([path, entry]) => [
+  const stepStates = Object.fromEntries(Object.entries(materializeStates(context)).map(([path, entry]) => [
     path, entry.state === "running" ? { ...entry, state: final } : entry,
   ]));
-  return { ...context, stepStates, terminal: outcome };
+  return { ...context, previous: null, stepDelta: null, stepStates, terminal: outcome };
 };
 
 export const applyGraphRunResponse = (context, response) => {
   const runId = response?.report?.runId || response?.run?.id;
   if (!context?.runId || runId !== context.runId || (response?.run?.id && response.run.id !== runId)) return context;
-  const stepStates = { ...context.stepStates };
+  const stepStates = materializeStates(context);
   for (const step of response.steps || []) {
     const path = stepPath(step);
     if (!path) continue;
@@ -46,7 +46,7 @@ export const applyGraphRunResponse = (context, response) => {
   const outcome = response.report?.pausedAt ? "idle"
     : response.run?.state === "cancelled" ? "cancelled"
       : response.report?.success === true ? "ok" : "failed";
-  return finishGraphRunContext({ ...context, stepStates }, outcome);
+  return finishGraphRunContext({ ...context, stepStates, previous: null, stepDelta: null }, outcome);
 };
 
 const loopScopeCache = new WeakMap();
@@ -81,33 +81,89 @@ const loopScopes = (ast) => {
 // Current VMs emit `loop[2]/child`; older records may contain
 // `loop/item.2/child`. Only loop ancestors declared in this source may carry
 // iteration suffixes. Literal indexed IDs and branch scopes stay untouched.
-const matchesRuntimePath = (expected, actual, scopes) => {
-  if (expected === actual) return true;
-  const target = expected.split("/");
-  const parts = actual.split("/");
-  let cursor = 0;
-  for (let index = 0; index < target.length; index += 1) {
-    const part = target[index];
-    const indexed = index < target.length - 1 && scopes.has(target.slice(0, index + 1).join("/"));
-    const candidate = parts[cursor++];
-    if (part !== candidate && !(indexed && candidate?.startsWith(`${part}[`) && /^\[\d+\]$/.test(candidate.slice(part.length)))) return false;
-    if (indexed && /^item\.\d+$/.test(parts[cursor] || "")) cursor += 1;
+export const graphRuntimePath = (context, actual, ast) => {
+  let path = actual;
+  if (context?.selectedRuntimePath) {
+    const selected = context.selectedRuntimePath;
+    const root = selected.split("/").at(-1);
+    if (path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}[`)) path = selected + path.slice(root.length);
   }
-  return cursor === parts.length;
+  const scopes = loopScopes(ast);
+  const result = [];
+  for (const part of path.split("/")) {
+    if (/^item\.\d+$/.test(part) && scopes.has(result.join("/"))) continue;
+    const base = part.replace(/\[\d+\]$/, "");
+    result.push(base !== part && scopes.has([...result, base].join("/")) ? base : part);
+  }
+  return result.join("/");
 };
 
-export const getGraphRunState = (node, editorState) => {
+const materializeStates = (context) => {
+  const changes = [];
+  let cursor = context;
+  while (cursor?.stepDelta) { changes.push(cursor.stepDelta); cursor = cursor.previous; }
+  const entries = Object.assign(Object.create(null), cursor?.stepStates || {});
+  for (let index = changes.length - 1; index >= 0; index--) entries[changes[index].path] = changes[index].entry;
+  return entries;
+};
+
+const indexes = new WeakMap();
+const emptyIndex = new Map();
+const idleState = Object.freeze({ state: "idle", label: LABELS.idle });
+
+// One pass per context/AST, shared by every node in a frame. Runtime paths are
+// indexed once instead of scanning every recorded iteration for every card.
+export const getGraphRunIndex = (editorState) => {
   const context = editorState?.editorRunContext;
-  const path = node?.runtimePath || node?.idChain;
-  if (!context?.runId || !path || context.flowPath !== editorState.flowPath || context.source !== editorState.source) {
-    return { state: "idle", label: LABELS.idle };
+  if (!context?.runId || context.flowPath !== editorState.flowPath || context.source !== editorState.source) return emptyIndex;
+  const cached = indexes.get(context);
+  if (cached && cached.ast === editorState.ast) return cached.index;
+  // Transfer the private projection from the nearest already-rendered context.
+  // Context deltas remain immutable; re-reading an old context rebuilds it.
+  const changes = [];
+  let cursor = context;
+  let inherited;
+  while (cursor?.stepDelta) {
+    changes.push(cursor.stepDelta);
+    cursor = cursor.previous;
+    const candidate = indexes.get(cursor);
+    if (candidate && candidate.ast === editorState.ast) { inherited = candidate; indexes.delete(cursor); break; }
   }
-  const scopes = loopScopes(editorState.ast);
-  const entries = Object.entries(context.stepStates || {})
-    .filter(([runtimePath]) => matchesRuntimePath(path, runtimePath, scopes)).map(([, entry]) => entry);
-  const status = ["failed", "cancelled", "running", "ok", "skipped"].find((value) => entries.some((entry) => entry.state === value)) || "idle";
-  const result = { state: status, label: LABELS[status] };
-  const durations = entries.map((entry) => duration(entry.durationMs)).filter((ms) => ms !== undefined);
-  if (durations.length) result.durationMs = durations.reduce((sum, ms) => sum + ms, 0);
+  const index = inherited?.index || new Map();
+  const apply = (path, entry) => {
+    const canonical = graphRuntimePath(context, path, editorState.ast);
+    let aggregate = index.get(canonical);
+    if (!aggregate) {
+      const values = new Map();
+      aggregate = { state: "idle", label: LABELS.idle, values, counts: {}, durationCount: 0, durationTotal: 0,
+        get instances() { return [...values].map(([runtimePath, value]) => ({ ...value, path: runtimePath })); },
+      };
+      index.set(canonical, aggregate);
+    }
+    const previous = aggregate.values.get(path);
+    if (previous) {
+      aggregate.counts[previous.state]--;
+      if (duration(previous.durationMs) !== undefined) { aggregate.durationCount--; aggregate.durationTotal -= previous.durationMs; }
+    }
+    aggregate.values.set(path, entry);
+    aggregate.counts[entry.state] = (aggregate.counts[entry.state] || 0) + 1;
+    if (duration(entry.durationMs) !== undefined) { aggregate.durationCount++; aggregate.durationTotal += entry.durationMs; }
+    aggregate.state = ["failed", "cancelled", "running", "ok", "skipped"].find((value) => aggregate.counts[value] > 0) || "idle";
+    aggregate.label = LABELS[aggregate.state];
+    if (aggregate.durationCount) aggregate.durationMs = aggregate.durationTotal;
+    else delete aggregate.durationMs;
+  };
+  if (!inherited) for (const [path, entry] of Object.entries(cursor?.stepStates || {})) apply(path, entry);
+  for (let item = changes.length - 1; item >= 0; item--) apply(changes[item].path, changes[item].entry);
+  indexes.set(context, { ast: editorState.ast, index });
+  return index;
+};
+
+export const getGraphRunState = (node, editorState, index = getGraphRunIndex(editorState)) => {
+  const path = node?.runtimePath || node?.idChain;
+  const aggregate = index.get(path);
+  if (!aggregate) return idleState;
+  const result = { state: aggregate.state, label: aggregate.label };
+  if (aggregate.durationMs !== undefined) result.durationMs = aggregate.durationMs;
   return result;
 };

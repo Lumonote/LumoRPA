@@ -1,11 +1,15 @@
 import { $ } from "../dom.js";
 import { graph, state } from "../state.js";
 import { pathKey, parsePathKey } from "../yaml.js";
-import { zoomGraphAt, screenToWorld, moveNodeByScreenDelta } from "./graph-viewport.js";
+import { zoomGraphAt, screenToWorld } from "./graph-viewport.js";
+import { snappedDelta, studioLayout } from "./graph-presentation.js";
+import { renderGraphMinimap } from "./graph-navigation.js";
+import { validateGraphTypes } from "./graph-types.js";
 import { graphPortPoint } from "./graph-model.js";
 import { renderGraph, updateGraphGeometry, applyGraphTransform, fitGraphSelection, resizeGraphViewport, currentGraphLayouts, saveGraphLayouts, graphStatus, edgePath, updateGraphSelection, graphLayoutKey } from "./graph.js";
 import { selectStep } from "./inspector.js";
 import { snapshotSource } from "./history.js";
+import { flushScheduledGraphLayouts, persistGraphLayout } from "./graph-layout-store.js";
 import { openGraphPalette, closeGraphPalette, addGraphAction } from "./graph-palette.js";
 import { connectGraphPorts, closeGraphConfirmation } from "./graph-connect-ui.js";
 
@@ -23,21 +27,24 @@ export function bindGraphInteractions() {
   const world = (event) => { const point = relative(event); return screenToWorld(graph, point.x, point.y); };
   const cancelConnection = () => {
     connection = null; preview?.remove(); preview = null; svg.classList.remove("is-connecting");
-    svg.querySelectorAll(".is-valid-target,.is-connecting").forEach((el) => el.classList.remove("is-valid-target", "is-connecting"));
+    svg.querySelectorAll(".is-valid-target,.is-incompatible,.is-connecting").forEach((el) => { el.classList.remove("is-valid-target", "is-incompatible", "is-connecting"); if (el.dataset.previousTitle !== undefined) { el.title = el.dataset.previousTitle; delete el.dataset.previousTitle; } });
     graph.isInteracting = !!gesture;
     if (graph.needsSchemaRender) queueMicrotask(() => { if (!graph.isInteracting) { graph.needsSchemaRender = false; renderGraph(); } });
   };
   const startConnection = (port, event) => {
     cancelConnection();
     const node = graph.nodePositions?.get(port.dataset.nodeKey); if (!node) return;
-    connection = { node, kind: port.dataset.portKind, source: state.source, flowKey: graphLayoutKey() };
+    connection = { node, outputPath: JSON.parse(port.dataset.portOutput || "[]"), kind: port.dataset.portKind, source: state.source, flowKey: graphLayoutKey() };
     graph.isInteracting = true;
     preview = document.createElementNS("http://www.w3.org/2000/svg", "path"); preview.setAttribute("class", `graph-edge is-${connection.kind === "data" ? "data" : "sequence"} is-connecting`); preview.style.pointerEvents = "none"; $("graphRoot").appendChild(preview);
-    const point = graphPortPoint(node, { direction: "output", kind: connection.kind }); preview.setAttribute("d", edgePath(point, event ? world(event) : { x: point.x + 80, y: point.y }));
+    const point = graphPortPoint(node, { direction: "output", kind: connection.kind, outputPath: connection.outputPath }); preview.setAttribute("d", edgePath(point, event ? world(event) : { x: point.x + 80, y: point.y }));
     svg.classList.add("is-connecting"); port.classList.add("is-connecting");
     svg.querySelectorAll(`[data-port-direction="input"][data-port-kind="${connection.kind}"]`).forEach((input) => {
       const target = graph.nodePositions.get(input.dataset.nodeKey);
-      if (target && (connection.kind === "execution" ? node.key !== target.key && node.path.length === target.path.length && node.path.slice(0, -1).every((part, i) => part === target.path[i]) : isSiblingBefore(node, target))) input.classList.add("is-valid-target");
+      if (target && (connection.kind === "execution" ? node.key !== target.key && node.path.length === target.path.length && node.path.slice(0, -1).every((part, i) => part === target.path[i]) : isSiblingBefore(node, target))) {
+        const types = connection.kind === "execution" ? { valid: true, message: "连接执行顺序" } : validateGraphTypes(state.schemaCache.get(node.step.action), state.schemaCache.get(target.step.action), input.dataset.portInput, connection.outputPath);
+        input.classList.add(types.valid ? "is-valid-target" : "is-incompatible"); input.dataset.previousTitle = input.title; input.title = types.message;
+      }
     });
     graphStatus(connection.kind === "execution" ? "选择同一分支的执行输入 · 将调整流程顺序" : "选择后序节点的输入端口 · Esc 取消");
   };
@@ -47,7 +54,7 @@ export function bindGraphInteractions() {
     const target = graph.nodePositions?.get(port.dataset.nodeKey);
     cancelConnection();
     if (!target || source.source !== state.source || source.flowKey !== graphLayoutKey()) { graphStatus("流程已变化，请重新连线"); return; }
-    connectGraphPorts({ fromPath: source.node.path, toPath: target.path, input: port.dataset.portInput, kind: source.kind });
+    connectGraphPorts({ fromPath: source.node.path, toPath: target.path, input: port.dataset.portInput, outputPath: source.outputPath, kind: source.kind });
   };
   const chooseNode = (element, additive = false) => {
     const path = parsePathKey(element.dataset.stepPath), key = pathKey(path);
@@ -58,9 +65,6 @@ export function bindGraphInteractions() {
       else selectStep(state.selectedStepPaths.has(key) ? path : parsePathKey([...state.selectedStepPaths].at(-1)), { preserveMulti: true });
     } else selectStep(path);
     updateGraphSelection();
-    if ((window.matchMedia?.("(max-width: 1080px)").matches || svg.closest(".shell")?.classList.contains("is-canvas-focus")) && state.selectedStepPath) {
-      $("rightRail")?.classList.add("is-graph-open"); $("graphInspectorToggle")?.setAttribute("aria-expanded", "true");
-    }
   };
   const zoom = (factor) => {
     const rect = svg.getBoundingClientRect(); Object.assign(graph, zoomGraphAt(graph, rect.width / 2, rect.height / 2, factor)); applyGraphTransform();
@@ -77,8 +81,18 @@ export function bindGraphInteractions() {
     if (saved.type === "nodes" && saved.moved && !cancelled) {
       snapshotSource("graph-layout");
       const layouts = currentGraphLayouts();
-      for (const key of saved.positions.keys()) { const node = graph.nodePositions.get(key); if (node?.layoutKey) layouts[node.layoutKey] = { x: Math.round(node.x), y: Math.round(node.y) }; }
+      for (const key of saved.positions.keys()) { const node = graph.nodePositions.get(key) || graph.allNodePositions.get(key); if (node?.layoutKey) layouts[node.layoutKey] = { ...layouts[node.layoutKey], x: Math.round(node.x), y: Math.round(node.y) }; }
       saveGraphLayouts(); graphStatus(`已移动 ${saved.positions.size} 个节点 · 可撤销`);
+    } else if (saved.type === "route") {
+      // A pointer-up can arrive after switching documents or replacing a layout
+      // during undo. Restore the gesture's own object, never the current flow.
+      const routes = studioLayout(saved.layout).routes;
+      if (cancelled || !saved.moved) {
+        if (saved.previous) routes[saved.routeKey] = saved.previous; else delete routes[saved.routeKey];
+        if (saved.moved && state.graphLayouts?.[saved.flowKey] === saved.layout) persistGraphLayout(saved.flowKey, saved.layout);
+      }
+      else { const position = routes[saved.routeKey]; if (saved.previous) routes[saved.routeKey] = saved.previous; else delete routes[saved.routeKey]; snapshotSource("graph-route"); routes[saved.routeKey] = position; saveGraphLayouts(); graphStatus("已移动中继点 · Alt 点击连线移除"); }
+      updateGraphGeometry();
     } else if (!cancelled && saved.type === "nodes" && !saved.moved) chooseNode(saved.element, saved.additive);
     else if (!cancelled && saved.type === "pan" && !saved.moved) { state.selectedStepPaths.clear(); selectStep(null); }
     else if (!stale && saved.type === "select") {
@@ -88,6 +102,8 @@ export function bindGraphInteractions() {
     }
     if (cancelled && !stale && saved.type === "pan") { graph.tx = saved.tx; graph.ty = saved.ty; applyGraphTransform(); }
     graph.isInteracting = false;
+    renderGraphMinimap();
+    if (!cancelled && saved.type === "pan") saveGraphLayouts();
     svg.classList.remove("is-panning", "is-dragging-node");
     try { if (svg.hasPointerCapture(saved.pointerId)) svg.releasePointerCapture(saved.pointerId); } catch { /* Pointer ended outside the window. */ }
     if (cancelled || graph.needsSchemaRender) { graph.needsSchemaRender = false; renderGraph(); }
@@ -100,8 +116,13 @@ export function bindGraphInteractions() {
     if (!active.moved && active.type === "nodes" && !state.selectedStepPaths?.has(active.key) && pathKey(state.selectedStepPath || []) !== active.key) chooseNode(active.element);
     active.moved = true;
     if (active.type === "nodes") {
-      for (const [key, position] of active.positions) { const node = graph.nodePositions.get(key); if (node) Object.assign(node, moveNodeByScreenDelta(position, graph, dx, dy)); }
-      updateGraphGeometry();
+      const anchor = active.positions.get(active.key) || active.positions.values().next().value;
+      const delta = snappedDelta(anchor, dx, dy, graph.scale, studioLayout(currentGraphLayouts()).snap !== false && !event.altKey);
+      for (const [key, position] of active.positions) { const node = graph.nodePositions.get(key) || graph.allNodePositions.get(key); if (node) Object.assign(node, { x: position.x + delta.x, y: position.y + delta.y }); }
+      updateGraphGeometry(active.positions.keys());
+    } else if (active.type === "route") {
+      studioLayout(currentGraphLayouts()).routes[active.routeKey] = world(event);
+      updateGraphGeometry(new Set([active.from, active.to]));
     } else if (active.type === "pan") { graph.tx = active.tx + dx; graph.ty = active.ty + dy; applyGraphTransform(); }
     else if (active.type === "select") {
       const point = world(event), x = Math.min(active.start.x, point.x), y = Math.min(active.start.y, point.y), width = Math.abs(point.x - active.start.x), height = Math.abs(point.y - active.start.y);
@@ -115,6 +136,13 @@ export function bindGraphInteractions() {
     const port = event.target.closest?.("button.graph-port");
     if (port && event.button === 0 && !space) { event.preventDefault(); if (port.dataset.portDirection === "output") startConnection(port, event); else finishConnection(port); return; }
     if (connection) { cancelConnection(); graphStatus("已取消连线"); return; }
+    const route = event.target.closest?.("[data-route-key]");
+    if (route && event.button === 0) {
+      const edge = graph.edgeMap.get(route.closest("[data-edge-id]").dataset.edgeId);
+      const layout = currentGraphLayouts();
+      gesture = { type: "route", x: event.clientX, y: event.clientY, pointerId: event.pointerId, flowKey: graphLayoutKey(), source: state.source, revision: graph.interactionRevision, layout, routeKey: route.dataset.routeKey, previous: { ...studioLayout(layout).routes[route.dataset.routeKey] }, from: edge.from, to: edge.to };
+      graph.isInteracting = true; event.preventDefault(); svg.setPointerCapture(event.pointerId); return;
+    }
     if (event.target.closest?.("[data-edge-id]") && event.button === 0) return;
     const element = nodeElement(event.target), node = element && graph.nodePositions?.get(element.dataset.stepPath);
     if (event.target.closest?.("button,input,textarea") && event.button === 0 && !space) return;
@@ -122,8 +150,9 @@ export function bindGraphInteractions() {
     const base = { x: event.clientX, y: event.clientY, pointerId: event.pointerId, moved: false, flowKey: graphLayoutKey(), source: state.source, revision: graph.interactionRevision };
     if (node && event.button === 0 && !space) {
       if (!node.layoutKey) { chooseNode(element); graphStatus("节点 ID 缺失或重复，请先修复 ID 再移动"); return; }
-      const keys = state.selectedStepPaths?.has(node.key) ? [...state.selectedStepPaths] : [node.key];
-      gesture = { ...base, type: "nodes", key: node.key, element, additive: event.ctrlKey || event.metaKey || event.shiftKey, positions: new Map(keys.map((key) => [key, { x: graph.nodePositions.get(key)?.x, y: graph.nodePositions.get(key)?.y }]).filter(([,pos]) => Number.isFinite(pos.x))) };
+      const visibleKeys = state.selectedStepPaths?.has(node.key) ? [...state.selectedStepPaths] : [node.key];
+      const keys = [...new Set(visibleKeys.flatMap((key) => [key, ...(graph.nodePositions.get(key)?.members || [])]))];
+      gesture = { ...base, type: "nodes", key: node.key, element, additive: event.ctrlKey || event.metaKey || event.shiftKey, positions: new Map(keys.map((key) => [key, { x: (graph.nodePositions.get(key) || graph.allNodePositions.get(key))?.x, y: (graph.nodePositions.get(key) || graph.allNodePositions.get(key))?.y }]).filter(([,pos]) => Number.isFinite(pos.x))) };
       svg.classList.add("is-dragging-node");
     } else if (event.shiftKey && event.button === 0) {
       const marquee = document.createElementNS("http://www.w3.org/2000/svg", "rect"); marquee.setAttribute("class", "graph-selection-rect"); $("graphRoot").appendChild(marquee);
@@ -133,7 +162,7 @@ export function bindGraphInteractions() {
     try { svg.setPointerCapture(event.pointerId); } catch { /* Window listeners finish foreignObject gestures. */ }
   });
   on(window, "pointermove", (event) => {
-    if (connection) { const point = graphPortPoint(connection.node, { direction: "output", kind: connection.kind }); preview?.setAttribute("d", edgePath(point, world(event))); }
+    if (connection) { const point = graphPortPoint(connection.node, { direction: "output", kind: connection.kind, outputPath: connection.outputPath }); preview?.setAttribute("d", edgePath(point, world(event))); }
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     lastEvent = event;
     if (frame === null) frame = requestAnimationFrame(() => { frame = null; paintGesture(lastEvent); });
@@ -148,9 +177,15 @@ export function bindGraphInteractions() {
     const port = event.target.closest?.("button.graph-port");
     if (port && event.detail === 0) { if (port.dataset.portDirection === "output") startConnection(port); else finishConnection(port); return; }
     const edge = graph.edges?.find((item) => item.id === event.target.closest?.("[data-edge-id]")?.dataset.edgeId);
-    if (!edge) return;
+    if (!edge || event.target.closest?.("[data-route-key]")) return;
+    if (event.altKey) {
+      snapshotSource("graph-route"); const routes = studioLayout(currentGraphLayouts()).routes;
+      if (routes[edge.routeKey]) delete routes[edge.routeKey]; else routes[edge.routeKey] = world(event);
+      saveGraphLayouts(); renderGraph(); graphStatus("已更新中继点 · 可拖动调整路径 · 可撤销"); return;
+    }
+    if (edge.boundary) { graphStatus("此连接穿过折叠边界，请展开分组或子树后编辑连接"); return; }
     if (edge.kind === "sequence") openGraphPalette({ afterPath: graph.nodePositions.get(edge.from).path });
-    else if (edge.kind === "data") connectGraphPorts({ fromPath: graph.nodePositions.get(edge.from).path, toPath: graph.nodePositions.get(edge.to).path, input: edge.input, disconnect: true });
+    else if (edge.kind === "data") connectGraphPorts({ fromPath: graph.nodePositions.get(edge.from).path, toPath: graph.nodePositions.get(edge.to).path, input: edge.input, outputPath: edge.outputPath, disconnect: true });
     else { selectStep(graph.nodePositions.get(edge.to).path); graphStatus(`${edge.label} · 在属性中编辑控制节点`); }
   });
   on(svg, "dblclick", (event) => { if (!nodeElement(event.target) && !event.target.closest?.("[data-edge-id]")) openGraphPalette({ point: world(event) }); });
@@ -170,6 +205,7 @@ export function bindGraphInteractions() {
       if (!active && svg.closest(".shell")?.classList.contains("is-canvas-focus")) $("graphFocusMode")?.click();
     }
     else if (event.key === " ") { event.preventDefault(); space = true; }
+    else if (event.key === "/") { event.preventDefault(); $("graphSearchToggle")?.click(); }
     else if (event.key.toLowerCase() === "f") { event.preventDefault(); fitGraphSelection(event.shiftKey); }
     else if (event.key === "+" || event.key === "=") { event.preventDefault(); zoom(1.2); }
     else if (event.key === "-") { event.preventDefault(); zoom(1 / 1.2); }
@@ -188,7 +224,7 @@ export function bindGraphInteractions() {
   on($("graphZoomIn"), "click", () => zoom(1.2)); on($("graphZoomOut"), "click", () => zoom(1 / 1.2));
   on($("graphZoomReset"), "click", () => { const rect = svg.getBoundingClientRect(); Object.assign(graph, zoomGraphAt(graph, rect.width / 2, rect.height / 2, 1 / graph.scale)); applyGraphTransform(); });
   on($("graphFit"), "click", () => fitGraphSelection()); on($("graphFocus"), "click", () => fitGraphSelection(true));
-  on($("graphArrange"), "click", () => { if (!graph.nodePositions?.size) return; snapshotSource("graph-arrange"); state.graphLayouts[graphLayoutKey()] = {}; saveGraphLayouts(); renderGraph(); fitGraphSelection(); graphStatus("已自动布局 · 可撤销"); });
+  on($("graphArrange"), "click", () => { if (!graph.nodePositions?.size) return; snapshotSource("graph-arrange"); const layouts = currentGraphLayouts(); for (const [key, value] of Object.entries(layouts)) if (key !== "__studio") { delete value.x; delete value.y; } studioLayout(layouts).routes = {}; saveGraphLayouts(); renderGraph(); fitGraphSelection(); graphStatus("已自动布局 · 可撤销"); });
   on($("graphAddNode"), "click", () => openGraphPalette());
   on($("graphFocusMode"), "click", () => {
     const on = svg.closest(".shell").classList.toggle("is-canvas-focus");
@@ -199,6 +235,7 @@ export function bindGraphInteractions() {
   on($("graphInspectorToggle"), "click", () => {
     const open = $("rightRail")?.classList.toggle("is-graph-open");
     $("graphInspectorToggle").setAttribute("aria-expanded", String(!!open));
+    if (open && $("graphResultDrawer")) { $("graphResultDrawer").hidden = true; svg.closest(".graph-wrap")?.classList.remove("has-result"); document.dispatchEvent(new CustomEvent("lumo:graph-result-closed")); }
   });
   if ($("rightRail") && !$("graphInspectorClose")) {
     const close = document.createElement("button"); close.id = "graphInspectorClose"; close.className = "graph-inspector-close"; close.type = "button"; close.textContent = "关闭节点属性 ×";
@@ -207,6 +244,6 @@ export function bindGraphInteractions() {
   }
   svg.closest(".graph-wrap")?.querySelectorAll("[data-graph-add]").forEach((button) => on(button, "click", () => openGraphPalette()));
   const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resizeGraphViewport) : null; observer?.observe(svg);
-  const dispose = () => { clearGesture(true); cancelConnection(); observer?.disconnect(); for (const off of listeners) off(); mounted.delete(svg); };
+  const dispose = () => { clearGesture(true); cancelConnection(); flushScheduledGraphLayouts(); observer?.disconnect(); for (const off of listeners) off(); mounted.delete(svg); };
   on(window, "pagehide", dispose); mounted.set(svg, dispose); return dispose;
 }

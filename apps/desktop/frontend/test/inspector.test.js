@@ -214,3 +214,26 @@ test("ordinary node selection clears hidden multi-selection and repeated selecti
   await selectStep([1]);
   assert.equal(state.selectedStepId, "b");
 });
+
+test("rename applies source references, layouts, group routes and breakpoints atomically with undo", async (context) => {
+  const view = ui(context);
+  view.flow('spec:\n  steps:\n    - id: gate\n      action: control.if\n      with: {cond: true}\n      do:\n        - {id: child, action: control.log, with: {message: hello}}\n    - id: consumer\n      action: control.log\n      with: {message: "{{ steps.gate.result }}"}\n');
+  invoke = async () => ({ properties: { cond: { type: "boolean" } } });
+  const route = JSON.stringify(["id:gate", "id:consumer", "data", "message", "message", ["result-key"]]);
+  state.graphLayouts = { "/flows/test.yaml": { "id:gate": { x: 10, y: 20, collapsed: true }, "id:gate/do/id:child": { x: 80, y: 90 }, __studio: { version: 1, groups: [{ id: "g", members: ["id:gate", "id:gate/do/id:child"] }], routes: { [route]: { x: 4, y: 5 } } } }, "/other": { marker: true } };
+  state.breakpoints = new Set(["gate", "gate/child", "gate/do/child", "unrelated"]);
+  await renderInspector();
+  view.form().querySelector('[data-prop="id"]').value = "renamed";
+  view.apply();
+  assert.equal(view.error(), "");
+  assert.equal(extractSteps(state.ast)[1].with.message, "{{ steps.renamed.result }}");
+  assert.deepEqual(state.graphLayouts["/flows/test.yaml"]["id:renamed"], { x: 10, y: 20, collapsed: true });
+  assert.deepEqual(state.graphLayouts["/flows/test.yaml"].__studio.groups[0].members, ["id:renamed", "id:renamed/do/id:child"]);
+  assert.ok(state.graphLayouts["/flows/test.yaml"].__studio.routes[JSON.stringify(["id:renamed", "id:consumer", "data", "message", "message", ["result-key"]])]);
+  assert.deepEqual([...state.breakpoints], ["renamed", "renamed/child", "renamed/do/child", "unrelated"]);
+  assert.equal(undoEdit(), true);
+  assert.equal(extractSteps(state.ast)[0].id, "gate");
+  assert.deepEqual([...state.breakpoints], ["gate", "gate/child", "gate/do/child", "unrelated"]);
+  assert.equal(redoEdit(), true);
+  assert.equal(extractSteps(state.ast)[0].id, "renamed");
+});

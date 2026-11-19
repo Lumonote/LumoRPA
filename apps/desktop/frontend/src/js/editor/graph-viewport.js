@@ -18,7 +18,9 @@ export function zoomGraphAt(
   max = GRAPH_MAX_SCALE,
 ) {
   const world = screenToWorld(transform, screenX, screenY);
-  const scale = Math.max(min, Math.min(max, transform.scale * factor));
+  // A fitted overview may be below the manual floor. Zoom back in smoothly.
+  const floor = Math.min(min, transform.scale);
+  const scale = Math.max(floor, Math.min(max, transform.scale * factor));
   return {
     tx: screenX - world.x * scale,
     ty: screenY - world.y * scale,
@@ -47,6 +49,7 @@ export function applyLayoutOverrides(positions, overrides = {}) {
 // Fit the complete world bounds, including nodes dragged left/up of the origin.
 export function fitGraphBounds(bounds, width, height, padding = 56) {
   if (!bounds || width <= 0 || height <= 0) return { tx: 24, ty: 24, scale: 1 };
-  const scale = Math.min(1, Math.max(GRAPH_MIN_SCALE, Math.min((width - padding * 2) / Math.max(1, bounds.width), (height - padding * 2) / Math.max(1, bounds.height))));
+  const inset = Math.min(padding, width / 4, height / 4);
+  const scale = Math.min(1, (width - inset * 2) / Math.max(1, bounds.width), (height - inset * 2) / Math.max(1, bounds.height));
   return { scale, tx: width / 2 - (bounds.x + bounds.width / 2) * scale, ty: height / 2 - (bounds.y + bounds.height / 2) * scale };
 }

@@ -104,7 +104,10 @@ class RunnerContractTests(ManifestFixture):
         self.binary = self.root / "fixture-lumo"
         self.output = self.root / "report"
         self.load({"version": 1, "model": "modelscope/owner/model", "cases": [
-            {"id": "document", "image": "image.png", "expectedText": "合同金额100000", "timeoutMs": 2000.5},
+            # Contract fixtures are not latency benchmarks. Give process startup
+            # and RSS sampling headroom on busy hosts; timeout cleanup is tested
+            # separately with its deliberately short deadline.
+            {"id": "document", "image": "image.png", "expectedText": "合同金额100000", "timeoutMs": 10000.5},
         ]})
 
     def fixture_binary(self, mode="local"):

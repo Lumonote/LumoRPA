@@ -89,9 +89,9 @@ fi
 
 cd "$DESKTOP"
 
-# tauri.conf.json enables createUpdaterArtifacts but deliberately carries no
-# `plugins.updater` block: the pubkey is injected at runtime from
-# LUMO_UPDATER_PUBKEY (see apps/desktop/src-tauri/src/lib.rs). The bundler still
+# tauri.conf.json enables createUpdaterArtifacts with an empty public key:
+# build.rs embeds the public key and update endpoints
+# from release configuration, with optional runtime overrides. The bundler still
 # needs a valid key at bundle time, so supply it from the same variable here
 # instead of committing one. Without it, updater artifacts are skipped so a
 # plain local build still produces an installer.

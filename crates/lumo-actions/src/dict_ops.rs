@@ -81,6 +81,9 @@ impl Action for CreateAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<CreateIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::object())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let CreateIn { entries } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("dictionary.create invalid: {e}")))?;
@@ -115,6 +118,9 @@ impl Action for GetValueAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetValueIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::any())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetValueIn {
             dictionary,
@@ -148,6 +154,9 @@ impl Action for GetKeysAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<DictIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::strings())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let DictIn { dictionary } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("dictionary.get_keys invalid: {e}")))?;
@@ -178,6 +187,9 @@ impl Action for GetValuesAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<GetValuesIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::array())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let GetValuesIn { dictionary, keys } = serde_json::from_value(input)
@@ -216,6 +228,9 @@ impl Action for SetAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<SetIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::object())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let SetIn {
             dictionary,
@@ -253,6 +268,16 @@ impl Action for PopAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<PopIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["value", "dictionary"],
+                "properties": { "value": {}, "dictionary": { "type": "object" } },
+                "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let PopIn {

@@ -148,3 +148,41 @@ test("production IPC failure clears live running nodes when no persisted trace e
   setRunInFlight(false);
   assert.equal(getGraphRunState({ idChain: "log" }, state).state, "failed");
 });
+
+test("nested single-step execution maps extracted runtime roots back to the selected subtree", () => {
+  const initial = createGraphRunContext({ flowPath: "/flows/current.yaml", source, runId: "current", selectedRuntimePath: "gate/do/loop" });
+  const completed = applyGraphRunResponse(initial, { report: { runId: "current", success: true }, steps: [
+    { path: "loop", state: "ok" }, { path: "loop[2]/read", state: "ok", durationMs: 7 },
+  ] });
+  const ast = { spec: { steps: [{ id: "gate", action: "control.if", do: [{ id: "loop", action: "control.for_each", do: [{ id: "read" }] }] }] } };
+  const current = editor(completed, { ast });
+  assert.equal(getGraphRunState({ runtimePath: "gate/do/loop" }, current).state, "ok");
+  assert.deepEqual(getGraphRunState({ runtimePath: "gate/do/loop/read" }, current), { state: "ok", label: "已完成", durationMs: 7 });
+  assert.equal(getGraphRunState({ runtimePath: "gate/else/loop" }, current).state, "idle");
+});
+
+test("one indexed state projection is shared across all nodes in the same frame", async () => {
+  const { getGraphRunIndex } = await import("../src/js/editor/graph-run-state.js");
+  let current = context();
+  for (let index = 0; index < 1000; index++) current = recordGraphRunProgress(current, progress(`step${index}`, "step_finished", "ok"));
+  const currentEditor = editor(current);
+  const index = getGraphRunIndex(currentEditor);
+  assert.equal(index.size, 1000);
+  assert.equal(getGraphRunIndex(currentEditor), index);
+  for (let item = 0; item < 1000; item++) assert.equal(getGraphRunState({ runtimePath: `step${item}` }, currentEditor, index).state, "ok");
+  assert.equal(getGraphRunIndex(editor(current, { source: "edited" })).size, 0);
+});
+
+test("incremental loop projections replace attempts without double counting and old contexts stay readable", async () => {
+  const { getGraphRunIndex } = await import("../src/js/editor/graph-run-state.js");
+  const started = recordGraphRunProgress(context(), progress("loop[0]/read"));
+  assert.equal(getGraphRunIndex(editor(started, { ast: loopAst })).get("loop/read").state, "running");
+  const completed = recordGraphRunProgress(started, { ...progress("loop[0]/read", "step_finished", "ok"), durationMs: 6 });
+  const second = recordGraphRunProgress(completed, { ...progress("loop[1]/read", "step_finished", "failed"), durationMs: 9 });
+  const aggregate = getGraphRunIndex(editor(second, { ast: loopAst })).get("loop/read");
+  assert.equal(aggregate.state, "failed");
+  assert.equal(aggregate.durationMs, 15);
+  assert.equal(aggregate.instances.length, 2);
+  assert.equal(getGraphRunState({ runtimePath: "loop/read" }, editor(started, { ast: loopAst })).state, "running");
+  assert.equal(getGraphRunState({ runtimePath: "loop/read" }, editor(second, { ast: loopAst })).durationMs, 15);
+});

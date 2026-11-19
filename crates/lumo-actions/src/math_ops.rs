@@ -42,6 +42,9 @@ impl Action for RoundAction {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RoundIn>);
         &S
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RoundIn { value, digits } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.round invalid: {e}")))?;
@@ -77,6 +80,9 @@ impl Action for RandomAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<RandIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RandIn { min, max, integer } = if input.is_null() {
@@ -127,6 +133,9 @@ impl Action for MinAction {
     fn schema(&self) -> &'static Value {
         items_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.min invalid: {e}")))?;
@@ -155,6 +164,9 @@ impl Action for MaxAction {
     }
     fn schema(&self) -> &'static Value {
         items_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
@@ -185,6 +197,9 @@ impl Action for SumAction {
     fn schema(&self) -> &'static Value {
         items_schema()
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
+    }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("math.sum invalid: {e}")))?;
@@ -208,6 +223,9 @@ impl Action for AvgAction {
     }
     fn schema(&self) -> &'static Value {
         items_schema()
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn { items } = serde_json::from_value(input)
@@ -242,6 +260,9 @@ impl Action for AbsAction {
     fn schema(&self) -> &'static Value {
         static S: Lazy<Value> = Lazy::new(crate::schema::derive::<AbsIn>);
         &S
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::nullable_number())
     }
     async fn execute(&self, _ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let AbsIn { value } = serde_json::from_value(input)

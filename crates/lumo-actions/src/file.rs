@@ -60,6 +60,9 @@ impl Action for ReadAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ReadIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::string())
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ReadIn { path } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("file.read input invalid: {e}")))?;
@@ -92,6 +95,9 @@ impl Action for WriteAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WriteIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::path())
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let WriteIn {
@@ -142,6 +148,9 @@ impl Action for ExistsAction {
     fn schema(&self) -> &'static serde_json::Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ExistsIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::boolean())
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ExistsIn { path } = serde_json::from_value(input)
@@ -204,6 +213,19 @@ impl Action for ListAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<ListIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["path", "count", "limit", "truncated", "entries"],
+                "properties": {
+                    "path": { "type": "string" }, "count": { "type": "integer" },
+                    "limit": { "type": "integer" }, "truncated": { "type": "boolean" },
+                    "entries": { "type": "array", "items": crate::output::file_metadata() }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let ListIn {
             path,
@@ -262,6 +284,9 @@ impl Action for MkdirAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<MkdirIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::path())
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let MkdirIn { path, recursive } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("file.mkdir input invalid: {e}")))?;
@@ -300,6 +325,18 @@ impl Action for CopyAction {
     fn schema(&self) -> &'static Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<CopyIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["from", "to", "bytes"],
+                "properties": {
+                    "from": { "type": "string" }, "to": { "type": "string" },
+                    "bytes": { "type": "integer" }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let CopyIn {
@@ -361,6 +398,9 @@ impl Action for MoveAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<MoveIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::moved())
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let MoveIn {
             from,
@@ -406,6 +446,9 @@ impl Action for RenameAction {
     fn schema(&self) -> &'static Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<RenameIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::moved())
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let RenameIn {
@@ -458,6 +501,18 @@ impl Action for DeleteAction {
     fn schema(&self) -> &'static Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<DeleteIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["path", "dry_run", "would_delete", "deleted"],
+                "properties": {
+                    "path": { "type": "string" }, "dry_run": { "type": "boolean" },
+                    "would_delete": { "type": "boolean" }, "deleted": { "type": "boolean" }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let DeleteIn {
@@ -518,6 +573,9 @@ impl Action for MetadataAction {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<MetadataIn>);
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::file_metadata())
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let MetadataIn { path } = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("file.metadata input invalid: {e}")))?;
@@ -551,6 +609,9 @@ impl Action for AppendAction {
     fn schema(&self) -> &'static Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<AppendIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        Some(crate::output::path())
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let AppendIn {
@@ -625,6 +686,18 @@ impl Action for WaitAction {
     fn schema(&self) -> &'static Value {
         static SCHEMA: Lazy<Value> = Lazy::new(crate::schema::derive::<WaitIn>);
         &SCHEMA
+    }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["path", "size", "waited_ms"],
+                "properties": {
+                    "path": { "type": "string" }, "size": { "type": "integer" },
+                    "waited_ms": { "type": "integer" }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
     }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let WaitIn {

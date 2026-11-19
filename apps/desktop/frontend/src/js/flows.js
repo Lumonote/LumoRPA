@@ -7,6 +7,7 @@ import { BLANK_FLOW_TEMPLATE } from "./constants.js";
 import { parseYaml } from "./yaml.js";
 import { renderActiveView } from "./editor/render.js";
 import { renderInspector } from "./editor/inspector.js";
+import { loadGraphLayout, copyGraphLayout } from "./editor/graph-layout-store.js";
 import { resetHistory } from "./editor/history.js";
 import { chooseEditorAction, draftRecoveryState } from "./editor-drafts.js";
 
@@ -42,9 +43,11 @@ export async function saveCurrentFlowAs() {
   try {
     const previousPath = state.flowPath;
     const path = await call("save_flow_as", { name, source });
+    await copyGraphLayout(previousPath, path);
     await refreshFlows();
     if (state.flowPath === previousPath) {
       state.flowPath = path;
+      if (path !== previousPath) resetHistory();
       state.savedSource = source;
       state.flow = { ...state.flow, path, source: "user", fileName: path.split(/[\\/]/).pop() };
       await state.draftController?.move(previousPath);
@@ -226,9 +229,10 @@ export async function loadFlow(path = state.flowPath) {
   const previousSource = state.source;
   setStatus("载入中…", "warn");
   try {
-    const [flow, diskSource] = await Promise.all([
+    const [flow, diskSource, layout] = await Promise.all([
       call("inspect_flow", { path }),
       call("read_flow_source", { path }),
+      loadGraphLayout(path),
     ]);
     if (request !== loadSequence) return;
     if (state.flowPath !== previousPath || state.source !== previousSource) {
@@ -257,6 +261,7 @@ export async function loadFlow(path = state.flowPath) {
       const bar = $("debugBar");
       if (bar) bar.style.display = "none";
     }
+    state.graphLayouts[path] = layout;
     state.flowPath = path;
     state.flow = { ...flow, source: state.examples.find((f) => f.path === path)?.source || flow.source };
     state.source = source;
@@ -400,8 +405,11 @@ async function writeFlowSource(pending, source) {
   pending.savedPath = savedPath;
   pendingSaves.set(savedPath, pending);
   await call("save_flow_source", { path: savedPath, source });
+  if (savedPath !== path) await copyGraphLayout(path, savedPath);
   if (state.flowPath === path || state.flowPath === savedPath) {
+    const changedPath = state.flowPath !== savedPath;
     state.flowPath = savedPath;
+    if (changedPath) resetHistory();
     state.savedSource = source;
     if (example) state.flow = { ...state.flow, path: savedPath, source: "user", fileName: savedPath.split(/[\\/]/).pop() };
     renderFlowConfigCard();

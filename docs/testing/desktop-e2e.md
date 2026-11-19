@@ -43,15 +43,27 @@ dialog are driven through WebDriver. It checks:
 - Edit then run directly, proving the new buffer was saved before execution.
 - Open a persisted run in history and inspect the result.
 - Execute a failing step and inspect its displayed error and persisted state.
+- Add a canvas node through the action palette and undo it; drag a node and
+  undo the layout; connect a result port, confirm replacement, rename its source
+  and check the migrated binding; copy/paste/undo a node, execute and inspect the
+  selected node's result through production IPC.
 - Create a future cron job, check timezone/inputs/retry settings, edit it, reject
   a stale edit and cancel the fixture before it can run.
 - Approve an L3 local plan with the confirmation card and native second prompt.
 - Follow new Agent runs, pin historical results and return to the latest run.
+- Submit a saved flow's exact alias through the companion's text input, observe
+  completion and result without microphone capture, then open that exact run in
+  the main window's Mission Control. Observe a slow local task running, cancel
+  it from the companion, and submit another task successfully afterward.
 
 The local supplied Agent plan removes the remote planner dependency while
 retaining production validation, execution, approval, event transport and
 storage. Read-only assertions use the application's real Tauri commands. No
 mock Tauri bridge, fake DOM or test-only backend command is injected.
+The companion case uses the production local alias router and does not inject
+a supplied plan. Canvas dragging uses W3C pointer actions, and copy/paste uses
+keyboard actions. These suites are also required by the same-commit
+[release delivery gate](release-delivery.md).
 
 On failure, the script saves `driver.log`, a screenshot and the webview source
 under the artifact directory. CI uploads that directory. A platform or driver

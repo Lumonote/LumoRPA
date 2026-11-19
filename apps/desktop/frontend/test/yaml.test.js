@@ -9,6 +9,8 @@ import {
   pathKey,
   stepIdChain,
   walkSteps,
+  mutateStepWithReferences,
+  rewriteStepExpression,
 } from "../src/js/yaml.js";
 
 const parallelFlow = `apiVersion: lumorpa.io/v1
@@ -162,4 +164,30 @@ test("emitStep writes branches that parse back to the same branch shape", () => 
   assert.equal(parallel.branches.length, 2);
   assert.equal(parallel.branches[0][0].id, "first");
   assert.equal(parallel.branches[1][0].with.message, "b");
+});
+
+test("atomic rename migrates templates, bare predicates and outputs without touching literal lookups", () => {
+  const source = `# unchanged header\nspec:\n  steps:\n    - {id: old, action: control.log, with: {message: hello}}\n    - id: gate\n      action: control.if\n      when: steps.old.result != null # retain comment\n      with:\n        cond: steps['old'].result == 'steps.old.result'\n        literal: steps.old.result\n      do:\n        - {id: log, action: control.log, with: {message: "{{ steps.old.result }} / {{ steps['old'].result }}"}}\n  outputs: {value: "{{ steps.old.result }}"}\n`;
+  const updated = mutateStepWithReferences(source, [0], { id: "new-id", action: "control.log", with: { message: "hello" } });
+  const ast = parseYaml(updated), steps = extractSteps(ast);
+  assert.equal(steps[0].id, "new-id");
+  assert.equal(steps[1].when, 'steps["new-id"].result != null');
+  assert.equal(steps[1].with.cond, 'steps["new-id"].result == \'steps.old.result\'');
+  assert.equal(steps[1].with.literal, "steps.old.result");
+  assert.equal(steps[1].do[0].with.message, '{{ steps["new-id"].result }} / {{ steps["new-id"].result }}');
+  assert.equal(ast.spec.outputs.value, '{{ steps["new-id"].result }}');
+  assert.ok(updated.startsWith("# unchanged header\n"));
+  assert.match(updated, /# retain comment/);
+});
+
+test("static reference edits ignore quoted expression literals and similarly named identifiers", () => {
+  const actual = rewriteStepExpression('steps.old.result + steps["old"].result + "steps.old.result" + foo.steps.old + steps.oldish.result', new Map([["old", "next"]]));
+  assert.equal(actual, 'steps.next.result + steps["next"].result + "steps.old.result" + foo.steps.old + steps.oldish.result');
+});
+
+test("rename rejects ambiguous ids and recursive YAML without changing a source buffer", () => {
+  const duplicate = 'spec: {steps: [{id: old, action: control.log}, {id: old, action: control.log}]}';
+  assert.throws(() => mutateStepWithReferences(duplicate, [0], { id: "next", action: "control.log" }), /唯一/);
+  const cyclic = 'spec:\n  steps:\n    - &node\n      id: old\n      action: control.if\n      do: [*node]\n';
+  assert.throws(() => walkSteps(extractSteps(parseYaml(cyclic)), () => {}), /循环 YAML/);
 });

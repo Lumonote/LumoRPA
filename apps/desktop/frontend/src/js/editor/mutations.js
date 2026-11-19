@@ -7,8 +7,8 @@ import { toast } from "../dom.js";
 import { state } from "../state.js";
 import {
   parseYaml, extractSteps, findStepByPath, pathKey,
-  findStepRange, emitStep, extractStepBlock, insertStepBlocks,
-  removeStepBlocks, orderPathKeysByDocument,
+  findStepRange, emitStep,
+  removeStepBlocks, orderPathKeysByDocument, extractStepBlockAtPath, planStepBlockInsertion, parsePathKey,
 } from "../yaml.js";
 import { renderActiveView } from "./render.js";
 import { renderInspector } from "./inspector.js";
@@ -115,10 +115,12 @@ export function appendStepWithSelector(actionId, element) {
 export function duplicateStepByPath(path) {
   const step = findStepByPath(extractSteps(state.ast), path);
   if (!step) return;
-  const block = extractStepBlock(state.source, step.id);
+  const block = extractStepBlockAtPath(state.source, path);
   if (!block) return;
+  const plan = planStepBlockInsertion(state.source, path, [block.text]);
+  if (!plan.insertedCount || plan.source === state.source) return;
   snapshotSource("duplicate");
-  commitSource(insertStepBlocks(state.source, String(step.id), [block.text]));
+  commitSource(plan.source);
   toast("已创建步骤副本", String(step.id), "ok");
   renderActiveView();
 }
@@ -132,9 +134,9 @@ function selectionPathKeys() {
 export function copySelectedSteps() {
   const keys = selectionPathKeys();
   if (!keys.length || typeof state.source !== "string") return 0;
-  const { orderedIds } = orderPathKeysByDocument(state.source, keys);
-  const blocks = orderedIds
-    .map((id) => extractStepBlock(state.source, id)?.text)
+  const { orderedKeys } = orderPathKeysByDocument(state.source, keys);
+  const blocks = orderedKeys
+    .map((key) => extractStepBlockAtPath(state.source, parsePathKey(key))?.text)
     .filter(Boolean);
   if (!blocks.length) return 0;
   try {
@@ -164,12 +166,15 @@ export function pasteStepsFromClipboard() {
   const target = state.selectedStepPath
     ? findStepByPath(extractSteps(state.ast), state.selectedStepPath)
     : null;
+  let plan;
+  try { plan = planStepBlockInsertion(state.source || EMPTY_FLOW_HEADER, target ? state.selectedStepPath : null, blocks); }
+  catch (error) { toast("粘贴失败", error.message || String(error), "bad"); return 0; }
+  if (!plan.insertedCount || plan.source === state.source) { toast("没有可粘贴的步骤", "剪贴板未产生新节点", "warn"); return 0; }
   snapshotSource("paste");
-  if (!state.source) state.source = EMPTY_FLOW_HEADER;
-  commitSource(insertStepBlocks(state.source, target ? String(target.id) : null, blocks));
-  toast(`已粘贴 ${blocks.length} 个步骤`, target ? `已插入到 ${target.id} 之后` : "已追加到流程末尾", "ok");
+  commitSource(plan.source);
+  toast(`已粘贴 ${plan.insertedCount} 个步骤`, target ? `已插入到 ${target.id} 之后` : "已追加到流程末尾", "ok");
   renderActiveView();
-  return blocks.length;
+  return plan.insertedCount;
 }
 
 export function deleteSelectedSteps() {

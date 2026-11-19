@@ -81,6 +81,7 @@ pub(crate) struct ActionDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunReportDto {
+    pub(crate) outputs_deferred: bool,
     pub(crate) run_id: String,
     pub(crate) success: bool,
     pub(crate) steps_total: usize,
@@ -117,6 +118,8 @@ pub(crate) struct RunDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StepRunDto {
+    pub(crate) details_deferred: bool,
+    pub(crate) has_output: bool,
     pub(crate) seq: i64,
     pub(crate) path: String,
     pub(crate) parent_path: Option<String>,
@@ -327,6 +330,7 @@ pub(crate) fn count_steps(steps: &[Step]) -> usize {
 
 pub(crate) fn report_dto(report: lumo_core::RunReport) -> RunReportDto {
     RunReportDto {
+        outputs_deferred: false,
         run_id: report.run_id,
         success: report.success,
         steps_total: report.steps_total,
@@ -365,6 +369,12 @@ pub(crate) fn run_dto(row: FlowRunRow) -> RunDto {
     }
 }
 
+pub(crate) fn step_summary_dto(row: StepRunRow) -> StepRunDto {
+    let mut dto = step_dto(row);
+    dto.details_deferred = true;
+    dto
+}
+
 pub(crate) fn step_dto(row: StepRunRow) -> StepRunDto {
     let duration_ms = match (&row.started_at, &row.finished_at) {
         (Some(started), Some(finished)) => {
@@ -373,6 +383,8 @@ pub(crate) fn step_dto(row: StepRunRow) -> StepRunDto {
         _ => None,
     };
     StepRunDto {
+        details_deferred: false,
+        has_output: row.output_json.is_some(),
         seq: row.seq,
         path: row.path,
         parent_path: row.parent_path,
@@ -387,5 +399,53 @@ pub(crate) fn step_dto(row: StepRunRow) -> StepRunDto {
         started_at: row.started_at.map(|t| t.to_rfc3339()),
         finished_at: row.finished_at.map(|t| t.to_rfc3339()),
         duration_ms,
+    }
+}
+
+/// Stop visiting as soon as the inline response budget is exhausted; large
+/// strings and tables remain in storage and are read explicitly by the UI.
+pub(crate) fn exceeds_result_preview_budget(value: &Value) -> bool {
+    fn fits(value: &Value, remaining: &mut usize) -> bool {
+        let size = match value {
+            Value::String(text) => text.len().saturating_add(2),
+            Value::Null | Value::Bool(_) => 5,
+            Value::Number(_) => 24,
+            _ => 2,
+        };
+        if size > *remaining {
+            return false;
+        }
+        *remaining -= size;
+        match value {
+            Value::Array(items) => items.iter().all(|item| fits(item, remaining)),
+            Value::Object(items) => items.iter().all(|(key, item)| {
+                let size = key.len().saturating_add(4);
+                if size > *remaining {
+                    return false;
+                }
+                *remaining -= size;
+                fits(item, remaining)
+            }),
+            _ => true,
+        }
+    }
+    !fits(value, &mut 65536)
+}
+
+#[cfg(test)]
+mod result_preview_tests {
+    use super::*;
+    #[test]
+    fn preview_budget_keeps_small_scalars_and_defers_large_payloads() {
+        assert!(!exceeds_result_preview_budget(
+            &serde_json::json!({"result": false})
+        ));
+        assert!(exceeds_result_preview_budget(
+            &serde_json::json!({"result": "x".repeat(65536)})
+        ));
+        assert!(exceeds_result_preview_budget(&serde_json::json!(vec![
+            123;
+            10000
+        ])));
     }
 }

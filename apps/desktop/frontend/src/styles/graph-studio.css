@@ -355,3 +355,80 @@
 .graph-wrap .graph-port[data-port-kind="data"] { --port-color: var(--graph-data); }
 .graph-wrap .graph-port[data-port-kind="branch"] { --port-color: var(--graph-branch); }
 .graph-wrap button.graph-port[data-port-kind="execution"]::before { border-radius: 2px; transform: rotate(45deg); width: 8px; height: 8px; left: 5px; top: 8px; }
+
+/* Dense graph navigation stays outside the working area. */
+.workspace:has(#view-graph.is-active) { grid-template-columns: 264px minmax(0, 1fr) 320px; grid-template-rows: minmax(0, 1fr); }
+.workspace:has(#view-graph.is-active) #designView { min-width: 0; }
+.workspace:has(#view-graph.is-active) > .right-rail { min-height: 0; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.workspace:has(#view-graph.is-active) > .right-rail > .panel { overflow: auto; }
+.workspace:has(#view-graph.is-active) .editor-head { grid-template-columns: minmax(0, 1fr) auto; }
+.workspace:has(#view-graph.is-active) .flow-title, .workspace:has(#view-graph.is-active) .flow-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workspace:has(#view-graph.is-active) .editor-toolbar { flex-wrap: wrap; }
+.shell.is-canvas-focus .workspace:has(#view-graph.is-active) { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1280px) { .workspace:has(#view-graph.is-active) { grid-template-columns: 230px minmax(0, 1fr) 280px; } }
+@media (max-width: 1080px) { .workspace:has(#view-graph.is-active) { grid-template-columns: 220px minmax(0, 1fr); } }
+.graph-studio-topbar { gap: 10px; }
+.graph-studio-actions { flex-wrap: wrap; justify-content: flex-end; }
+.graph-studio-actions button[aria-pressed="true"] { color: var(--graph-accent); background: var(--graph-accent-soft); }
+.graph-minimap { position: absolute; right: 14px; bottom: 66px; z-index: 2; width: 184px; padding: 8px; border: 1px solid var(--graph-line); border-radius: 7px; background: var(--graph-card); box-shadow: var(--graph-shadow); }
+.graph-minimap > span { display: block; margin-bottom: 5px; color: var(--graph-muted); font-size: 9px; letter-spacing: .08em; }
+#graphMinimap { display: block; width: 100%; height: 104px; cursor: crosshair; }
+.graph-mini-node { fill: var(--graph-accent); opacity: .55; cursor: pointer; }
+.graph-mini-node.is-failed { fill: #dd7181; opacity: 1; }
+.graph-mini-node.is-running { fill: var(--graph-data); opacity: 1; }
+.graph-mini-viewport { fill: color-mix(in srgb, var(--graph-accent) 10%, transparent); stroke: var(--graph-accent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.graph-group-frame { --group-color: var(--graph-accent); }
+.graph-group-frame.color-blue { --group-color: #6aa8dc; }
+.graph-group-frame.color-amber { --group-color: #c99540; }
+.graph-group-frame.color-rose { --group-color: #ce8294; }
+.graph-group-frame > rect { fill: color-mix(in srgb, var(--group-color) 6%, transparent); stroke: color-mix(in srgb, var(--group-color) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.graph-group-head { display: flex; justify-content: space-between; gap: 8px; height: 30px; padding: 2px 7px; }
+.graph-group-head button { color: var(--group-color); border: 0; background: transparent; min-height: 24px; font-size: 11px; }
+.graph-group-head button:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-group-head small { margin-left: 7px; opacity: .7; }
+.graph-node-title { position: relative; }
+.graph-node-title:has(.graph-collapse) { padding-right: 112px; }
+.graph-node-title .graph-collapse { position: absolute; right: 0; top: -2px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 19px; height: 19px; padding: 0 4px; border: 1px solid var(--graph-line); border-radius: 3px; background: var(--graph-input); color: var(--graph-muted); font-size: 9px; }
+.graph-node-title:has(.graph-ungroup) .graph-collapse { right: 18px; max-width: 92px; }
+.graph-node-title .graph-ungroup { position: absolute; right: 0; top: -2px; height: 19px; min-height: 19px; padding: 0 3px; border: 0; background: transparent; font-size: 10px; }
+.graph-route-point { fill: var(--graph-card); stroke: var(--graph-data); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: move; }
+.graph-node-head .graph-expand { padding: 0 5px; min-height: 19px; height: 19px; font-size: 10px; border: 1px solid var(--graph-line); border-radius: 3px; color: var(--graph-accent); background: var(--graph-input); }
+.graph-node.is-folded { outline-style: dashed; }
+.graph-node.is-folded .graph-port-name { max-width: 224px; }
+.graph-node.is-folded .graph-port-row.is-input > .graph-port:first-child { margin-left: -9px; }
+.graph-node.is-folded .graph-node-foot > button { min-height: 22px; padding: 0 5px; margin-left: auto; background: transparent; }
+.graph-port.is-incompatible::before { border-color: #dd7181; opacity: .4; }
+.graph-port.is-incompatible { cursor: not-allowed; }
+.graph-node-result .graph-port-name small { opacity: .65; font-size: 8px; }
+.graph-wrap[data-detail="compact"] .graph-port-value { visibility: hidden; }
+.graph-wrap[data-detail="overview"] .graph-node-ports,
+.graph-wrap[data-detail="overview"] .graph-node-foot,
+.graph-wrap[data-detail="overview"] .graph-node-action,
+.graph-wrap[data-detail="overview"] .graph-node-execution,
+.graph-wrap[data-detail="overview"] .graph-node-eyebrow { visibility: hidden; }
+.graph-wrap[data-detail="overview"] .graph-node-title { overflow: visible; font-size: 22px; line-height: 28px; }
+.graph-wrap[data-detail="overview"] .graph-node-head { background: transparent; border: 0; }
+.graph-wrap[data-detail="overview"] .graph-node { box-shadow: none; }
+.graph-wrap[data-detail="overview"] .graph-collapse,
+.graph-wrap[data-detail="overview"] .graph-ungroup { display: none; }
+#graphGroupForm label { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--graph-muted); }
+#graphGroupForm input, #graphGroupForm select { min-height: 30px; width: 100%; background: var(--graph-input); color: var(--graph-text); border: 1px solid var(--graph-line); border-radius: 4px; padding: 5px 8px; }
+@media (max-width: 900px) { .graph-minimap { width: 135px; } #graphMinimap { height: 72px; } }
+.graph-result-drawer { position: absolute; z-index: 5; top: 86px; right: 14px; bottom: 64px; width: min(374px, calc(100% - 28px)); display: flex; flex-direction: column; color: var(--graph-text); border: 1px solid var(--graph-line); border-radius: 9px; background: var(--graph-card); box-shadow: var(--graph-shadow); overflow: hidden; }
+.graph-result-drawer[hidden] { display: none; }
+.graph-result-drawer > header { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--graph-line); background: var(--graph-input); }
+.graph-result-drawer > header > div { display: flex; flex-direction: column; gap: 4px; }
+.graph-result-drawer > header small { color: var(--graph-accent); font: 8px monospace; letter-spacing: .12em; }
+.graph-result-drawer > header strong { font-size: 12px; font-weight: 600; }
+.graph-result-drawer > header button { min-height: 26px; padding: 0 7px; border: 0; background: transparent; color: var(--graph-muted); font-size: 18px; }
+#graphResultDetail { min-height: 0; overflow: auto; overscroll-behavior: contain; flex: 1; padding: 14px; font-size: 11px; line-height: 1.6; align-content: start; grid-auto-rows: max-content; border: 0; border-radius: 0; background: transparent; }
+#graphResultDetail pre { max-height: 280px; overflow: auto; padding: 10px; color: var(--graph-text); background: var(--graph-input); border: 1px solid var(--graph-line); border-radius: 5px; font-size: 10px; }
+#graphResultDetail select { max-width: 100%; color: var(--graph-text); background: var(--graph-input); border: 1px solid var(--graph-line); }
+#graphResultDetail .kv { flex-wrap: wrap; overflow-wrap: anywhere; }
+#graphResultDetail img { max-width: 100%; object-fit: contain; }
+#graphResultDetail table { font-size: 10px; }
+.graph-wrap.has-result .graph-minimap { display: none; }
+/* Keep the timeline available for navigation without repeating the open drawer. */
+.workspace:has(#view-graph.is-active .graph-wrap.has-result) #timelineDetail { display: none; }
+.workspace:has(#view-graph.is-active .graph-wrap.has-result) > .right-rail { grid-template-rows: minmax(0, 1fr) auto; }
+@media (max-width: 1080px) { .graph-result-drawer { top: 110px; } }

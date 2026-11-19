@@ -9,15 +9,21 @@ import { parseYaml, parsePathKey, pathKey } from "../yaml.js";
 import { createHistoryCore } from "./history-core.js";
 import { renderActiveView } from "./render.js";
 import { renderInspector } from "./inspector.js";
+import { graphLayoutKey } from "./graph.js";
+import { persistGraphLayout } from "./graph-layout-store.js";
 
 const core = createHistoryCore();
 
 function currentSnapshot() {
+  const flowKey = graphLayoutKey();
   return {
+    flowKey,
     source: state.source,
     selectedKey: pathKey(state.selectedStepPath || []),
     selectedId: state.selectedStepId,
-    graphLayouts: structuredClone(state.graphLayouts || {}),
+    graphLayout: structuredClone(state.graphLayouts?.[flowKey] || {}),
+    hadGraphLayout: Object.hasOwn(state.graphLayouts || {}, flowKey),
+    breakpoints: [...state.breakpoints],
   };
 }
 
@@ -37,10 +43,12 @@ function applySnapshot(snap) {
   state.ast = parseYaml(state.source);
   state.selectedStepPath = snap.selectedKey ? parsePathKey(snap.selectedKey) : null;
   state.selectedStepId = snap.selectedId ?? null;
-  if (snap.graphLayouts) {
-    state.graphLayouts = structuredClone(snap.graphLayouts);
-    try { localStorage.setItem("lumo.graphLayouts", JSON.stringify(state.graphLayouts)); } catch { /* Optional presentation state. */ }
+  if (snap.graphLayout) {
+    if (snap.hadGraphLayout) state.graphLayouts[snap.flowKey] = structuredClone(snap.graphLayout);
+    else delete state.graphLayouts[snap.flowKey];
+    persistGraphLayout(snap.flowKey, state.graphLayouts[snap.flowKey] || {});
   }
+  if (snap.breakpoints) state.breakpoints = new Set(snap.breakpoints);
   state.draftController?.capture();
   state.selectedStepPaths?.clear();
   renderActiveView();

@@ -112,6 +112,25 @@ impl Action for ChatAction {
         });
         &SCHEMA
     }
+    fn output_schema(&self) -> Option<&'static Value> {
+        static SCHEMA: Lazy<Value> = Lazy::new(|| {
+            serde_json::json!({
+                "type": "object", "required": ["content", "model", "provider", "usage"],
+                "properties": {
+                    "content": { "type": "string" }, "model": { "type": "string" },
+                    "provider": { "type": "string" },
+                    "usage": {
+                        "type": "object", "required": ["input_tokens", "output_tokens", "latency_ms", "cost_usd_micro"],
+                        "properties": {
+                            "input_tokens": { "type": "integer" }, "output_tokens": { "type": "integer" },
+                            "latency_ms": { "type": "integer" }, "cost_usd_micro": { "type": "integer" }
+                        }, "additionalProperties": false
+                    }
+                }, "additionalProperties": false
+            })
+        });
+        Some(&SCHEMA)
+    }
     async fn execute(&self, ctx: &mut StepCtx, input: Value) -> Result<ActionResult, StepError> {
         let cfg: ChatIn = serde_json::from_value(input)
             .map_err(|e| StepError::msg(format!("ai.chat input invalid: {e}")))?;

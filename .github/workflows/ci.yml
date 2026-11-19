@@ -1,16 +1,29 @@
 name: ci
 
 on:
+  workflow_call:
   push:
     branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  delivery-tests:
+    name: release and acceptance tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: bash -n scripts/package-ci-release.sh scripts/macos-release-signing.sh
+
   frontend:
     name: desktop frontend
     runs-on: ubuntu-24.04

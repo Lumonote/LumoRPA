@@ -34,6 +34,7 @@ pub mod mcp;
 pub mod notify;
 // OCR 引擎与路由:本地小模型 / 远程接口 / 云 VLM 三档,云端默认关闭。
 pub mod ocr;
+mod output;
 pub mod pdf;
 pub mod regex_ops;
 pub mod resource_store;

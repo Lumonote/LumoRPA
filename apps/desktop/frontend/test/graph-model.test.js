@@ -207,3 +207,13 @@ test("the same nonrecursive YAML alias expands independently in distinct branche
   }
   assert.notEqual(model.nodes.get("0/:do/0").layoutKey, model.nodes.get("0/:else/0").layoutKey);
 });
+
+test("declared output fields have distinct ports and field references use their geometry", () => {
+  const schemas = new Map([["http.get", { "x-lumo-output": { type: "object", properties: { status: { type: "integer" }, body: { type: "string" } } } }]]);
+  const model = buildGraphModel([step("request", { action: "http.get" }), step("use", { with: { code: "{{ steps.request.result.status }}", text: "{{ steps.request.result['body'] }}" } })], { schemas });
+  const source = model.nodes.get("0");
+  assert.deepEqual(source.outputs.map((field) => field.path), [[], ["status"], ["body"]]);
+  assert.equal(source.h, 142 + 2 * GRAPH_INPUT_ROW_HEIGHT);
+  assert.deepEqual(model.edges.filter((edge) => edge.kind === "data").map((edge) => edge.outputPath), [["status"], ["body"]]);
+  assert.notDeepEqual(graphPortPoint(source, { direction: "output", kind: "data", outputPath: ["status"] }), graphPortPoint(source, { direction: "output", kind: "data", outputPath: ["body"] }));
+});

@@ -11,6 +11,7 @@ import {
   removeStepBlocks,
   collectStepIds,
   orderPathKeysByDocument,
+  planStepBlockInsertion,
 } from "../src/js/yaml.js";
 
 const flow = `apiVersion: lumorpa.io/v1
@@ -119,4 +120,39 @@ test("orderPathKeysByDocument returns ids and keys in walk order", () => {
   const { orderedIds, orderedKeys } = orderPathKeysByDocument(flow, ["2", "1/:do/0", "0"]);
   assert.deepEqual(orderedIds, ["fetch", "log_item", "done"]);
   assert.deepEqual(orderedKeys, ["0", "1/:do/0", "2"]);
+});
+
+test("copying a selection migrates cross-block references once and keeps external references", () => {
+  const source = 'spec:\n  steps:\n    - id: read\n      action: control.log\n      with: {message: hello}\n    - id: save\n      action: control.log\n      when: steps.read.result != null\n      with: {message: "{{ steps.read.result }} / {{ steps.external.result }}"}\n';
+  const blocks = ["read", "save"].map((id) => extractStepBlock(source, id).text);
+  const plan = planStepBlockInsertion(source, [1], blocks);
+  const steps = extractSteps(parseYaml(plan.source));
+  assert.equal(plan.insertedCount, 2);
+  assert.deepEqual(plan.ids, ["read_c1", "save_c1"]);
+  assert.equal(steps[3].when, "steps.read_c1.result != null");
+  assert.equal(steps[3].with.message, "{{ steps.read_c1.result }} / {{ steps.external.result }}");
+  assert.equal(steps[1].with.message, "{{ steps.read.result }} / {{ steps.external.result }}");
+});
+
+test("inline and compact list nodes paste into the exact target list", () => {
+  const source = 'spec: {steps: [{id: gate, action: control.if, do: [{id: child, action: control.log, with: {message: hello}}]}], outputs: {status: ready}}\n';
+  const block = extractStepBlock(source, "child").text;
+  const plan = planStepBlockInsertion(source, [0, "do", 0], [block]);
+  const ast = parseYaml(plan.source);
+  assert.deepEqual(ast.spec.steps[0].do.map((step) => step.id), ["child", "child_c1"]);
+  assert.deepEqual(ast.spec.outputs, { status: "ready" });
+  assert.equal(plan.insertedCount, 1);
+});
+
+test("pasted ids reserve every selected original id and bracket references migrate", () => {
+  const blocks = ['- {id: read, action: control.log}\n', '- {id: read_c1, action: control.log, with: {message: "{{ steps[\'read\'].result }}"}}\n'];
+  const source = 'spec: {steps: [{id: read, action: control.log}]}\n';
+  const ast = parseYaml(planStepBlockInsertion(source, null, blocks).source);
+  assert.deepEqual(ast.spec.steps.map((step) => step.id), ["read", "read_c2", "read_c1"]);
+  assert.equal(ast.spec.steps[2].with.message, '{{ steps["read_c2"].result }}');
+});
+
+test("selecting a parent and its child copies only one subtree", () => {
+  const selection = orderPathKeysByDocument(flow, ["1", "1/:do/0"]);
+  assert.deepEqual(selection.orderedKeys, ["1"]);
 });
