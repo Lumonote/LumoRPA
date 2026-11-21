@@ -370,3 +370,111 @@ CREATE TABLE agent_invocation_usage_resolutions (
   FOREIGN KEY(run_id,node_id,attempt) REFERENCES agent_invocation_attempts(run_id,node_id,attempt) ON DELETE CASCADE
 );
 "#;
+
+/// Local CRM records are independent of execution history retention.
+pub const V8_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS acquisition_campaigns (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  product TEXT NOT NULL,
+  target_audience TEXT NOT NULL,
+  keywords TEXT NOT NULL,
+  platforms TEXT NOT NULL,
+  max_leads INTEGER NOT NULL CHECK(max_leads BETWEEN 1 AND 200),
+  status TEXT NOT NULL CHECK(status IN ('draft','running','completed','failed','cancelled')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_error TEXT,
+  outreach TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS acquisition_leads (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL REFERENCES acquisition_campaigns(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK(platform IN ('xiaohongshu','douyin','weibo')),
+  platform_user_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  profile_url TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  bio TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('new','qualified','contacted','replied','converted','ignored')),
+  intent_score INTEGER NOT NULL CHECK(intent_score BETWEEN 0 AND 100),
+  tags TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(campaign_id,platform,platform_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_leads_campaign ON acquisition_leads(campaign_id,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_acquisition_leads_identity ON acquisition_leads(platform,platform_user_id);
+CREATE TABLE IF NOT EXISTS acquisition_messages (
+  id TEXT PRIMARY KEY,
+  lead_id TEXT NOT NULL REFERENCES acquisition_leads(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK(direction IN ('inbound','outbound')),
+  body TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('draft','approved','sending','sent','failed','received','uncertain')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  error TEXT,
+  attempted_at INTEGER,
+  CHECK((direction='inbound' AND status='received') OR (direction='outbound' AND status!='received'))
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_messages_lead ON acquisition_messages(lead_id,created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_acquisition_outbound_draft ON acquisition_messages(lead_id,body) WHERE direction='outbound' AND status!='failed';
+CREATE INDEX IF NOT EXISTS idx_acquisition_messages_status ON acquisition_messages(status,updated_at);
+CREATE TABLE IF NOT EXISTS acquisition_requirements (
+  id TEXT PRIMARY KEY,
+  lead_id TEXT NOT NULL REFERENCES acquisition_leads(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL,
+  category TEXT NOT NULL,
+  urgency TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(lead_id,summary,evidence)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_requirements_lead ON acquisition_requirements(lead_id,created_at);
+CREATE TABLE IF NOT EXISTS acquisition_activity (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT REFERENCES acquisition_campaigns(id) ON DELETE CASCADE,
+  lead_id TEXT REFERENCES acquisition_leads(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_activity_campaign ON acquisition_activity(campaign_id,created_at DESC);
+"#;
+
+/// Ordered analysis inputs. Private replies reference the stored message so
+/// the queue does not retain another copy of conversation text.
+pub const V9_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS acquisition_inputs (
+  seq INTEGER PRIMARY KEY,
+  lead_id TEXT NOT NULL REFERENCES acquisition_leads(id) ON DELETE CASCADE,
+  source_url TEXT,
+  excerpt TEXT,
+  message_id TEXT UNIQUE REFERENCES acquisition_messages(id) ON DELETE CASCADE,
+  observed_at INTEGER NOT NULL,
+  CHECK((source_url IS NOT NULL AND excerpt IS NOT NULL AND message_id IS NULL)
+     OR (source_url IS NULL AND excerpt IS NULL AND message_id IS NOT NULL)),
+  UNIQUE(lead_id,source_url,excerpt)
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_inputs_lead ON acquisition_inputs(lead_id,seq);
+CREATE TABLE IF NOT EXISTS acquisition_analysis_progress (
+  lead_id TEXT PRIMARY KEY REFERENCES acquisition_leads(id) ON DELETE CASCADE,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO acquisition_inputs(lead_id,source_url,excerpt,observed_at)
+  SELECT id,source_url,evidence,created_at FROM acquisition_leads ORDER BY created_at,id;
+INSERT OR IGNORE INTO acquisition_inputs(lead_id,message_id,observed_at)
+  SELECT lead_id,id,created_at FROM acquisition_messages WHERE direction='inbound' ORDER BY created_at,id;
+INSERT OR IGNORE INTO acquisition_analysis_progress(lead_id) SELECT id FROM acquisition_leads;
+CREATE TRIGGER IF NOT EXISTS acq_initial_input AFTER INSERT ON acquisition_leads BEGIN
+  INSERT INTO acquisition_analysis_progress(lead_id) VALUES(NEW.id);
+  INSERT INTO acquisition_inputs(lead_id,source_url,excerpt,observed_at)
+    VALUES(NEW.id,NEW.source_url,NEW.evidence,NEW.created_at);
+END;
+CREATE TRIGGER IF NOT EXISTS acq_reply_input AFTER INSERT ON acquisition_messages WHEN NEW.direction='inbound' BEGIN
+  INSERT INTO acquisition_inputs(lead_id,message_id,observed_at) VALUES(NEW.lead_id,NEW.id,NEW.created_at);
+END;
+"#;

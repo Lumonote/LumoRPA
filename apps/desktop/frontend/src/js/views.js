@@ -39,6 +39,7 @@ export function switchTopView(view) {
     models: "modelsView",
     features: "featuresView",
     settings: "settingsView",
+    acquisition: "acquisitionView",
   };
   Object.values(map).forEach((id) => ($(id).style.display = "none"));
   if (map[view]) $(map[view]).style.display = "";

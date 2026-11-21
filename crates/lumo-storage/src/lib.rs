@@ -4,6 +4,9 @@
 //! A `Repo` trait abstracts the backend so libSQL can be plugged in later
 //! without touching call sites.
 
+mod acquisition_queue;
+mod acquisition_store;
+mod acquisition_types;
 mod agent_store;
 pub mod error;
 mod invocation_store;
@@ -13,6 +16,8 @@ pub mod schema;
 pub mod types;
 pub mod vault;
 
+pub use acquisition_store::{acquisition_render_message, acquisition_scope};
+pub use acquisition_types::*;
 pub use error::StorageError;
 pub use repo::Repo;
 pub use types::*;

@@ -40,6 +40,7 @@ import { bindGraphPan } from "./editor/graph.js";
 import { openMagicPrompt } from "./magic-prompt.js";
 import { openFlowHistory } from "./flow-history.js";
 import { mountCapabilityHub } from "./capability-hub.js";
+import { mountAcquisitionCenter } from "./acquisition.js";
 import { createJobScheduler } from "./job-scheduler.js";
 import { applyStaticTranslations, subscribeLocale } from "./i18n.js";
 import { mountMissionControl, receiveMissionControlAgentEvent, refreshVoiceHistory, selectMissionControlRun, updateMissionControl } from "./mission-control.js";
@@ -48,6 +49,7 @@ import { bindCapsuleRunNavigation, normalizeToastEvent, restoreAndSubscribeAgent
 import { createDraftController, observeEditorState, handleEditorExit, chooseEditorAction } from "./editor-drafts.js";
 
 let bootStarted = false;
+let acquisitionCenter;
 let exitInFlight = false;
 const jobScheduler = createJobScheduler({
   call,
@@ -65,7 +67,7 @@ async function bindAppEvents() {
   try {
     await listen("lumo://open-view", (event) => {
       const view = String(event?.payload || "");
-      if (["design", "recorder", "runs", "models", "features", "settings", "capability-hub", "mission-control"].includes(view)) {
+      if (["design", "recorder", "runs", "models", "features", "settings", "capability-hub", "mission-control", "acquisition"].includes(view)) {
         switchTopView(view);
         document.querySelector(`[data-view="${CSS.escape(view)}"]`)?.click();
       }
@@ -141,6 +143,12 @@ function bindEvents() {
   // Top tabs
   $$(".tabs .tab").forEach((b) => b.addEventListener("click", () => {
     switchTopView(b.dataset.view);
+    const acquiring = b.dataset.view === "acquisition";
+    if (acquiring && !acquisitionCenter) {
+      acquisitionCenter = mountAcquisitionCenter({ root: $("acquisitionView"), call, listen: window.__TAURI__?.event?.listen });
+    } else {
+      acquisitionCenter?.setVisible(acquiring);
+    }
     const hub = $("capabilityHubView");
     hub.style.display = b.dataset.view === "capability-hub" ? "" : "none";
     const mission = $("missionControlView");

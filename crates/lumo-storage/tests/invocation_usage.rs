@@ -190,7 +190,7 @@ fn usage_migration_from_v6_preserves_existing_runs() {
         reopened
             .with_raw(|conn| conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
             .unwrap(),
-        7
+        lumo_storage::repo::LATEST_USER_VERSION
     );
 }
 

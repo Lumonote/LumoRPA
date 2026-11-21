@@ -33,7 +33,9 @@ use std::{path::Path, sync::Arc};
 ///   4 -> 5: add durable scheduled agent jobs and node recovery checkpoints.
 ///   5 -> 6: persist node results, run association, and approval waiting.
 ///   6 -> 7: retain per-attempt usage and associated nested VM runs.
-pub const LATEST_USER_VERSION: i64 = 7;
+///   7 -> 8: local acquisition campaigns, leads, messages, needs and activity.
+///   8 -> 9: attributed public evidence and resumable acquisition analysis.
+pub const LATEST_USER_VERSION: i64 = 9;
 
 #[derive(Clone)]
 pub struct Repo {
@@ -700,6 +702,12 @@ fn run_migrations_with_ddls(
     }
     if current < 7 {
         tx.execute_batch(schema::V7_DDL)?;
+    }
+    if current < 8 {
+        tx.execute_batch(schema::V8_DDL)?;
+    }
+    if current < 9 {
+        tx.execute_batch(schema::V9_DDL)?;
     }
 
     // PRAGMA user_version does not accept bound parameters; the value is a

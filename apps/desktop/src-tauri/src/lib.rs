@@ -30,6 +30,10 @@ use tauri::{
     Emitter, Manager, State, WindowEvent, Wry,
 };
 
+mod acquisition_analysis;
+mod acquisition_commands;
+mod acquisition_computer;
+mod acquisition_desktop;
 mod agent_commands;
 mod agent_management_commands;
 mod agent_service;
@@ -1382,6 +1386,7 @@ pub fn run() {
             // 注册表的路径深处拿不到 tauri State）。
             let _ = APP_HANDLE.set(handle.clone());
             setup_tray(app)?;
+            acquisition_commands::recover(&handle).map_err(anyhow::Error::msg)?;
             setup_agent_service(&handle).map_err(|error| anyhow::anyhow!(error))?;
             setup_job_worker(&handle).map_err(|error| anyhow::anyhow!(error))?;
             setup_voice_host(&handle).map_err(|error| anyhow::anyhow!(error))?;
@@ -1398,6 +1403,19 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            acquisition_commands::acquisition_snapshot,
+            acquisition_commands::acquisition_save_campaign,
+            acquisition_commands::acquisition_approve_outreach,
+            acquisition_commands::acquisition_start,
+            acquisition_commands::acquisition_cancel,
+            acquisition_commands::acquisition_lead_detail,
+            acquisition_commands::acquisition_set_lead_status,
+            acquisition_commands::acquisition_add_note,
+            acquisition_commands::acquisition_analyze_lead,
+            acquisition_commands::acquisition_draft_message,
+            acquisition_commands::acquisition_send_message,
+            acquisition_commands::acquisition_browser_open,
+            acquisition_commands::acquisition_resolve_message,
             editor_draft_list,
             editor_draft_upsert,
             editor_draft_delete,
@@ -1541,6 +1559,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building LumoRPA desktop")
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                tauri::async_runtime::block_on(acquisition_computer::shutdown());
+            }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 if !flow_drafts::consume_exit_permission() {
                     api.prevent_exit();

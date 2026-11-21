@@ -4077,6 +4077,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ulid",
+ "url",
 ]
 
 [[package]]
@@ -4102,7 +4103,11 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "block2",
+ "chromiumoxide",
  "chrono",
+ "core-graphics 0.25.0",
+ "futures",
+ "image 0.25.10",
  "lumo-actions",
  "lumo-agent",
  "lumo-ai",
@@ -4131,6 +4136,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ulid",
+ "xcap",
 ]
 
 [[package]]

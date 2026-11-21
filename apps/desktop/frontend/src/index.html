@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./styles/capability-hub.css" />
     <link rel="stylesheet" href="./styles/mission-control.css" />
+    <link rel="stylesheet" href="./styles/acquisition.css" />
     <link rel="stylesheet" href="./styles/improvements.css" />
     <link rel="stylesheet" href="./styles/voice-settings.css" />
     <link rel="stylesheet" href="./styles/security-center.css" />
@@ -29,6 +30,7 @@
           <button class="tab" data-view="recorder" data-i18n="nav.recorder">录制</button>
           <button class="tab" data-view="runs" data-i18n="nav.runs">运行</button>
           <button class="tab" data-view="mission-control" data-i18n="nav.mission_control">Mission Control</button>
+          <button class="tab" data-view="acquisition">获客中心</button>
           <button class="tab" data-view="models" data-i18n="nav.models">模型</button>
           <button class="tab" data-view="features" data-i18n="nav.features">能力地图</button>
           <button class="tab" data-view="capability-hub" data-i18n="nav.capability_hub">能力中枢</button>
@@ -496,6 +498,7 @@
           <div class="mc-grid"><div class="mc-stage" data-mc-topology></div><aside class="mc-detail" data-mc-detail></aside><div class="mc-log" data-mc-log></div></div>
           <section class="mc-voice-history"><header><span>VOICE COMMANDS</span><h2>最近语音指令</h2></header><div data-mc-voice-history></div></section>
         </section>
+        <section id="acquisitionView" class="acquisition" style="display:none" aria-label="获客中心"></section>
       </main>
 
       <!-- ─── Status bar ─────────────────────────────────────────── -->

@@ -32,6 +32,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64 = "0.22"
 chrono.workspace = true
+chromiumoxide.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -49,6 +51,9 @@ ulid.workspace = true
 pinyin = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["elcapitan"] }
+xcap = "=0.4.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 block2 = "0.6"
 objc2 = "0.6"
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
