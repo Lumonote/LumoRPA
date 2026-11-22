@@ -7,42 +7,69 @@ use serde_json::json;
 use std::{path::Path, time::Duration};
 use ulid::Ulid;
 
+#[derive(Clone)]
 pub(super) struct Analyst {
     pub(super) router: std::sync::Arc<AiRouter>,
-    model: String,
+    pub(super) model: String,
     pub vision_model: Option<String>,
+    pub vision_issue: Option<String>,
 }
 impl Analyst {
-    pub fn load(home: &Path) -> Result<Self, String> {
+    pub fn load(home: &Path, c: &AcquisitionCampaign) -> Result<Self, String> {
+        let cfg = ProvidersConfig::load(providers_path(home)).map_err(|e| e.to_string())?;
+        Self::for_session(&cfg, Some(c))
+    }
+
+    pub fn for_session(
+        cfg: &ProvidersConfig,
+        c: Option<&AcquisitionCampaign>,
+    ) -> Result<Self, String> {
         if !lumo_ai::llm_network_allowed() {
             return Err("请在「模型」页为本次会话启用模型网络。".into());
         }
-        let cfg = ProvidersConfig::load(providers_path(home)).map_err(|e| e.to_string())?;
-        let router = AiRouter::from_config(&cfg);
+        Self::from_config(cfg, c)
+    }
+
+    fn from_config(cfg: &ProvidersConfig, c: Option<&AcquisitionCampaign>) -> Result<Self, String> {
+        let policy = c.map(|c| &c.outreach);
+        let analysis_name = policy
+            .and_then(|p| p.analysis_provider.as_deref())
+            .or(cfg.active.as_deref())
+            .ok_or("请在「模型」页选择默认模型源，或在任务中指定文本模型源。")?;
         let profile = cfg
-            .active_profile()
-            .ok_or("请在「模型」页选择可用的模型提供商。")?;
-        if !router.provider_names().contains(&profile.name) {
-            return Err("当前提供商不支持文本分析。".into());
-        }
+            .get(analysis_name)
+            .ok_or_else(|| format!("找不到文本模型源「{analysis_name}」，请更新任务配置。"))?;
         let model = format!(
             "{}/{}",
             profile.name,
-            profile
-                .default_model
-                .as_deref()
-                .filter(|m| !m.is_empty())
-                .ok_or("请配置默认分析模型。")?
+            super::model_setup::chat_model(profile)?
         );
-        let vision_model = profile
-            .vision_model
-            .as_ref()
-            .filter(|m| !m.trim().is_empty())
-            .map(|m| format!("{}/{}", profile.name, m));
+        let vision_name = policy
+            .and_then(|p| p.vision_provider.as_deref())
+            .unwrap_or(analysis_name);
+        let mut profiles = vec![profile.clone()];
+        let vision = cfg
+            .get(vision_name)
+            .ok_or_else(|| format!("找不到视觉模型源「{vision_name}」，请更新任务配置。"))
+            .and_then(|p| {
+                let model = super::model_setup::configured_model(p, true)?;
+                if p.name != profile.name {
+                    profiles.push(p.clone());
+                }
+                Ok(format!("{}/{model}", p.name))
+            });
+        let (vision_model, vision_issue) = match vision {
+            Ok(model) => (Some(model), None),
+            Err(issue) => (None, Some(issue)),
+        };
         Ok(Self {
-            router: std::sync::Arc::new(router),
+            router: std::sync::Arc::new(AiRouter::from_config(&ProvidersConfig {
+                active: Some(profile.name.clone()),
+                profiles,
+            })),
             model,
             vision_model,
+            vision_issue,
         })
     }
     pub async fn choose_posts(
@@ -170,10 +197,28 @@ impl Assessment {
 pub(super) async fn analyze(
     home: &Path,
     repo: &Repo,
+    lead: AcquisitionLead,
+    c: &AcquisitionCampaign,
+) -> Result<(), String> {
+    let analyst = Analyst::load(home, c)?;
+    analyze_with(&analyst, repo, lead, c).await
+}
+pub(super) async fn analyze_manually(
+    analyst: &Analyst,
+    repo: &Repo,
+    lead: AcquisitionLead,
+    c: &AcquisitionCampaign,
+) -> Result<(), String> {
+    repo.acquisition_prepare_manual_analysis(&lead.id)
+        .map_err(|e| e.to_string())?;
+    analyze_with(analyst, repo, lead, c).await
+}
+pub(super) async fn analyze_with(
+    analyst: &Analyst,
+    repo: &Repo,
     mut lead: AcquisitionLead,
     c: &AcquisitionCampaign,
 ) -> Result<(), String> {
-    let analyst = Analyst::load(home)?;
     while let Some(batch) = repo
         .acquisition_analysis_batch(&lead.id)
         .map_err(|e| e.to_string())?
@@ -192,6 +237,48 @@ pub(super) async fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn campaign_routes_text_and_vision_independently_using_the_loaded_configuration() {
+        let mut cfg = ProvidersConfig::seed_default();
+        let mut text = cfg.get("deepseek").unwrap().clone();
+        text.api_key = Some("fixture".into());
+        cfg.upsert(text);
+        let mut vision = cfg.get("openai").unwrap().clone();
+        vision.api_key = Some("fixture".into());
+        vision.default_model = None;
+        cfg.upsert(vision);
+        cfg.use_("deepseek").unwrap();
+        let mut campaign: AcquisitionCampaign = serde_json::from_value(json!({
+            "id": "c", "name": "test", "product": "product", "targetAudience": "audience",
+            "keywords": ["product"], "platforms": ["weibo"], "maxLeads": 1,
+            "status": "draft", "createdAt": 0, "updatedAt": 0
+        }))
+        .unwrap();
+        let default = Analyst::from_config(&cfg, Some(&campaign)).unwrap();
+        assert_eq!(default.model, "deepseek/deepseek-chat");
+        assert!(default.vision_model.is_none());
+
+        campaign.outreach.analysis_provider = Some("deepseek".into());
+        campaign.outreach.vision_provider = Some("openai".into());
+        cfg.use_("local-ocr").unwrap();
+        let running = Analyst::from_config(&cfg, Some(&campaign)).unwrap();
+        assert_eq!(running.model, "deepseek/deepseek-chat");
+        assert_eq!(running.vision_model.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(running.router.provider_names(), ["deepseek", "openai"]);
+
+        cfg.remove("openai").unwrap();
+        let next = Analyst::from_config(&cfg, Some(&campaign)).unwrap();
+        assert_eq!(running.vision_model.as_deref(), Some("openai/gpt-4o"));
+        assert!(next.vision_model.is_none());
+        assert!(next.vision_issue.unwrap().contains("openai"));
+        cfg.remove("deepseek").unwrap();
+        assert!(Analyst::from_config(&cfg, Some(&campaign))
+            .err()
+            .unwrap()
+            .contains("deepseek"));
+    }
+
     #[test]
     fn excludes_unattributed_requirements_and_rejects_ungrounded_match() {
         let mut v = json!({"matched":true,"intentScore":81,"matchEvidence":"想试用","summary":"请求试用","tags":[],"nextAction":"","requirements":[{"summary":"需要折扣","category":"价格","urgency":"低","evidence":"优惠"}]});

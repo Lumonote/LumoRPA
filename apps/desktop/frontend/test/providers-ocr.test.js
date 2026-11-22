@@ -5,7 +5,7 @@ let invoke;
 globalThis.window = { __TAURI__: { core: { invoke: (...args) => invoke(...args) } } };
 globalThis.localStorage = { getItem: () => null };
 const { state } = await import("../src/js/state.js");
-const { renderOcrModelPicker, runOcrModelCheck, refreshProviders } = await import("../src/js/providers.js");
+const { renderOcrModelPicker, runOcrModelCheck, refreshProviders, testProvider } = await import("../src/js/providers.js");
 const model = (status = {}) => ({
   preset: { id: "modelscope/test/ocr", repo: "test/ocr", label: "Local OCR", engine: "local", runnable: true },
   cacheDir: "/cache/ocr", downloaded: true, downloadState: "complete", runtimeState: "unchecked", inferenceState: "unchecked",
@@ -130,4 +130,60 @@ test("a stale list response cannot overwrite newer local inference diagnostics",
   finishList([model()]);
   await refresh;
   assert.equal(state.ocrModels[0].inferenceState, "ready");
+});
+
+test("connection probe uses unsaved fields once and never enables networking or saves the form", async (context) => {
+  const { fields } = ui(context);
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const notices = [];
+  globalThis.document.createElement = () => ({});
+  fields.set("toastStack", { appendChild: n => notices.push(n.innerHTML) });
+  state.providers = { networkEnabled: false };
+  state.providerDraft = { name: "example", savedName: "example", hasInlineKey: true, defaultModel: "old" };
+  fields.get("pName").value = "example";
+  fields.set("pModel", {value: "new-model"});
+  fields.set("pKind", {value: "openai"});
+  fields.set("pBase", {value: "https://example.test/v1"});
+  const calls = [];
+  let finish;
+  invoke = (command, args) => {
+    calls.push({command,args});
+    return new Promise(resolve => {finish = resolve;});
+  };
+  await testProvider();
+  assert.deepEqual(calls, []);
+  assert.match(notices[0], /请先启用/);
+  state.providers.networkEnabled = true;
+  const pending = testProvider();
+  await testProvider();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "test_provider");
+  assert.equal(calls[0].args.vision, false);
+  const profile = calls[0].args.profile;
+  assert.equal(profile.defaultModel, "new-model");
+  assert.equal(profile.baseUrl, "https://example.test/v1");
+  assert.equal(profile.keepInlineKey, true);
+  finish({ok:true,provider:"example",model:"new-model"});
+  await pending;
+  assert.equal(fields.get("testProviderBtn").disabled, false);
+  assert.equal(state.providerDraft.defaultModel, "old");
+  fields.get("pClearInline").checked = true;
+  invoke = async (_command,args) => {
+    assert.equal(args.profile.keepInlineKey, false);
+    throw Error("offline fixture");
+  };
+  await testProvider();
+  assert.equal(fields.get("testProviderBtn").disabled, false);
+  assert.match(notices.at(-1), /offline fixture/);
+  await testProvider("vision");
+  assert.match(notices.at(-1), /填写视觉模型/);
+  fields.get("pVisionModel").value = "vision-fixture";
+  invoke = async (command,args) => {
+    assert.equal(command, "test_provider");
+    assert.equal(args.vision, true);
+    assert.equal(args.profile.visionModel, "vision-fixture");
+    return {ok:true, provider:"example", model:"vision-fixture"};
+  };
+  await testProvider("vision");
+  assert.match(notices.at(-1), /识图测试通过/);
 });

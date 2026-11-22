@@ -1,0 +1,111 @@
+<!doctype html><meta charset="utf-8"><main id="center"></main>
+<script type="module">
+/* PRODUCTION_ACQUISITION_MODULE */
+
+// Exercise the shipped controls with deterministic IPC responses. Unexpected
+// commands, including a send or login, are test failures.
+const root = document.querySelector("#center");
+const find = selector => root.querySelector(selector);
+const check = (condition, message) => { if (!condition) throw Error(message); };
+async function click(selector) {
+  const button = find(selector);
+  check(button && !button.disabled, "unavailable: " + selector);
+  button.click();
+  while (root.getAttribute("aria-busy") === "true") await new Promise(r => setTimeout(r, 5));
+}
+let task = {...newAcquisitionCampaign(), id:"c", name:"门店线索", product:"预约服务", targetAudience:"店主", keywords:["预约"]};
+const people = Object.keys(ACQUISITION_PLATFORMS).map(platform => ({
+  platform, id:platform, platformUserId:"5", campaignId:"c",
+  displayName:ACQUISITION_PLATFORMS[platform] + "店主", evidence:"预约提醒",
+  status:"qualified", intentScore:90, profile:{summary:"想了解预约"}, tags:["预约"]
+}));
+const demand = {leadId:"douyin", summary:"到店提醒", evidence:"提前一天提醒", category:"提醒"};
+const messages = [{id:"unclear",direction:"outbound",status:"uncertain",body:"之前的问候"}];
+const mutations = [];
+const unexpected = [];
+let pendingAnalysis = false;
+async function call(command, args) {
+  if (command === "acquisition_snapshot") return structuredClone({
+    campaigns:[task], leads:people, requirements:[demand], activity:[], runningCampaignIds:[],
+    pendingAnalysisIds: pendingAnalysis ? ["douyin"] : [],
+    modelSources:[{name:"text-profile", textModel:"text-model"}, {name:"vision-profile", visionModel:"image-model"}]
+  });
+  if (command === "acquisition_save_campaign") {
+    task = structuredClone(args.campaign);
+    return task;
+  }
+  if (command === "acquisition_lead_detail" && args.leadId === "douyin")
+    return structuredClone({lead:people.find(p => p.id === args.leadId), messages, requirements:[demand]});
+  if (command === "acquisition_draft_message" && args.leadId === "douyin") {
+    messages.push({id:"draft",direction:"outbound",status:"draft",body:args.body});
+  } else if (command === "acquisition_add_note" && args.leadId === "douyin") {
+    messages.push({id:"note",direction:"inbound",status:"received",body:args.body});
+    pendingAnalysis = true;
+    mutations.push(command);
+    return {analysisError:"模型离线"};
+  } else if (command === "acquisition_analyze_lead" && args.leadId === "douyin" && pendingAnalysis) {
+    pendingAnalysis = false;
+  } else if (command === "acquisition_resolve_message" && args.messageId === "unclear" && args.sent === true) {
+    messages[0].status = "sent";
+  } else {
+    unexpected.push(command);
+    throw Error("unexpected IPC: " + command);
+  }
+  mutations.push(command);
+}
+try {
+  const view = mountAcquisitionCenter({root, call});
+  await view.refresh();
+  const rows = () => [...root.querySelectorAll("[data-acq-content] [data-acq-lead]")];
+  check(rows().length === 3, "missing platform leads");
+  const filter = find("[data-acq-filter-platform]");
+  filter.value = "weibo";
+  filter.dispatchEvent(new Event("change", {bubbles:true}));
+  check(rows().length === 1 && rows()[0].dataset.acqLead === "weibo", "wrong platform filter");
+  await click('[data-acq-tab="demands"]');
+  check(find("[data-acq-content]").textContent.includes(demand.evidence), "missing evidence");
+  await click('[data-acq-content] [data-acq-lead="douyin"]');
+  check(find("[data-acq-detail-content] h2").textContent === "抖音店主", "wrong recipient");
+  check(find("[data-acq-draft]").value.includes("抖音店主"), "wrong template");
+  find("[data-acq-draft]").value = "新的草稿";
+  await click('[data-acq-action="save-draft"]');
+  check(messages[1]?.body === "新的草稿", "draft not saved");
+  await click('[data-acq-send="draft"]');
+  check(find("[data-acq-dialog]").open && find("[data-acq-dialog-content]").textContent.includes("抖音店主（5）"), "wrong send confirmation");
+  await click('[data-acq-action="close-dialog"]');
+  find("[data-acq-note]").value = "希望提前两天提醒";
+  await click('[data-acq-action="save-note"]');
+  check(find("[data-acq-error]").textContent.includes("回复已保存，待补分析"), "hidden analysis failure");
+  check(find("[data-acq-detail-content]").textContent.includes("希望提前两天提醒"), "reply lost");
+  check(find('[data-acq-run="analyze_pending"]')?.textContent.includes("1 位"), "missing campaign analysis queue");
+  check(find('[data-acq-action="analyze"]').textContent === "补分析", "missing lead retry action");
+  await click('[data-acq-action="analyze"]');
+  check(!find('[data-acq-run="analyze_pending"]') && find('[data-acq-action="analyze"]').textContent === "重新分析", "retry did not clear analysis queue");
+  await click('[data-acq-resolve="sent"]');
+  check(!find("[data-acq-resolve]") && messages[0].status === "sent", "unreconciled receipt");
+  check(mutations.join(",") === "acquisition_draft_message,acquisition_add_note,acquisition_analyze_lead,acquisition_resolve_message", "wrong mutations");
+  await click('[data-acq-action="edit"]');
+  const textSource = find('[name="analysisProvider"]');
+  const visionSource = find('[name="visionProvider"]');
+  check(textSource.options.length === 2 && visionSource.options.length === 2, "wrong profile choices");
+  textSource.value = "text-profile";
+  visionSource.value = "vision-profile";
+  await click('[data-acq-form] button[type="submit"]');
+  check(task.outreach.analysisProvider === "text-profile" && task.outreach.visionProvider === "vision-profile", "model settings not saved: " + find("[data-acq-error]").textContent);
+  await click('[data-acq-action="review-approval"]');
+  const review = find("[data-acq-dialog-content]").textContent;
+  check(review.includes("text-profile") && review.includes("vision-profile"), "models missing from approval");
+  await click('[data-acq-action="close-dialog"]');
+  task.outreach.visionProvider = "removed-profile";
+  await view.refresh();
+  await click('[data-acq-action="edit"]');
+  const missing = find('[name="visionProvider"] option:checked');
+  check(missing?.value === "removed-profile" && missing.textContent.includes("不可用"), "deleted source was silently replaced");
+  check(!unexpected.length, "unexpected commands: " + unexpected);
+  view.dispose();
+  document.body.dataset.result = "pass";
+} catch (e) {
+  const location = e.stack?.match(/:(\d+:\d+)\)?(?:\n|$)/)?.[1];
+  document.body.dataset.result = String(e) + (location ? ` (line ${location})` : "");
+}
+</script>

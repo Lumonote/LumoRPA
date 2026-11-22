@@ -3,7 +3,6 @@ use super::acquisition_analysis::Analyst;
 use chromiumoxide::Page;
 use lumo_core::CancelToken;
 use serde_json::Value;
-use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Stage {
@@ -12,17 +11,19 @@ pub(super) enum Stage {
     Draft,
 }
 
-pub(super) fn load(home: &Path) -> Result<Analyst, String> {
+pub(super) fn validate(analyst: &Analyst) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("当前系统尚未支持获客窗口的桌面视觉模式，请改用网页模式。".into());
     }
-    let analyst = Analyst::load(home)?;
     if analyst.vision_model.is_none() {
-        return Err("请在「模型」页配置视觉模型后使用桌面视觉。".into());
+        return Err(analyst
+            .vision_issue
+            .clone()
+            .unwrap_or_else(|| "请在「模型」页配置视觉模型后使用桌面视觉。".into()));
     }
     #[cfg(target_os = "macos")]
     mac::check_permissions()?;
-    Ok(analyst)
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

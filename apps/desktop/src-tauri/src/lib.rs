@@ -51,6 +51,7 @@ mod graph_layout;
 mod job_commands;
 mod mcp_commands;
 mod mcp_supervisor;
+mod model_setup;
 mod paths;
 mod prompter;
 mod recording;
@@ -612,6 +613,10 @@ async fn run_flow(
 /// one of the desktop Studio differentiators: run a selected node directly
 /// instead of always starting from the top.
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri binds the Studio's named IPC arguments individually"
+)]
 async fn run_step(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -906,35 +911,8 @@ fn save_provider(app: AppHandle, profile: ProviderInput) -> Result<ProviderStatu
     let path = providers_path(&home);
     let mut cfg = ProvidersConfig::load(&path).map_err(|e| e.to_string())?;
     let activate = profile.activate;
-    let to_activate = profile.name.clone();
-    let mut api_key = profile.api_key.filter(|s| !s.is_empty());
-    let mut api_key_env = profile.api_key_env.filter(|s| !s.is_empty());
-    if api_key.is_none() {
-        if let Some(value) = api_key_env.as_deref() {
-            if !looks_like_env_var_name(value) {
-                api_key = api_key_env.take();
-            }
-        }
-    }
-    let p = ProviderProfile {
-        name: profile.name,
-        kind: profile.kind,
-        wire_api: profile.wire_api,
-        base_url: profile.base_url,
-        api_key,
-        api_key_env,
-        default_model: profile.default_model.filter(|s| !s.is_empty()),
-        vision_model: profile.vision_model.filter(|s| !s.is_empty()),
-        ocr_model: profile.ocr_model.filter(|s| !s.is_empty()),
-        models: profile
-            .models
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        headers: profile.headers,
-        reasoning_effort: profile.reasoning_effort.filter(|s| !s.is_empty()),
-        notes: profile.notes.filter(|s| !s.is_empty()),
-    };
+    let p = model_setup::from_editor(&cfg, profile)?;
+    let to_activate = p.name.clone();
     cfg.upsert(p);
     if activate || cfg.active.is_none() {
         let _ = cfg.use_(&to_activate);
@@ -1025,32 +1003,19 @@ async fn test_provider(
     app: AppHandle,
     name: String,
     prompt: Option<String>,
+    profile: Option<ProviderInput>,
+    vision: Option<bool>,
 ) -> Result<ProviderTestResult, String> {
     let home = app_home(&app)?;
     let path = providers_path(&home);
     let cfg = ProvidersConfig::load(&path).map_err(|e| e.to_string())?;
-    let Some(profile) = cfg.get(&name) else {
-        return Ok(ProviderTestResult {
-            ok: false,
-            provider: None,
-            model: None,
-            content: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            error: Some(format!("profile `{name}` not found")),
-        });
+    let profile = match profile {
+        Some(input) if input.name == name => model_setup::from_editor(&cfg, input)?,
+        Some(_) => return Err("待测试的模型源名称不一致。".into()),
+        None => cfg.get(&name).cloned().ok_or("未找到待测试的模型源。")?,
     };
-    let Some(model) = profile.default_model.clone() else {
-        return Ok(ProviderTestResult {
-            ok: false,
-            provider: Some(name.clone()),
-            model: None,
-            content: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            error: Some(format!("profile `{name}` has no default_model")),
-        });
-    };
+    let vision = vision.unwrap_or(false);
+    let model = model_setup::configured_model(&profile, vision)?.to_owned();
     if !llm_network_enabled() {
         return Ok(ProviderTestResult {
             ok: false,
@@ -1067,29 +1032,51 @@ async fn test_provider(
     }
     let one_off = ProvidersConfig {
         active: Some(name.clone()),
-        profiles: vec![profile.clone()],
+        profiles: vec![profile],
     };
     let router = AiRouter::from_config(&one_off);
+    let (message, expected) = if vision {
+        let (message, color) = model_setup::vision_probe();
+        (message, Some(color))
+    } else {
+        (
+            ChatMessage::text(
+                Role::User,
+                prompt.unwrap_or_else(|| "Reply with one word: pong".into()),
+            ),
+            None,
+        )
+    };
     let req = ChatRequest {
         model: format!("{name}/{model}"),
-        messages: vec![ChatMessage::text(
-            Role::User,
-            prompt.unwrap_or_else(|| "Reply with one word: pong".into()),
-        )],
+        messages: vec![message],
         temperature: Some(0.0),
         max_tokens: Some(64),
         system: None,
     };
-    match router.chat(req).await {
-        Ok(r) => Ok(ProviderTestResult {
-            ok: true,
-            provider: Some(r.provider),
-            model: Some(r.model),
-            content: Some(r.content),
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            error: None,
-        }),
+    let response = tokio::time::timeout(std::time::Duration::from_secs(45), router.chat(req))
+        .await
+        .map_err(|_| "模型连接测试超过 45 秒，请检查服务地址和网络。")?;
+    match response {
+        Ok(r) => {
+            let ok = model_setup::probe_reply_valid(&r.content, expected);
+            Ok(ProviderTestResult {
+                ok,
+                provider: Some(r.provider),
+                model: Some(r.model),
+                content: Some(r.content),
+                input_tokens: r.input_tokens,
+                output_tokens: r.output_tokens,
+                error: (!ok).then(|| {
+                    if vision {
+                        "已收到模型响应，但未正确识别测试图。"
+                    } else {
+                        "模型返回了空文本。"
+                    }
+                    .to_owned()
+                }),
+            })
+        }
         Err(e) => Ok(ProviderTestResult {
             ok: false,
             provider: Some(name),

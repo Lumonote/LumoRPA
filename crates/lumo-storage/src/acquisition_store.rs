@@ -110,6 +110,18 @@ impl Repo {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Claim the version that passed the desktop worker's preflight checks.
+    pub fn acquisition_start_campaign(
+        &self,
+        id: &str,
+        reviewed_version: i64,
+    ) -> Result<bool, StorageError> {
+        Ok(self.inner.lock().execute(
+            "UPDATE acquisition_campaigns SET status='running',last_error=NULL,updated_at=MAX(updated_at+1,?) WHERE id=? AND updated_at=? AND status IN ('draft','completed','failed','cancelled')",
+            params![Utc::now().timestamp_millis(),id,reviewed_version],
+        )? == 1)
+    }
+
     pub fn acquisition_transition_campaign(
         &self,
         id: &str,
@@ -549,6 +561,16 @@ impl Repo {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn acquisition_campaign_requirements(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Vec<AcquisitionRequirement>, StorageError> {
+        let conn = self.inner.lock();
+        let mut stmt=conn.prepare(&format!("{REQUIREMENT_SELECT} WHERE lead_id IN (SELECT id FROM acquisition_leads WHERE campaign_id=?) ORDER BY created_at DESC,id"))?;
+        let rows = stmt.query_map([campaign_id], requirement_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn acquisition_add_activity(
         &self,
         activity: &AcquisitionActivity,
@@ -619,7 +641,12 @@ fn get_lead(conn: &Connection, id: &str) -> Result<Option<AcquisitionLead>, Stor
 }
 
 pub fn acquisition_scope(c: &AcquisitionCampaign) -> Value {
-    serde_json::json!({"product":c.product,"targetAudience":c.target_audience,"platforms":c.platforms,"keywords":c.keywords})
+    let mut scope = serde_json::json!({"product":c.product,"targetAudience":c.target_audience,"platforms":c.platforms,"keywords":c.keywords});
+    // Keep the stored scope of campaigns created before model selection was added.
+    if let Some(name) = &c.outreach.analysis_provider {
+        scope["analysisProvider"] = Value::String(name.clone());
+    }
+    scope
 }
 fn get_message(conn: &Connection, id: &str) -> Result<Option<AcquisitionMessage>, StorageError> {
     conn.query_row(&format!("{MESSAGE_SELECT} WHERE id=?"), [id], message_row)
@@ -764,6 +791,15 @@ fn validate_campaign(c: &AcquisitionCampaign) -> Result<(), StorageError> {
     validate_policy(&c.outreach)
 }
 fn validate_policy(p: &AcquisitionOutreachPolicy) -> Result<(), StorageError> {
+    for name in [&p.analysis_provider, &p.vision_provider]
+        .into_iter()
+        .flatten()
+    {
+        text(name, "model source name", 200, true)?;
+        if name.trim() != name || name.contains('/') {
+            return invalid("invalid model source name");
+        }
+    }
     if !matches!(p.mode.as_str(), "draft" | "approved_auto") {
         return invalid("invalid outreach mode");
     }

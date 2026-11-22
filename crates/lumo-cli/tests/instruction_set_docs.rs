@@ -1,4 +1,4 @@
-use lumo_ai::{AiRouter, ChatAction};
+use lumo_ai::{AiRouter, ChatAction, ScreenAgentAction};
 use lumo_core::ActionRegistry;
 use lumo_skills::{register_flow_call_action, register_skill_actions, SkillRegistry};
 use std::collections::BTreeSet;
@@ -8,7 +8,9 @@ use std::sync::Arc;
 fn full_cli_registry() -> ActionRegistry {
     let mut registry = ActionRegistry::new();
     lumo_actions::register_all(&mut registry);
-    registry.register(ChatAction::new(Arc::new(AiRouter::builder().build())));
+    let router = Arc::new(AiRouter::builder().build());
+    registry.register(ScreenAgentAction::new(router.clone()));
+    registry.register(ChatAction::new(router));
     register_skill_actions(&mut registry, Arc::new(SkillRegistry::new()));
     register_flow_call_action(&mut registry, PathBuf::from("."));
     registry

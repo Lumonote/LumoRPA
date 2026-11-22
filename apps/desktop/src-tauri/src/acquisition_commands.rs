@@ -1,6 +1,7 @@
 use super::{
     acquisition_analysis::{self as analysis, Analyst},
-    acquisition_computer as computer, app_home, AppHandle,
+    acquisition_computer as computer, acquisition_desktop as desktop, app_home, providers_path,
+    AppHandle, ProvidersConfig,
 };
 use lumo_core::CancelToken;
 use lumo_storage::{
@@ -11,8 +12,8 @@ use lumo_storage::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::PathBuf,
     sync::{LazyLock, Mutex},
     time::Duration,
 };
@@ -103,22 +104,41 @@ pub(super) fn acquisition_snapshot(app: AppHandle, campaign_id: Option<String>) 
         .transpose()
         .map_err(err)?
         .unwrap_or_default();
-    let ids: HashSet<_> = leads.iter().map(|l| l.id.as_str()).collect();
-    let needs: Vec<_> = r
-        .acquisition_list_requirements(None)
+    let needs = selected
+        .map(|cid| r.acquisition_campaign_requirements(cid))
+        .transpose()
         .map_err(err)?
+        .unwrap_or_default();
+    let config = ProvidersConfig::load(providers_path(&app_home(&app)?)).map_err(err);
+    let model_sources: Vec<_> = config
+        .as_ref()
         .into_iter()
-        .filter(|n| ids.contains(n.lead_id.as_str()))
+        .flat_map(|cfg| &cfg.profiles)
+        .filter(|p| matches!(p.kind.as_str(), "openai" | "anthropic"))
+        .map(|p| json!({"name":p.name,"textModel":p.default_model,"visionModel":p.vision_model}))
         .collect();
-    let ready = Analyst::load(&app_home(&app)?);
+    let current = campaigns.iter().find(|c| Some(c.id.as_str()) == selected);
+    let ready = config
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|cfg| Analyst::for_session(cfg, current));
+    let needs_desktop = current.is_some_and(|c| c.outreach.desktop_vision);
+    let desktop_supported = cfg!(target_os = "macos");
+    let configured = ready
+        .as_ref()
+        .is_ok_and(|a| !needs_desktop || (desktop_supported && a.vision_model.is_some()));
     let config_message = match &ready {
-        Ok(a) if a.vision_model.is_some() => {
-            format!(
-                "视觉模型：{}。桌面视觉模式会将获客窗口截图发送至该模型。",
-                a.vision_model.as_deref().unwrap_or_default()
-            )
+        Ok(_) if needs_desktop && !desktop_supported => {
+            "此任务选择了 macOS 桌面视觉。请在当前系统改用网页自动化。".to_owned()
         }
-        Ok(_) => "已配置文本分析，匹配客户所用的原文将发送至所选模型。".to_owned(),
+        Ok(a) => match &a.vision_model {
+            Some(vision) => format!("文本模型：{}。截图将发送至视觉模型：{vision}。", a.model),
+            None => format!(
+                "文本模型：{}。{}",
+                a.model,
+                a.vision_issue.as_deref().unwrap_or_default()
+            ),
+        },
         Err(e) => e.clone(),
     };
     let active = ACTIVE
@@ -127,7 +147,7 @@ pub(super) fn acquisition_snapshot(app: AppHandle, campaign_id: Option<String>) 
         .as_ref()
         .map(|(key, _)| key.clone());
     Ok(
-        json!({"campaigns":campaigns,"leads":leads,"pendingAnalysisIds":pending,"requirements":needs,"activity":r.acquisition_list_activity(selected,150).map_err(err)?,"runningCampaignIds":active.into_iter().collect::<Vec<_>>(),"computer":{"desktopSupported":cfg!(target_os="macos"),"ready":ready.is_ok(),"message":config_message}}),
+        json!({"campaigns":campaigns,"leads":leads,"pendingAnalysisIds":pending,"requirements":needs,"activity":r.acquisition_list_activity(selected,150).map_err(err)?,"runningCampaignIds":active.into_iter().collect::<Vec<_>>(),"modelSources":model_sources,"computer":{"desktopSupported":desktop_supported,"ready":configured,"message":config_message}}),
     )
 }
 #[tauri::command]
@@ -235,9 +255,10 @@ pub(super) async fn acquisition_analyze_lead(app: AppHandle, lead_id: String) ->
     if l.status == "ignored" {
         return Err("已忽略的客户不参与分析。".into());
     }
-    r.acquisition_restart_analysis(&lead_id).map_err(err)?;
-    analysis::analyze(&app_home(&app)?, &r, l, &c).await?;
+    let analyst = Analyst::load(&app_home(&app)?, &c)?;
+    let analyzed = analysis::analyze_manually(&analyst, &r, l, &c).await;
     notify(&app, &c.id);
+    analyzed?;
     detail(&r, &lead_id)
 }
 #[tauri::command]
@@ -245,15 +266,13 @@ pub(super) async fn acquisition_browser_open(app: AppHandle, platform: String) -
     let _lease = Lease::claim("login")?;
     computer::login(&app_home(&app)?, &platform).await
 }
-async fn deliver_reserved(
-    home: &Path,
+fn record_delivery(
     r: &Repo,
     l: &Lead,
     m: &Message,
-    cancel: &CancelToken,
-    desktop_vision: bool,
+    outcome: Res<computer::Delivery>,
 ) -> Res<Message> {
-    let (state, note) = match computer::send(home, l, &m.body, cancel, desktop_vision).await {
+    let (state, note) = match outcome {
         Ok(computer::Delivery::Sent) => ("sent", None),
         Ok(computer::Delivery::Uncertain(s)) => ("uncertain", Some(s)),
         Err(e) => ("failed", Some(e)),
@@ -287,12 +306,17 @@ pub(super) async fn acquisition_send_message(app: AppHandle, message_id: String)
     let lease = Lease::claim(&l.campaign_id)?;
     let home = app_home(&app)?;
     computer::check(&lease.cancel)?;
-    let desktop_vision = campaign(&r, &l.campaign_id)?.outreach.desktop_vision;
-    if desktop_vision {
-        super::acquisition_desktop::load(&home)?;
-    }
+    let c = campaign(&r, &l.campaign_id)?;
+    let analyst = if c.outreach.desktop_vision {
+        let analyst = Analyst::load(&home, &c)?;
+        desktop::validate(&analyst)?;
+        Some(analyst)
+    } else {
+        None
+    };
     let m = r.acquisition_reserve_send(&m.id, false).map_err(err)?;
-    let result = deliver_reserved(&home, &r, &l, &m, &lease.cancel, desktop_vision).await;
+    let outcome = computer::send(&home, &l, &m.body, &lease.cancel, analyst.as_ref()).await;
+    let result = record_delivery(&r, &l, &m, outcome);
     drop(lease);
     notify(&app, &l.campaign_id);
     result
@@ -341,9 +365,89 @@ pub(super) fn acquisition_cancel(campaign_id: String) -> Res<()> {
     cancel.cancel();
     Ok(())
 }
-struct Worker {
-    app: AppHandle,
+#[async_trait::async_trait]
+trait PlatformIo: Send + Sync {
+    fn analyst(&self) -> Res<Analyst>;
+    async fn search(
+        &self,
+        c: &Campaign,
+        platform: &str,
+        keyword: &str,
+        model: &Analyst,
+        cancel: &CancelToken,
+    ) -> Res<Vec<computer::Candidate>>;
+    async fn send(
+        &self,
+        l: &Lead,
+        body: &str,
+        cancel: &CancelToken,
+        vision: bool,
+    ) -> Res<computer::Delivery>;
+    async fn sync(
+        &self,
+        l: &Lead,
+        cancel: &CancelToken,
+        vision: bool,
+    ) -> Res<Vec<computer::Incoming>>;
+}
+struct PlatformSession {
     home: PathBuf,
+    analyst: Res<Analyst>,
+}
+impl PlatformSession {
+    fn for_desktop(&self, requested: bool) -> Res<Option<&Analyst>> {
+        if requested {
+            self.analyst.as_ref().map(Some).map_err(Clone::clone)
+        } else {
+            Ok(None)
+        }
+    }
+}
+#[async_trait::async_trait]
+impl PlatformIo for PlatformSession {
+    fn analyst(&self) -> Res<Analyst> {
+        self.analyst.clone()
+    }
+    async fn search(
+        &self,
+        c: &Campaign,
+        platform: &str,
+        keyword: &str,
+        model: &Analyst,
+        cancel: &CancelToken,
+    ) -> Res<Vec<computer::Candidate>> {
+        computer::search(
+            &self.home,
+            platform,
+            keyword,
+            &c.target_audience,
+            model,
+            c.outreach.desktop_vision,
+            cancel,
+        )
+        .await
+    }
+    async fn send(
+        &self,
+        l: &Lead,
+        body: &str,
+        cancel: &CancelToken,
+        vision: bool,
+    ) -> Res<computer::Delivery> {
+        computer::send(&self.home, l, body, cancel, self.for_desktop(vision)?).await
+    }
+    async fn sync(
+        &self,
+        l: &Lead,
+        cancel: &CancelToken,
+        vision: bool,
+    ) -> Res<Vec<computer::Incoming>> {
+        computer::sync(&self.home, l, cancel, self.for_desktop(vision)?).await
+    }
+}
+struct Worker<I: PlatformIo> {
+    io: I,
+    changed: Box<dyn Fn(&str) + Send + Sync>,
     r: Repo,
     c: Campaign,
     cancel: CancelToken,
@@ -393,10 +497,10 @@ fn alternate_platforms<T>(
         None
     })
 }
-impl Worker {
+impl<I: PlatformIo> Worker<I> {
     fn log(&self, kind: &str, detail: &str) -> Res<()> {
         activity(&self.r, &self.c.id, None, kind, detail)?;
-        notify(&self.app, &self.c.id);
+        (self.changed)(&self.c.id);
         Ok(())
     }
     fn pause_platform(&self, run: &mut PlatformRun, platform: &str, issue: String) -> Res<()> {
@@ -409,7 +513,7 @@ impl Worker {
         Ok(())
     }
     async fn discover(&self, run: &mut PlatformRun) -> Res<()> {
-        let model = Analyst::load(&self.home)?;
+        let model = self.io.analyst()?;
         let old = self
             .r
             .acquisition_list_leads(Some(&self.c.id))
@@ -434,16 +538,10 @@ impl Worker {
                     "search",
                     &format!("搜索 {} · {keyword}", platform_name(platform)),
                 )?;
-                let rows = match computer::search(
-                    &self.home,
-                    platform,
-                    keyword,
-                    &self.c.target_audience,
-                    &model,
-                    self.c.outreach.desktop_vision,
-                    &self.cancel,
-                )
-                .await
+                let rows = match self
+                    .io
+                    .search(&self.c, platform, keyword, &model, &self.cancel)
+                    .await
                 {
                     Ok(rows) => rows,
                     Err(issue) => {
@@ -492,7 +590,7 @@ impl Worker {
                     .acquisition_store_assessed_lead(&l, &result.needs(&l.id))
                     .map_err(err)?;
                 seen.insert(key, l.id);
-                notify(&self.app, &self.c.id);
+                (self.changed)(&self.c.id);
             }
         }
         Ok(())
@@ -558,15 +656,14 @@ impl Worker {
                     }
                 };
                 attempts += 1;
-                let result = deliver_reserved(
-                    &self.home,
+                let result = record_delivery(
                     &self.r,
                     &l,
                     &m,
-                    &self.cancel,
-                    self.c.outreach.desktop_vision,
-                )
-                .await?;
+                    self.io
+                        .send(&l, &m.body, &self.cancel, self.c.outreach.desktop_vision)
+                        .await,
+                )?;
                 if result.status != "sent" {
                     self.pause_platform(
                         run,
@@ -577,12 +674,12 @@ impl Worker {
                 }
             } else {
                 let m = self.r.acquisition_add_message(&draft).map_err(err)?;
-                if !matches!(m.status.as_str(), "draft" | "approved") {
+                if m.id != draft.id {
                     continue;
                 }
             }
             count += 1;
-            notify(&self.app, &self.c.id);
+            (self.changed)(&self.c.id);
             if count >= self.c.outreach.max_messages_per_run {
                 break;
             }
@@ -605,16 +702,17 @@ impl Worker {
             {
                 continue;
             }
-            let incoming =
-                match computer::sync(&self.home, &l, &self.cancel, self.c.outreach.desktop_vision)
-                    .await
-                {
-                    Ok(rows) => rows,
-                    Err(issue) => {
-                        self.pause_platform(run, &l.platform, issue)?;
-                        continue;
-                    }
-                };
+            let incoming = match self
+                .io
+                .sync(&l, &self.cancel, self.c.outreach.desktop_vision)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(issue) => {
+                    self.pause_platform(run, &l.platform, issue)?;
+                    continue;
+                }
+            };
             for incoming in incoming {
                 let mid = format!(
                     "im-{:x}",
@@ -622,7 +720,7 @@ impl Worker {
                 );
                 store_message(&self.r, mid, &l.id, "inbound", &incoming.text)?;
             }
-            notify(&self.app, &self.c.id);
+            (self.changed)(&self.c.id);
         }
         Ok(())
     }
@@ -631,17 +729,17 @@ impl Worker {
         if pending.is_empty() {
             return Ok(());
         }
-        Analyst::load(&self.home)?;
+        let model = self.io.analyst()?;
         let mut failures = 0;
         for lid in pending {
             computer::check(&self.cancel)?;
             let l = lead(&self.r, &lid)?;
-            let result = tokio::select! { _=self.cancel.cancelled()=>return Err("任务已停止".into()), r=analysis::analyze(&self.home,&self.r,l,&self.c)=>r };
+            let result = tokio::select! { _=self.cancel.cancelled()=>return Err("任务已停止".into()), r=analysis::analyze_with(&model,&self.r,l,&self.c)=>r };
             if let Err(e) = result {
                 failures += 1;
                 activity(&self.r, &self.c.id, Some(&lid), "analysis_error", &e)?;
             }
-            notify(&self.app, &self.c.id);
+            (self.changed)(&self.c.id);
         }
         if failures > 0 {
             return Err(format!("有 {failures} 位客户的分析未完成，详见执行记录。"));
@@ -679,13 +777,14 @@ pub(super) fn acquisition_start(app: AppHandle, campaign_id: String, mode: Strin
     let r = db(&app)?;
     let c = campaign(&r, &campaign_id)?;
     let home = app_home(&app)?;
-    if c.outreach.desktop_vision
+    let analyst = Analyst::load(&home, &c);
+    let uses_desktop = c.outreach.desktop_vision
         && (matches!(mode.as_str(), "acquire" | "discover" | "sync")
-            || (mode == "outreach" && c.outreach.mode == "approved_auto"))
-    {
-        super::acquisition_desktop::load(&home)?;
+            || (mode == "outreach" && c.outreach.mode == "approved_auto"));
+    if uses_desktop {
+        desktop::validate(analyst.as_ref().map_err(Clone::clone)?)?;
     } else if matches!(mode.as_str(), "acquire" | "discover") {
-        Analyst::load(&home)?;
+        analyst.as_ref().map_err(Clone::clone)?;
     }
     if matches!(mode.as_str(), "acquire" | "outreach")
         && c.outreach.mode == "approved_auto"
@@ -695,14 +794,14 @@ pub(super) fn acquisition_start(app: AppHandle, campaign_id: String, mode: Strin
     }
     let lease = Lease::claim(&campaign_id)?;
     if !r
-        .acquisition_transition_campaign(&c.id, &c.status, "running", None)
+        .acquisition_start_campaign(&c.id, c.updated_at)
         .map_err(err)?
     {
-        return Err("任务状态已变化".into());
+        return Err("任务配置或状态已变化，请刷新后再启动。".into());
     }
     let w = Worker {
-        app,
-        home,
+        io: PlatformSession { home, analyst },
+        changed: Box::new(move |cid| notify(&app, cid)),
         r,
         c,
         cancel: lease.cancel.clone(),
@@ -710,6 +809,13 @@ pub(super) fn acquisition_start(app: AppHandle, campaign_id: String, mode: Strin
     tauri::async_runtime::spawn(async move {
         let result = async {
             w.log("start", &format!("启动 {mode}"))?;
+            if let Ok(analyst) = &w.io.analyst {
+                let vision = analyst.vision_model.as_deref().unwrap_or("未配置");
+                w.log(
+                    "models",
+                    &format!("文本模型 {} · 视觉模型 {vision}", analyst.model),
+                )?;
+            }
             w.run(&mode).await
         }
         .await;
@@ -736,10 +842,13 @@ pub(super) fn acquisition_start(app: AppHandle, campaign_id: String, mode: Strin
             issue.as_deref().unwrap_or("任务完成"),
         );
         drop(lease);
-        notify(&w.app, &w.c.id);
+        (w.changed)(&w.c.id);
     });
     Ok(json!({"campaignId":campaign_id}))
 }
+
+#[cfg(test)]
+mod workflow_tests;
 
 #[cfg(test)]
 mod tests {

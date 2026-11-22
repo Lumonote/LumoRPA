@@ -118,20 +118,20 @@ pub struct ProviderProfile {
 
 impl ProviderProfile {
     pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(k) = &self.api_key {
-            return Some(k.clone());
-        }
-        if let Some(env) = &self.api_key_env {
-            return std::env::var(env).ok();
-        }
-        // Fallback to well-known env var by kind.
-        match self.kind.as_str() {
-            "openai" => std::env::var("OPENAI_API_KEY").ok(),
-            "anthropic" => std::env::var("ANTHROPIC_AUTH_TOKEN")
-                .ok()
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
-            _ => None,
-        }
+        let key = if let Some(k) = &self.api_key {
+            Some(k.clone())
+        } else if let Some(env) = &self.api_key_env {
+            std::env::var(env).ok()
+        } else {
+            match self.kind.as_str() {
+                "openai" => std::env::var("OPENAI_API_KEY").ok(),
+                "anthropic" => std::env::var("ANTHROPIC_AUTH_TOKEN")
+                    .ok()
+                    .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+                _ => None,
+            }
+        };
+        key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty())
     }
 
     pub fn redacted(&self) -> Self {

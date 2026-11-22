@@ -281,10 +281,9 @@ pub(super) async fn sync(
     home: &Path,
     lead: &lumo_storage::AcquisitionLead,
     cancel: &CancelToken,
-    desktop_vision: bool,
+    analyst: Option<&super::acquisition_analysis::Analyst>,
 ) -> Result<Vec<Incoming>, String> {
-    let model = desktop_vision.then(|| desktop::load(home)).transpose()?;
-    let (page, args) = conversation(home, lead, cancel, model.as_ref()).await?;
+    let (page, args) = conversation(home, lead, cancel, analyst).await?;
     op(&page, "sync", &args).await
 }
 pub(super) enum Delivery {
@@ -296,15 +295,14 @@ pub(super) async fn send(
     lead: &lumo_storage::AcquisitionLead,
     body: &str,
     cancel: &CancelToken,
-    desktop_vision: bool,
+    analyst: Option<&super::acquisition_analysis::Analyst>,
 ) -> Result<Delivery, String> {
-    let model = desktop_vision.then(|| desktop::load(home)).transpose()?;
-    let (page, mut args) = conversation(home, lead, cancel, model.as_ref()).await?;
+    let (page, mut args) = conversation(home, lead, cancel, analyst).await?;
     args["body"] = json!(body);
     let before: Vec<String> = op(&page, "prepare", &args).await?;
     args["before"] = json!(before);
     check(cancel)?;
-    if let Some(model) = model.as_ref() {
+    if let Some(model) = analyst {
         desktop::perform(model, &page, &args, Stage::Draft, body, cancel).await?;
     } else if !op::<bool>(&page, "fill", &args).await? {
         return Err("写入草稿失败，请检查会话输入框。".into());
@@ -460,5 +458,47 @@ mod tests {
         browser.close().await.unwrap();
         responder.abort();
         pump.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chromium binary"]
+    async fn acquisition_chromium_workbench_with_existing_customers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig::builder()
+            .user_data_dir(dir.path())
+            .arg("--host-resolver-rules=MAP * ~NOTFOUND")
+            .build()
+            .unwrap();
+        let (mut browser, mut handler) = Browser::launch(cfg).await.unwrap();
+        let pump = tokio::spawn(async move { while handler.next().await.is_some() {} });
+        let html = include_str!("../../../../scripts/fixtures/acquisition-workbench.html").replace(
+            "/* PRODUCTION_ACQUISITION_MODULE */",
+            include_str!("../../frontend/src/js/acquisition.js"),
+        );
+        let page = browser.new_page("about:blank").await.unwrap();
+        page.goto(format!(
+            "data:text/html;charset=utf-8;base64,{}",
+            STANDARD.encode(html)
+        ))
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let value: String = page
+                    .evaluate_expression("document.body?.dataset.result || ''")
+                    .await
+                    .unwrap()
+                    .into_value()
+                    .unwrap();
+                if !value.is_empty() {
+                    break value;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        browser.close().await.unwrap();
+        pump.abort();
+        assert_eq!(result.expect("workbench did not finish"), "pass");
     }
 }

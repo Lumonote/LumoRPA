@@ -1,7 +1,34 @@
 # Desktop acceptance tests
 
-Two opt-in suites cross real process boundaries. The `desktop acceptance`
-workflow runs both on pushes and pull requests to `main` and `dev`.
+The `desktop acceptance` workflow exercises real Chrome and the Tauri webview
+on pushes and pull requests to `main` and `dev`.
+
+## Customer acquisition
+
+From the repository root, run:
+
+```sh
+cargo test -p lumorpa-desktop --locked --lib acquisition_commands::workflow_tests
+cargo test -p lumo-storage --locked --test acquisition
+cargo test -p lumorpa-desktop --locked --lib acquisition_chromium_ -- --ignored
+```
+
+The worker tests use the production approval, quota, evidence validation and
+SQLite code. An in-process model and platform fixture supply posts and replies
+for Xiaohongshu, Douyin and Weibo. The cases verify separate identities,
+draft allocation on repeated runs, single first contact, ambiguous receipts,
+partial platform failure, repeated reply sync and campaign-specific needs after
+reopening the database. A model failure leaves the raw reply and the last
+committed batch intact so a manual retry can resume after reopening SQLite.
+
+The last command requires Chrome/Chromium. Requests are intercepted locally;
+the test checks each platform's page adapter, recipient identity, scoped
+gestures and outbound receipt. A second Chrome case loads the production
+workbench with fixture IPC responses to check lead filtering, demand-to-profile
+navigation, draft review, saving a reply while analysis is offline, clearing the
+pending queue after a retry and manual receipt reconciliation. No credentials,
+real recipients or model keys are used. Changes to live platform pages and OS-level control permissions
+require separate validation.
 
 ## Chrome actions
 
@@ -49,6 +76,9 @@ dialog are driven through WebDriver. It checks:
   selected node's result through production IPC.
 - Create a future cron job, check timezone/inputs/retry settings, edit it, reject
   a stale edit and cancel the fixture before it can run.
+- Create a three-platform acquisition campaign, review its scope and template,
+  approve and run outreach against an empty database, inspect the execution
+  log, then edit its audience and verify authorization is revoked.
 - Approve an L3 local plan with the confirmation card and native second prompt.
 - Follow new Agent runs, pin historical results and return to the latest run.
 - Submit a saved flow's exact alias through the companion's text input, observe

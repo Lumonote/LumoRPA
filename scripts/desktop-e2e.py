@@ -375,8 +375,60 @@ def companion_acceptance(driver, path, source):
     driver.switch_to('#newFlowBtn')
 
 
+def acquisition_acceptance(driver):
+    driver.click('.tabs [data-view="acquisition"]')
+    driver.click('[data-acq-action="new"]')
+    form = '[data-acq-form]'
+    for field, value in [
+        ('name', '获客验收'), ('product', '门店预约'),
+        ('targetAudience', '寻找预约系统的店主'), ('keywords', '门店预约'),
+        ('maxLeads', '7'),
+    ]:
+        driver.fill(f'{form} [name="{field}"]', value)
+    driver.click(f'{form} [type="submit"]')
+    wait_for('saved acquisition campaign', lambda: driver.text('[data-acq-summary] h2') == '获客验收')
+    current = driver.invoke('acquisition_snapshot', campaignId=None)['campaigns'][0]
+    assert current['name'] == '获客验收' and current['maxLeads'] == 7, current
+    assert set(current['platforms']) == {'xiaohongshu', 'douyin', 'weibo'}, current
+    auto = '[data-acq-run="outreach"]'
+
+    def disabled():
+        return driver.evaluate("document.querySelector(arguments[0]).disabled", auto)
+
+    assert disabled() and current['outreach']['approvedAt'] is None
+    driver.click('[data-acq-action="review-approval"]')
+    review = driver.text('[data-acq-dialog-content]')
+    for text in ['小红书', '抖音', '微博', '最多 7 位', '寻找预约系统的店主',
+                 current['outreach']['messageTemplate']]:
+        assert text in review, review
+    driver.click('[data-acq-action="confirm-approval"]')
+    wait_for('outreach enabled after approval', lambda: not disabled())
+    # Empty isolated campaign: exercise the real worker and audit trail without
+    # starting a platform browser, calling a model, or contacting an account.
+    driver.click(auto)
+    def snapshot():
+        return driver.invoke('acquisition_snapshot', campaignId=current['id'])
+    wait_for('worker completion', lambda: snapshot()['campaigns'][0]['status'] == 'completed')
+    wait_for('completed campaign displayed', lambda: '已完成' in driver.text('[data-acq-summary]'))
+    driver.click('[data-acq-tab="activity"]')
+    wait_for('outreach audit displayed', lambda: '本次发送 0 条' in driver.text('[data-acq-content]'))
+    assert {'approval', 'start', 'outreach', 'completed'} <= {a['kind'] for a in snapshot()['activity']}
+
+    driver.click('[data-acq-action="edit"]')
+    driver.fill(f'{form} [name="targetAudience"]', '需要到店提醒的店主')
+    driver.click(f'{form} [type="submit"]')
+    wait_for('scope edit revokes approval', disabled)
+    updated = snapshot()['campaigns'][0]
+    assert updated['targetAudience'] == '需要到店提醒的店主' and updated['outreach']['approvedAt'] is None
+    driver.click('[data-acq-tab="demands"]')
+    assert '需求池为空' in driver.text('[data-acq-content]')
+    driver.click('.tabs [data-view="design"]')
+    print('PASS: three-platform campaign, scope approval, empty outreach, audit and revocation')
+
+
 def acceptance(driver):
     wait_for("Studio startup", lambda: driver.text("#statusText") == "就绪", timeout=60)
+    acquisition_acceptance(driver)
     previous_path = driver.state("flowPath")
     driver.click("#newFlowBtn")
     wait_for("a new user flow", lambda: driver.state("flowPath")

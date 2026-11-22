@@ -290,14 +290,14 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 <!-- ACTIONS_START -->
 | Family | Actions |
 | --- | --- |
-| AI | `ai.chat` |
+| AI | `ai.chat`, `ai.screen_agent` |
 | Archive | `archive.zip`, `archive.unzip` |
 | Browser | `browser.launch`, `browser.close`, `browser.open`, `browser.back`, `browser.forward`, `browser.reload`, `browser.click`, `browser.type`, `browser.extract`, `browser.wait`, `browser.info`, `browser.eval`, `browser.screenshot`, `browser.scroll`, `browser.hover`, `browser.select`, `browser.cookies`, `browser.set_cookie`, `browser.tabs`, `browser.tab`, `browser.upload`, `browser.download_wait`, `browser.dialog`, `browser.frame`, `browser.extract_table`, `browser.drag_and_drop`, `browser.print_pdf`, `browser.wait_response` |
 | Clipboard | `clipboard.get`, `clipboard.set`, `clipboard.get_text`, `clipboard.set_text`, `clipboard.clear`, `clipboard.set_file` |
 | Control | `control.log`, `control.set_var`, `control.sleep`, `control.if`, `control.for`, `control.for_each`, `control.while`, `control.break`, `control.continue`, `control.try`, `control.parallel`, `control.fail` |
 | CSV | `csv.parse`, `csv.stringify`, `csv.read`, `csv.write` |
 | Data | `data.json_parse`, `data.json_format`, `data.filter`, `data.group_by`, `data.join`, `data.dedup`, `data.sort_multi` |
-| Desktop *(需 `desktop` feature)* | `desktop.click`, `desktop.type`, `desktop.key`, `desktop.move`, `desktop.scroll`, `desktop.drag`, `desktop.screenshot`, `desktop.click_text` |
+| Desktop *(需 `desktop` feature)* | `desktop.click`, `desktop.type`, `desktop.key`, `desktop.move`, `desktop.scroll`, `desktop.drag`, `desktop.screenshot`, `desktop.observe`, `desktop.click_text` |
 | Dialog | `dialog.message`, `dialog.confirm`, `dialog.input`, `dialog.select`, `dialog.select_file`, `dialog.select_dir`, `dialog.form`, `dialog.progress`, `dialog.custom` |
 | Dictionary | `dictionary.create`, `dictionary.get_value`, `dictionary.get_keys`, `dictionary.get_values`, `dictionary.set`, `dictionary.pop` |
 | Directory | `dir.if_exist`, `dir.makedir`, `dir.remove`, `dir.find_files`, `dir.find_subdirs`, `dir.get_special_dir`, `dir.selected_dirs_or_files`, `dir.rename`, `dir.move`, `dir.copy`, `dir.empty`, `dir.open` |
@@ -309,7 +309,7 @@ Use `cargo run -p lumo-cli -- actions` to print the registry and
 | Excel | `excel.read_rows`, `excel.write_row`, `excel.sheet_names`, `excel.read_cell`, `excel.write_cell`, `excel.read_range`, `excel.write_range`, `excel.find_replace`, `excel.set_formula`, `excel.set_style`, `excel.merge_cells`, `excel.set_column_width`, `excel.set_row_height`, `excel.freeze_panes`, `excel.add_chart`, `excel.set_conditional_format`, `excel.autofit_columns`, `excel.set_comment`, `excel.set_data_validation`, `excel.lookup`, `excel.add_sheet`, `excel.delete_sheet`, `excel.rename_sheet`, `excel.insert_rows`, `excel.delete_rows`, `excel.insert_columns`, `excel.delete_columns` |
 | File | `file.read`, `file.write`, `file.exists`, `file.list`, `file.mkdir`, `file.copy`, `file.move`, `file.rename`, `file.delete`, `file.metadata`, `file.append`, `file.wait` |
 | Flow | `flow.call` |
-| FTP/S3 | `ftp.upload`, `ftp.download`, `s3.put`, `s3.get` (verb aliases: `ftp.put`, `ftp.get`, `s3.upload`, `s3.download`) |
+| FTP/SFTP/S3 | `ftp.upload`, `ftp.download`, `sftp.upload`, `sftp.download`, `s3.put`, `s3.get` (verb aliases: `ftp.put`, `ftp.get`, `s3.upload`, `s3.download`) |
 | Hash/Utility | `hash.sha256`, `hash.sha512`, `hash.sha1`, `hash.md5`, `util.base64_encode`, `util.base64_decode`, `util.url_encode`, `util.url_decode`, `util.uuid` |
 | HTTP | `http.request`, `http.download`, `http.upload`, `http.oauth2_token`, `http.paginate` |
 | Human | `human.input`, `human.confirm`, `human.approve` |

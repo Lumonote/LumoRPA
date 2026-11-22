@@ -76,6 +76,22 @@ fn approval_and_recovery_prevent_duplicate_first_contact() {
     assert!(r.acquisition_reserve_send("m", true).is_err());
 }
 #[test]
+fn stale_worker_cannot_claim_an_edited_campaign() {
+    let r = Repo::open_in_memory().unwrap();
+    let mut edited = campaign(&r);
+    let stale = edited.updated_at;
+    edited.target_audience = "新范围".into();
+    let saved = r.acquisition_save_campaign(&edited).unwrap();
+    assert!(!r.acquisition_start_campaign(&saved.id, stale).unwrap());
+    assert!(r
+        .acquisition_start_campaign(&saved.id, saved.updated_at)
+        .unwrap());
+    assert!(!r
+        .acquisition_start_campaign(&saved.id, saved.updated_at)
+        .unwrap());
+}
+
+#[test]
 fn new_scope_requires_new_assessment_even_after_reapproval() {
     let r = Repo::open_in_memory().unwrap();
     let mut c = campaign(&r);
@@ -88,6 +104,33 @@ fn new_scope_requires_new_assessment_even_after_reapproval() {
     assert_eq!(c.outreach.approved_at, None);
     assert!(r.acquisition_approve_outreach("c", c.updated_at).unwrap());
     assert!(r.acquisition_reserve_send("m", true).is_err());
+}
+
+#[test]
+fn changing_model_sources_revokes_approval_and_queues_text_reassessment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("model-sources.db");
+    let r = Repo::open(&path).unwrap();
+    let mut c = campaign(&r);
+    let l = prospect(&r, &c);
+    assert!(r.acquisition_pending_leads(&c.id).unwrap().is_empty());
+    assert!(r.acquisition_approve_outreach(&c.id, c.updated_at).unwrap());
+
+    c.outreach.vision_provider = Some("vision".into());
+    c = r.acquisition_save_campaign(&c).unwrap();
+    assert!(c.outreach.approved_at.is_none());
+    assert!(r.acquisition_pending_leads(&c.id).unwrap().is_empty());
+    assert!(r.acquisition_approve_outreach(&c.id, c.updated_at).unwrap());
+
+    c.outreach.analysis_provider = Some("text".into());
+    c = r.acquisition_save_campaign(&c).unwrap();
+    assert!(c.outreach.approved_at.is_none());
+    drop(r);
+    let r = Repo::open(&path).unwrap();
+    let saved = r.acquisition_get_campaign(&c.id).unwrap().unwrap();
+    assert_eq!(saved.outreach.analysis_provider.as_deref(), Some("text"));
+    assert_eq!(saved.outreach.vision_provider.as_deref(), Some("vision"));
+    assert_eq!(r.acquisition_pending_leads(&c.id).unwrap(), [l.id]);
 }
 
 #[test]

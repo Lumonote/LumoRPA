@@ -13,6 +13,8 @@ test("approval review and preview preserve the saved text and quote untrusted na
   const review = renderAcquisitionApproval(c);
   assert.ok(review.includes("&lt;script&gt;") && !review.includes("<script>"));
   assert.ok(review.includes(c.outreach.messageTemplate));
+  assert.ok(review.includes(`最多 ${c.maxLeads} 位`));
+  assert.ok(review.includes(`每日（UTC）最多 ${c.outreach.maxMessagesPerDay} 条`));
   c.maxLeads = 201;
   assert.notEqual(validateAcquisitionCampaign(c), "");
 });

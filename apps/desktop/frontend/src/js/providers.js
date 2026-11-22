@@ -119,7 +119,7 @@ export function openProviderEditor(name) {
   const profiles = state.providers?.profiles || [];
   const existing = profiles.find((p) => p.name === name);
   state.providerDraft = existing
-    ? JSON.parse(JSON.stringify(existing))
+    ? { ...structuredClone(existing), savedName: existing.name }
     : {
         name: "",
         kind: "openai",
@@ -147,7 +147,7 @@ function renderProviderEditor() {
   }
   $("providerEditBody").innerHTML = `
     <div class="row">
-      <div class="field"><label>name</label><input id="pName" value="${html(d.name)}" placeholder="如 deepseek / claude / azure-east" /></div>
+      <div class="field"><label>name</label><input id="pName" value="${html(d.name)}" ${d.savedName ? "readonly" : ""} placeholder="如 deepseek / claude / azure-east" /></div>
       <div class="field"><label>kind</label>
         <select id="pKind">
           <option value="openai" ${d.kind === "openai" ? "selected" : ""}>OpenAI 兼容</option>
@@ -173,14 +173,15 @@ function renderProviderEditor() {
       </div>
     </div>
     <div class="row">
-      <div class="field"><label>vision_model</label><input id="pVisionModel" value="${html(d.visionModel || "")}" placeholder="gpt-4o / claude-sonnet-4-6" /></div>
+      <div class="field"><label for="pVisionModel">vision_model</label><input id="pVisionModel" value="${html(d.visionModel || "")}" placeholder="gpt-4o / claude-sonnet-4-6" /><button type="button" id="testVisionBtn" title="向视觉模型发送一张测试色块">测试识图</button></div>
       <div class="field"><label>ocr_model</label><input id="pOcrModel" value="${html(d.ocrModel || "")}" placeholder="gpt-4o / modelscope/ZhipuAI/GLM-OCR" /></div>
     </div>
     ${renderOcrModelPicker(d.ocrModel || "")}
     <div class="field"><label>base_url</label><input id="pBase" value="${html(d.baseUrl || "")}" placeholder="https://api.example.com/v1" /></div>
     <div class="row">
       <div class="field"><label>api_key_env</label><input id="pEnv" value="${html(d.apiKeyEnv || "")}" placeholder="如 OPENAI_API_KEY" /></div>
-      <div class="field"><label>api_key (内联，谨慎)</label><input type="password" id="pInline" value="${html(d.apiKey || "")}" placeholder="留空优先使用环境变量" /></div>
+      <div class="field"><label for="pInline">API 密钥</label><input type="password" id="pInline" autocomplete="new-password" placeholder="${d.hasInlineKey ? "留空保留已保存密钥" : "留空使用环境变量"}" />
+      ${d.hasInlineKey ? '<label class="toggle"><input type="checkbox" id="pClearInline">清除已保存密钥</label>' : ""}</div>
     </div>
     <div class="field"><label>models (可选 · 逗号分隔)</label><input id="pModels" value="${html((d.models || []).join(", "))}" placeholder="gpt-4o, gpt-4o-mini" /></div>
     <div class="field">
@@ -193,6 +194,7 @@ function renderProviderEditor() {
   `;
   renderHeadersEditor();
   wireOcrModelPicker();
+  $("testVisionBtn").addEventListener("click", () => testProvider("vision"));
   $("addHeaderBtn").addEventListener("click", () => {
     const k = prompt("Header 名");
     if (!k) return;
@@ -369,7 +371,7 @@ function renderHeadersEditor() {
 }
 
 function collectProviderDraft() {
-  const d = state.providerDraft;
+  const d = { ...state.providerDraft };
   d.name = $("pName").value.trim();
   d.kind = $("pKind").value;
   d.wireApi = $("pWire").value || null;
@@ -380,6 +382,7 @@ function collectProviderDraft() {
   d.baseUrl = $("pBase").value.trim();
   d.apiKeyEnv = $("pEnv").value.trim();
   d.apiKey = $("pInline").value;
+  d.keepInlineKey = !!d.hasInlineKey && d.name === d.savedName && !$("pClearInline")?.checked;
   d.models = $("pModels").value.split(",").map((s) => s.trim()).filter(Boolean);
   d.notes = $("pNotes").value;
   d.activate = $("pActivate").checked;
@@ -390,10 +393,14 @@ export async function saveProvider() {
   if (!state.providerDraft) return;
   const draft = collectProviderDraft();
   if (!draft.name) { toast("名称不能为空", "", "warn"); return; }
+  if (!draft.savedName && state.providers?.profiles.some(p => p.name === draft.name)) {
+    toast("模型源名称已存在", "请从列表中编辑已有模型源。", "warn"); return;
+  }
   try {
     state.providers = await call("save_provider", { profile: draft });
     renderProviderList();
     refreshActiveProviderPill();
+    openProviderEditor(draft.name);
     toast("已保存模型源", draft.name, "ok");
   } catch (e) {
     toast("保存失败", String(e), "bad");
@@ -407,22 +414,35 @@ export async function enableLlmNetworkForSession() {
   toast("已启用本次会话 LLM 网络", "当前应用进程内有效，无需重启。", "ok");
 }
 
-export async function testProvider() {
+export async function testProvider(target = "text") {
   if (!state.providerDraft) { toast("先保存 / 选择模型源", "", "warn"); return; }
   const draft = collectProviderDraft();
+  const vision = target === "vision";
+  if (vision && (draft.kind === "local" || !draft.visionModel)) {
+    toast("请选择支持图像的模型源并填写视觉模型", "", "warn"); return;
+  }
   if (draft.kind === "local") {
     if (!draft.ocrModel) { toast("请选择本地 OCR 模型", "", "warn"); return; }
     await runOcrModelCheck(draft.ocrModel, true);
     return;
   }
   if (!draft.name) { toast("先保存 / 选择模型源", "", "warn"); return; }
-  if (state.providers && !state.providers.networkEnabled) {
-    await enableLlmNetworkForSession();
+  if (!state.providers?.networkEnabled) {
+    toast("测试需要模型网络", "请先启用本次会话网络。", "warn"); return;
   }
-  const r = await call("test_provider", { name: draft.name });
-  if (r.ok) {
-    toast("✓ 测试通过", `${r.provider}/${r.model} · ${r.inputTokens}↑/${r.outputTokens}↓`, "ok");
-  } else {
-    toast("✗ 测试失败", r.error || "unknown", "bad");
+  const button = $("testProviderBtn");
+  const visionButton = $("testVisionBtn");
+  if (button.disabled) return;
+  button.disabled = true;
+  if (visionButton) visionButton.disabled = true;
+  try {
+    const r = await call("test_provider", { name: draft.name, profile: draft, vision });
+    if (r.ok) toast(vision ? "识图测试通过" : "文本连接测试通过", `${r.provider}/${r.model} · ${r.inputTokens}↑/${r.outputTokens}↓`, "ok");
+    else toast("测试失败", r.error || "未收到有效响应", "bad");
+  } catch (error) {
+    toast("测试失败", String(error), "bad");
+  } finally {
+    button.disabled = false;
+    if (visionButton) visionButton.disabled = false;
   }
 }

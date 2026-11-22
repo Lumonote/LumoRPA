@@ -66,8 +66,9 @@ impl Repo {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    pub fn acquisition_restart_analysis(&self, id: &str) -> Result<(), StorageError> {
-        self.inner.lock().execute("UPDATE acquisition_analysis_progress SET consumed=0,revision=revision+1 WHERE lead_id=?", [id])?;
+    /// An explicit analysis replays completed work, but resumes an unfinished queue.
+    pub fn acquisition_prepare_manual_analysis(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.lock().execute("UPDATE acquisition_analysis_progress SET consumed=0,revision=revision+1 WHERE lead_id=? AND NOT EXISTS(SELECT 1 FROM acquisition_inputs WHERE lead_id=acquisition_analysis_progress.lead_id AND seq>acquisition_analysis_progress.consumed)", [id])?;
         Ok(())
     }
 

@@ -202,6 +202,8 @@ pub(crate) struct ProviderInput {
     #[serde(default)]
     pub(crate) api_key: Option<String>,
     #[serde(default)]
+    pub(crate) keep_inline_key: bool,
+    #[serde(default)]
     pub(crate) api_key_env: Option<String>,
     #[serde(default)]
     pub(crate) default_model: Option<String>,

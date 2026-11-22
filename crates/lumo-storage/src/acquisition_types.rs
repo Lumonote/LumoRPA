@@ -22,6 +22,8 @@ pub struct AcquisitionAnalysisBatch {
 #[serde(default, rename_all = "camelCase")]
 pub struct AcquisitionOutreachPolicy {
     pub desktop_vision: bool,
+    pub analysis_provider: Option<String>,
+    pub vision_provider: Option<String>,
     pub mode: String,
     pub message_template: String,
     pub max_messages_per_run: u32,
@@ -35,6 +37,8 @@ impl Default for AcquisitionOutreachPolicy {
     fn default() -> Self {
         Self {
             desktop_vision: false,
+            analysis_provider: None,
+            vision_provider: None,
             mode: "draft".into(),
             message_template: String::new(),
             max_messages_per_run: 5,

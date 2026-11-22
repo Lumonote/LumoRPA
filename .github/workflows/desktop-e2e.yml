@@ -51,6 +51,10 @@ jobs:
         run: cargo install tauri-driver --locked
       - name: Build the desktop application
         run: cargo build -p lumorpa-desktop --locked
+      - name: Run three-platform acquisition in real Chrome against intercepted fixture pages
+        run: |
+          google-chrome --version
+          cargo test -p lumorpa-desktop --lib --locked acquisition_chromium_ -- --ignored --nocapture
       - name: Drive the real desktop frontend and production IPC
         run: dbus-run-session -- xvfb-run -a python3 scripts/desktop-e2e.py --artifacts "$RUNNER_TEMP/desktop-e2e"
       - name: Upload driver logs and failure screenshots
