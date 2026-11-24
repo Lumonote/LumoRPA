@@ -1,13 +1,36 @@
 use crate::{
     acquisition_scope,
     acquisition_store::{get_campaign, save_needs, validate_profile, validate_url},
-    AcquisitionAnalysisBatch, AcquisitionLead, AcquisitionRequirement, AcquisitionSource, Repo,
-    StorageError,
+    AcquisitionAnalysisBatch, AcquisitionLead, AcquisitionMessageWork, AcquisitionRequirement,
+    AcquisitionSource, Repo, StorageError,
 };
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 impl Repo {
+    /// One entry per customer with actionable messages; never read message bodies for the list.
+    pub fn acquisition_message_work(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Vec<AcquisitionMessageWork>, StorageError> {
+        let conn = self.inner.lock();
+        let mut stmt = conn.prepare(
+            "SELECT l.id, MAX(m.status IN ('draft','approved')), MAX(m.status='uncertain')
+             FROM acquisition_leads l JOIN acquisition_messages m ON m.lead_id=l.id
+             WHERE l.campaign_id=? AND m.direction='outbound'
+               AND m.status IN ('draft','approved','uncertain')
+             GROUP BY l.id ORDER BY l.id",
+        )?;
+        let rows = stmt.query_map([campaign_id], |r| {
+            Ok(AcquisitionMessageWork {
+                lead_id: r.get(0)?,
+                review_draft: r.get(1)?,
+                verify_receipt: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn acquisition_add_source(
         &self,
         lead_id: &str,

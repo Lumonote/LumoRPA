@@ -104,6 +104,11 @@ pub(super) fn acquisition_snapshot(app: AppHandle, campaign_id: Option<String>) 
         .transpose()
         .map_err(err)?
         .unwrap_or_default();
+    let message_work = selected
+        .map(|id| r.acquisition_message_work(id))
+        .transpose()
+        .map_err(err)?
+        .unwrap_or_default();
     let needs = selected
         .map(|cid| r.acquisition_campaign_requirements(cid))
         .transpose()
@@ -147,7 +152,7 @@ pub(super) fn acquisition_snapshot(app: AppHandle, campaign_id: Option<String>) 
         .as_ref()
         .map(|(key, _)| key.clone());
     Ok(
-        json!({"campaigns":campaigns,"leads":leads,"pendingAnalysisIds":pending,"requirements":needs,"activity":r.acquisition_list_activity(selected,150).map_err(err)?,"runningCampaignIds":active.into_iter().collect::<Vec<_>>(),"modelSources":model_sources,"computer":{"desktopSupported":desktop_supported,"ready":configured,"message":config_message}}),
+        json!({"campaigns":campaigns,"leads":leads,"pendingAnalysisIds":pending,"messageWork":message_work,"requirements":needs,"activity":r.acquisition_list_activity(selected,150).map_err(err)?,"runningCampaignIds":active.into_iter().collect::<Vec<_>>(),"modelSources":model_sources,"computer":{"desktopSupported":desktop_supported,"ready":configured,"message":config_message}}),
     )
 }
 #[tauri::command]
@@ -230,14 +235,31 @@ pub(super) fn acquisition_draft_message(
 ) -> Res<Message> {
     store_message(&db(&app)?, id(), &lead_id, "outbound", &body)
 }
+
+fn store_manual_note(r: &Repo, lead_id: &str, body: &str, request_id: Option<&str>) -> Res<()> {
+    let mid = match request_id {
+        Some(key) if key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            format!("note-{:x}", Sha256::digest(format!("{lead_id}\0{key}")))
+        }
+        Some(_) => return Err("无效的回复保存标识。".into()),
+        None => id(), // Older clients do not supply a retry key.
+    };
+    let saved = store_message(r, mid, lead_id, "inbound", body)?;
+    if saved.body != body.trim() {
+        return Err("本次保存已记录其他回复，请核对对话记录。".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(super) async fn acquisition_add_note(
     app: AppHandle,
     lead_id: String,
     body: String,
+    request_id: Option<String>,
 ) -> Res<Value> {
     let r = db(&app)?;
-    store_message(&r, id(), &lead_id, "inbound", &body)?;
+    store_manual_note(&r, &lead_id, &body, request_id.as_deref())?;
     let l = lead(&r, &lead_id)?;
     notify(&app, &l.campaign_id);
     let c = campaign(&r, &l.campaign_id)?;

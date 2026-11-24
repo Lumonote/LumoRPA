@@ -6,6 +6,30 @@ const PLATFORMS: [&str; 3] = ["xiaohongshu", "douyin", "weibo"];
 const POST: &str = "门店需要预约系统";
 const REPLY: &str = "需要到店前一天提醒";
 
+#[tokio::test]
+async fn manual_reply_retries_survive_reopen_without_collapsing_distinct_replies() {
+    const FIRST: &str = "11111111111111111111111111111111";
+    const SECOND: &str = "22222222222222222222222222222222";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("manual.db");
+    let w = setup(Repo::open(&path).unwrap(), "notes", "draft");
+    w.run("discover").await.unwrap();
+    let leads = w.r.acquisition_list_leads(Some("notes")).unwrap();
+    let lid = &leads[0].id;
+    store_manual_note(&w.r, lid, REPLY, Some(FIRST)).unwrap();
+    drop(w);
+
+    let r = Repo::open(&path).unwrap();
+    store_manual_note(&r, lid, REPLY, Some(FIRST)).unwrap();
+    assert!(store_manual_note(&r, lid, "不同的内容", Some(FIRST)).is_err());
+    assert!(store_manual_note(&r, lid, REPLY, Some("invalid")).is_err());
+    assert_eq!(r.acquisition_list_messages(lid).unwrap().len(), 1);
+    store_manual_note(&r, lid, REPLY, Some(SECOND)).unwrap();
+    store_manual_note(&r, &leads[1].id, REPLY, Some(FIRST)).unwrap();
+    assert_eq!(r.acquisition_list_messages(lid).unwrap().len(), 2);
+    assert_eq!(r.acquisition_list_messages(&leads[1].id).unwrap().len(), 1);
+}
+
 #[derive(Clone, Default)]
 struct LocalModel {
     fail_on: Option<&'static str>,

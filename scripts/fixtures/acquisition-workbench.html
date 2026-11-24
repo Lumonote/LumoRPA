@@ -7,6 +7,11 @@
 const root = document.querySelector("#center");
 const find = selector => root.querySelector(selector);
 const check = (condition, message) => { if (!condition) throw Error(message); };
+function input(selector, value, event = "input") {
+  const element = find(selector);
+  element.value = value;
+  element.dispatchEvent(new Event(event, {bubbles:true}));
+}
 async function click(selector) {
   const button = find(selector);
   check(button && !button.disabled, "unavailable: " + selector);
@@ -24,22 +29,35 @@ const messages = [{id:"unclear",direction:"outbound",status:"uncertain",body:"�
 const mutations = [];
 const unexpected = [];
 let pendingAnalysis = false;
+let finishNote, storedNoteKey, failDraft = true, delayDetail = false, finishDetail;
 async function call(command, args) {
   if (command === "acquisition_snapshot") return structuredClone({
     campaigns:[task], leads:people, requirements:[demand], activity:[], runningCampaignIds:[],
     pendingAnalysisIds: pendingAnalysis ? ["douyin"] : [],
+    messageWork:[{leadId:"douyin", reviewDraft:messages.some(m => m.status === "draft"), verifyReceipt:messages.some(m => m.status === "uncertain")}],
     modelSources:[{name:"text-profile", textModel:"text-model"}, {name:"vision-profile", visionModel:"image-model"}]
   });
   if (command === "acquisition_save_campaign") {
     task = structuredClone(args.campaign);
     return task;
   }
-  if (command === "acquisition_lead_detail" && args.leadId === "douyin")
-    return structuredClone({lead:people.find(p => p.id === args.leadId), messages, requirements:[demand]});
+  if (command === "acquisition_lead_detail" && people.some(p => p.id === args.leadId)) {
+    if (delayDetail) { delayDetail = false; await new Promise(r => { finishDetail = r; }); }
+    const relevant = args.leadId === "douyin";
+    return structuredClone({lead:people.find(p => p.id === args.leadId), messages:relevant ? messages : [], requirements:relevant ? [demand] : []});
+  }
   if (command === "acquisition_draft_message" && args.leadId === "douyin") {
+    if (failDraft) { failDraft = false; throw Error("未能保存测试草稿"); }
     messages.push({id:"draft",direction:"outbound",status:"draft",body:args.body});
   } else if (command === "acquisition_add_note" && args.leadId === "douyin") {
-    messages.push({id:"note",direction:"inbound",status:"received",body:args.body});
+    check(/^[a-f0-9]{32}$/.test(args.requestId), "missing reply retry key");
+    if (!storedNoteKey) {
+      messages.push({id:"note",direction:"inbound",status:"received",body:args.body});
+      storedNoteKey = args.requestId;
+      throw Error("测试响应中断");
+    }
+    check(storedNoteKey === args.requestId, "reply retry changed its identity");
+    await new Promise(r => { finishNote = r; });
     pendingAnalysis = true;
     mutations.push(command);
     return {analysisError:"模型离线"};
@@ -67,14 +85,34 @@ try {
   await click('[data-acq-content] [data-acq-lead="douyin"]');
   check(find("[data-acq-detail-content] h2").textContent === "抖音店主", "wrong recipient");
   check(find("[data-acq-draft]").value.includes("抖音店主"), "wrong template");
-  find("[data-acq-draft]").value = "新的草稿";
+  input("[data-acq-draft]", "");
+  input("[data-acq-note]", "希望提前两天提醒");
+  await click('[data-acq-tab="leads"]');
+  await click('[data-acq-lead="weibo"]');
+  check(find("[data-acq-draft]").value.includes("微博店主") && !find("[data-acq-note]").value, "text leaked between leads");
+  await click('[data-acq-action="close-detail"]');
+  input("[data-acq-filter-platform]", "", "change");
+  input("[data-acq-filter-work]", "verifyReceipt", "change");
+  input("[data-acq-search]", demand.evidence);
+  check(rows().length === 1 && rows()[0].dataset.acqLead === "douyin", "receipt and demand filters did not intersect");
+  delayDetail = true;
+  const opening = click('[data-acq-lead="douyin"]');
+  check(find("[data-acq-composer]").hidden, "composer visible before identity loaded");
+  await view.refresh();
+  finishDetail(); await opening;
+  check(!find("[data-acq-draft]").value && find("[data-acq-note]").value === "希望提前两天提醒", "edits lost after overlapping refresh");
+  input("[data-acq-draft]", "新的草稿");
   await click('[data-acq-action="save-draft"]');
-  check(messages[1]?.body === "新的草稿", "draft not saved");
-  await click('[data-acq-send="draft"]');
-  check(find("[data-acq-dialog]").open && find("[data-acq-dialog-content]").textContent.includes("抖音店主（5）"), "wrong send confirmation");
-  await click('[data-acq-action="close-dialog"]');
-  find("[data-acq-note]").value = "希望提前两天提醒";
+  check(find("[data-acq-draft]").value === "新的草稿" && find("[data-acq-error]").textContent.includes("未能保存"), "write failure discarded draft");
+  await click('[data-acq-action="save-draft"]');
+  check(messages[1]?.body === "新的草稿" && !find("[data-acq-draft]").value, "draft not acknowledged");
+  check(find('[data-acq-send="draft"]').disabled, "draft send available before receipt reconciliation");
   await click('[data-acq-action="save-note"]');
+  check(find("[data-acq-note]").value === "希望提前两天提醒", "lost acknowledgement discarded reply");
+  const savingNote = click('[data-acq-action="save-note"]');
+  input("[data-acq-note]", "稍后再保存的新回复");
+  finishNote(); await savingNote;
+  check(find("[data-acq-note]").value === "稍后再保存的新回复", "late acknowledgement cleared new input");
   check(find("[data-acq-error]").textContent.includes("回复已保存，待补分析"), "hidden analysis failure");
   check(find("[data-acq-detail-content]").textContent.includes("希望提前两天提醒"), "reply lost");
   check(find('[data-acq-run="analyze_pending"]')?.textContent.includes("1 位"), "missing campaign analysis queue");
@@ -83,6 +121,12 @@ try {
   check(!find('[data-acq-run="analyze_pending"]') && find('[data-acq-action="analyze"]').textContent === "重新分析", "retry did not clear analysis queue");
   await click('[data-acq-resolve="sent"]');
   check(!find("[data-acq-resolve]") && messages[0].status === "sent", "unreconciled receipt");
+  check(rows().length === 0 && find('[data-acq-filter-work]').value === 'verifyReceipt', "resolved customer still queued");
+  input("[data-acq-filter-work]", "reviewDraft", "change");
+  check(rows().length === 1, "draft customer missing from review");
+  await click('[data-acq-send="draft"]');
+  check(find("[data-acq-dialog]").open && find("[data-acq-dialog-content]").textContent.includes("抖音店主（5）"), "wrong send confirmation");
+  await click('[data-acq-action="close-dialog"]');
   check(mutations.join(",") === "acquisition_draft_message,acquisition_add_note,acquisition_analyze_lead,acquisition_resolve_message", "wrong mutations");
   await click('[data-acq-action="edit"]');
   const textSource = find('[name="analysisProvider"]');

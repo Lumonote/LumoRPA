@@ -2,6 +2,12 @@
 
 LumoRPA Desktop is a Tauri-based desktop workbench that calls the Rust runtime directly.
 
+## Customer Acquisition
+
+In **获客中心 → 潜在客户**, filter the current campaign by **待审核草稿** (drafts to review), **待核实发送** (uncertain deliveries), or **待补分析** (unprocessed evidence or replies). Counts are distinct customers, not messages; a customer can belong to more than one queue. Combine these filters with a platform, follow-up stage, or a search for words from an identified demand. Resolving a receipt records the outcome; it does not resend the message.
+
+Unsaved message and reply text stays with its customer when switching profiles or campaigns in the same window. It is not written to disk and is lost on reload or exit. Use **保存草稿** or **记录回复并分析** to persist it. Saving a draft does not send it. If saving a reply returns no acknowledgement, retry the unchanged input in the same window: it will not add a duplicate. If the reply was saved but analysis was unavailable, retry from **待补分析** rather than entering it again.
+
 ## Desktop Voice Agent
 
 The desktop control plane combines four surfaces:

@@ -76,6 +76,41 @@ fn approval_and_recovery_prevent_duplicate_first_contact() {
     assert!(r.acquisition_reserve_send("m", true).is_err());
 }
 #[test]
+fn worklist_counts_customers_not_messages_and_keeps_uncertain_receipts_until_resolved() {
+    let r = Repo::open_in_memory().unwrap();
+    let c = campaign(&r);
+    let l = prospect(&r, &c);
+    for id in ["first", "second", "third"] {
+        r.acquisition_add_message(&msg(id, "outbound", id)).unwrap();
+    }
+    r.acquisition_transition_message("second", "draft", "approved", None)
+        .unwrap();
+    r.acquisition_reserve_send("first", false).unwrap();
+    let work = |draft, verify| {
+        vec![AcquisitionMessageWork {
+            lead_id: l.id.clone(),
+            review_draft: draft,
+            verify_receipt: verify,
+        }]
+    };
+    assert_eq!(
+        r.acquisition_message_work(&c.id).unwrap(),
+        work(true, false)
+    );
+    assert!(r.acquisition_message_work("other").unwrap().is_empty());
+    r.acquisition_recover_interrupted().unwrap();
+    assert_eq!(r.acquisition_message_work(&c.id).unwrap(), work(true, true));
+    r.acquisition_update_lead_status(&l.id, "ignored").unwrap();
+    assert_eq!(
+        r.acquisition_message_work(&c.id).unwrap(),
+        work(false, true)
+    );
+    r.acquisition_transition_message("first", "uncertain", "sent", None)
+        .unwrap();
+    assert!(r.acquisition_message_work(&c.id).unwrap().is_empty());
+}
+
+#[test]
 fn stale_worker_cannot_claim_an_edited_campaign() {
     let r = Repo::open_in_memory().unwrap();
     let mut edited = campaign(&r);

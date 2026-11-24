@@ -44,9 +44,29 @@ export function renderAcquisitionTemplate(template, lead, campaign) {
   return String(template || "").replace(/\{\{(name|product|audience)\}\}/g, (_, key) => String(variables[key] || "")).trim();
 }
 
-export function filterAcquisitionLeads(leads, { campaignId = "", query = "", status: selectedStatus = "", platform = "" } = {}) {
+const WORK_LABELS = { verifyReceipt: "待核实发送", reviewDraft: "待审核草稿", analyze: "待补分析" };
+
+export function acquisitionFollowUpIndex({ messageWork = [], pendingAnalysisIds = [], requirements = [] }) {
+  const groups = { verifyReceipt: new Set(), reviewDraft: new Set(), analyze: new Set(pendingAnalysisIds) };
+  for (const row of messageWork) {
+    if (row.reviewDraft) groups.reviewDraft.add(row.leadId);
+    if (row.verifyReceipt) groups.verifyReceipt.add(row.leadId);
+  }
+  const demands = new Map();
+  for (const row of requirements) {
+    if (!demands.has(row.leadId)) demands.set(row.leadId, []);
+    demands.get(row.leadId).push([row.summary, row.category, row.evidence].join(" ").toLocaleLowerCase());
+  }
+  return { groups, demands };
+}
+
+export function filterAcquisitionLeads(leads, { campaignId = "", query = "", status: selectedStatus = "", platform = "", work = "" } = {}, index) {
   const needle = query.trim().toLocaleLowerCase();
-  return leads.filter((lead) => (!campaignId || lead.campaignId === campaignId) && (!selectedStatus || lead.status === selectedStatus) && (!platform || lead.platform === platform) && (!needle || [lead.displayName, lead.bio, lead.evidence, lead.platformUserId, ...(lead.tags || [])].join(" ").toLocaleLowerCase().includes(needle)));
+  return leads.filter((lead) => (!campaignId || lead.campaignId === campaignId)
+    && (!selectedStatus || lead.status === selectedStatus) && (!platform || lead.platform === platform)
+    && (!work || index?.groups[work]?.has(lead.id))
+    && (!needle || [lead.displayName, lead.bio, lead.evidence, lead.platformUserId, ...(lead.tags || [])].join(" ").toLocaleLowerCase().includes(needle)
+      || index?.demands.get(lead.id)?.some((demand) => demand.includes(needle))));
 }
 
 export function safeAcquisitionUrl(value) {
@@ -72,9 +92,16 @@ export function renderAcquisitionApproval(campaign) {
   return `<h2>批准本任务的自动私聊</h2><p>批准后，在以下范围内自动发送已确认话术。范围或话术变更后需要重新批准。</p><dl class="acq-review"><dt>任务</dt><dd>${esc(campaign.name)}</dd><dt>平台</dt><dd>${campaign.platforms.map((p) => esc(ACQUISITION_PLATFORMS[p] || p)).join(" / ")}</dd><dt>文本模型源</dt><dd>${esc(policy.analysisProvider || "跟随默认模型源")}</dd><dt>视觉模型源</dt><dd>${esc(policy.visionProvider || "跟随文本模型源")}</dd><dt>操作方式</dt><dd>${policy.desktopVision ? "桌面视觉（平台窗口截图发送至视觉模型）" : "网页自动化"}</dd><dt>产品 / 服务</dt><dd>${esc(campaign.product)}</dd><dt>目标客户</dt><dd>${esc(campaign.targetAudience)}</dd><dt>关键词</dt><dd>${campaign.keywords.map(esc).join("、")}</dd><dt>任务线索总上限</dt><dd>最多 ${esc(campaign.maxLeads)} 位</dd><dt>发送范围</dt><dd>匹配分 ≥ ${esc(policy.minIntentScore)}；每次最多 ${esc(policy.maxMessagesPerRun)} 条，每日（UTC）最多 ${esc(policy.maxMessagesPerDay)} 条，间隔至少 ${esc(policy.minIntervalSeconds)} 秒</dd></dl><h3>已保存话术</h3><blockquote>${esc(policy.messageTemplate)}</blockquote><p class="acq-muted">支持客户昵称、产品和目标客户变量。</p><div class="acq-actions"><button data-acq-action="close-dialog">返回</button><button class="primary" data-acq-action="confirm-approval">批准此范围与话术</button></div>`;
 }
 
+function receiptHold(messages) {
+  if (messages.some((m) => m.direction === "outbound" && m.status === "uncertain")) return "请先核实已有发送结果";
+  if (messages.some((m) => m.direction === "outbound" && m.status === "sending")) return "已有消息正在发送";
+  return "";
+}
+
 export function renderAcquisitionMessages(messages) {
   if (!messages.length) return empty("尚无对话记录", "可以先保存话术草稿，或记录客户已有回复。");
-  return messages.map((message) => `<article class="acq-message ${message.direction === "inbound" ? "is-inbound" : "is-outbound"}"><header><strong>${message.direction === "inbound" ? "客户" : "我方"}</strong><span>${esc(MESSAGE_STATUSES[message.status] || message.status)} · ${esc(time(message.createdAt))}</span></header><p>${esc(message.body)}</p>${message.error ? `<p class="acq-inline-error">${esc(message.error)}</p>` : ""}${["draft", "approved"].includes(message.status) ? `<button data-acq-send="${esc(message.id)}">审核并发送</button>` : ""}${message.status === "uncertain" ? `<small>请核对平台会话。</small><button data-acq-resolve="sent" data-message-id="${esc(message.id)}">核实已发送</button><button data-acq-resolve="failed" data-message-id="${esc(message.id)}">核实未发送</button>` : ""}</article>`).join("");
+  const hold = receiptHold(messages);
+  return messages.map((message) => `<article class="acq-message ${message.direction === "inbound" ? "is-inbound" : "is-outbound"}"><header><strong>${message.direction === "inbound" ? "客户" : "我方"}</strong><span>${esc(MESSAGE_STATUSES[message.status] || message.status)} · ${esc(time(message.createdAt))}</span></header><p>${esc(message.body)}</p>${message.error ? `<p class="acq-inline-error">${esc(message.error)}</p>` : ""}${["draft", "approved"].includes(message.status) ? `<button data-acq-send="${esc(message.id)}"${hold ? " disabled" : ""}>${hold || "审核并发送"}</button>` : ""}${message.status === "uncertain" ? `<small>请核对平台会话。</small><button data-acq-resolve="sent" data-message-id="${esc(message.id)}">核实已发送</button><button data-acq-resolve="failed" data-message-id="${esc(message.id)}">核实未发送</button>` : ""}</article>`).join("");
 }
 
 export function renderAcquisitionSources(sources) {
@@ -118,9 +145,14 @@ function renderDemands(requirements, leads) {
 
 export function mountAcquisitionCenter({ root, call, listen }) {
   let snapshot = { campaigns: [], leads: [], requirements: [], activity: [], runningCampaignIds: [], computer: {} };
+  let followUp = acquisitionFollowUpIndex(snapshot);
+  // Lead IDs are database primary keys. Keep only explicit edits, never customer text in localStorage.
+  const edits = new Map();
   let selectedId = "", selectedLeadId = "", currentDetail = null, editing = null, dirty = false, visible = true, busy = false, activeTab = "leads", disposed = false;
   let loadVersion = 0, detailVersion = 0, refreshTimer = null, unlisten = null, pendingApproval = null, pendingMessage = null;
-  root.innerHTML = `<header class="acq-hero"><div><h1>获客中心</h1></div><div class="acq-actions"><button data-acq-action="refresh">刷新</button><button class="primary" data-acq-action="new">＋ 创建任务</button></div></header><p class="acq-error" data-acq-error role="alert" hidden></p><p class="acq-notice" data-acq-notice role="status" hidden></p><section class="acq-connection"><div data-acq-computer><strong>Computer Use</strong><span>正在检查浏览器和模型配置…</span></div><div class="acq-actions">${Object.entries(ACQUISITION_PLATFORMS).map(([key, label]) => `<button data-acq-login="${key}" title="打开浏览器完成登录">登录${label} ↗</button>`).join("")}</div></section><section class="acq-editor" data-acq-editor hidden></section><div class="acq-workspace"><aside class="acq-campaigns"><header><span class="acq-eyebrow">获客任务</span><span data-acq-campaign-count>0</span></header><div data-acq-campaigns></div></aside><div class="acq-main"><section data-acq-summary></section><div class="acq-tabs" role="tablist" aria-label="获客数据"><button role="tab" data-acq-tab="leads" aria-selected="true">潜在客户</button><button role="tab" data-acq-tab="demands" aria-selected="false">需求池</button><button role="tab" data-acq-tab="activity" aria-selected="false">执行记录</button></div><div class="acq-filters" data-acq-filters><input data-acq-search type="search" aria-label="搜索客户与公开需求" placeholder="搜索客户、需求、标签…"><select data-acq-filter-status aria-label="筛选客户阶段"><option value="">所有阶段</option>${Object.entries(ACQUISITION_STATUSES).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select><select data-acq-filter-platform aria-label="筛选来源平台"><option value="">所有平台</option>${Object.entries(ACQUISITION_PLATFORMS).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></div><section data-acq-content aria-live="polite"></section></div><aside class="acq-detail" data-acq-detail hidden><div data-acq-detail-content></div><section class="acq-composer"><label class="acq-field">私聊草稿<textarea rows="4" data-acq-draft placeholder="写下准备发送的消息…"></textarea></label><div class="acq-actions"><button data-acq-action="use-template">使用任务话术</button><button data-acq-action="save-draft">保存草稿</button></div><label class="acq-field">记录客户回复<textarea rows="3" data-acq-note placeholder="粘贴客户回复，保存并分析需求…"></textarea></label><button data-acq-action="save-note">记录回复并分析</button></section></aside></div><dialog class="acq-dialog" data-acq-dialog><div data-acq-dialog-content></div></dialog>`;
+  root.innerHTML = `<header class="acq-hero"><div><h1>获客中心</h1></div><div class="acq-actions"><button data-acq-action="refresh">刷新</button><button class="primary" data-acq-action="new">＋ 创建任务</button></div></header><p class="acq-error" data-acq-error role="alert" hidden></p><p class="acq-notice" data-acq-notice role="status" hidden></p><section class="acq-connection"><div data-acq-computer><strong>Computer Use</strong><span>正在检查浏览器和模型配置…</span></div><div class="acq-actions">${Object.entries(ACQUISITION_PLATFORMS).map(([key, label]) => `<button data-acq-login="${key}" title="打开浏览器完成登录">登录${label} ↗</button>`).join("")}</div></section><section class="acq-editor" data-acq-editor hidden></section><div class="acq-workspace"><aside class="acq-campaigns"><header><span class="acq-eyebrow">获客任务</span><span data-acq-campaign-count>0</span></header><div data-acq-campaigns></div></aside><div class="acq-main"><section data-acq-summary></section><div class="acq-tabs" role="tablist" aria-label="获客数据"><button role="tab" data-acq-tab="leads" aria-selected="true">潜在客户</button><button role="tab" data-acq-tab="demands" aria-selected="false">需求池</button><button role="tab" data-acq-tab="activity" aria-selected="false">执行记录</button></div><div class="acq-filters" data-acq-filters>
+    <select data-acq-filter-work aria-label="筛选跟进待办"></select><input data-acq-search type="search" aria-label="搜索客户与公开需求" placeholder="搜索客户、需求、标签…"><select data-acq-filter-status aria-label="筛选客户阶段"><option value="">所有阶段</option>${Object.entries(ACQUISITION_STATUSES).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select><select data-acq-filter-platform aria-label="筛选来源平台"><option value="">所有平台</option>${Object.entries(ACQUISITION_PLATFORMS).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></div><section data-acq-content aria-live="polite"></section></div><aside class="acq-detail" data-acq-detail hidden><div data-acq-detail-content></div>
+    <section class="acq-composer" data-acq-composer hidden><label class="acq-field">私聊草稿<textarea rows="4" data-acq-draft placeholder="写下准备发送的消息…"></textarea></label><div class="acq-actions"><button data-acq-action="use-template">使用任务话术</button><button data-acq-action="save-draft">保存草稿</button></div><label class="acq-field">记录客户回复<textarea rows="3" data-acq-note placeholder="粘贴客户回复，保存并分析需求…"></textarea></label><button data-acq-action="save-note">记录回复并分析</button><small class="acq-muted" data-acq-unsaved role="status" hidden>未保存 · 仅保留在当前窗口</small></section></aside></div><dialog class="acq-dialog" data-acq-dialog><div data-acq-dialog-content></div></dialog>`;
   const q = (selector) => root.querySelector(selector);
   const campaign = () => snapshot.campaigns.find((item) => item.id === selectedId);
   const notify = (message, isError = false) => { const box = q(isError ? "[data-acq-error]" : "[data-acq-notice]"); box.textContent = message; box.hidden = !message; };
@@ -132,13 +164,16 @@ export function mountAcquisitionCenter({ root, call, listen }) {
   function renderContent() {
     q("[data-acq-filters]").hidden = activeTab !== "leads";
     root.querySelectorAll("[data-acq-tab]").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.acqTab === activeTab)));
-    if (activeTab === "leads") q("[data-acq-content]").innerHTML = renderAcquisitionLeadRows(filterAcquisitionLeads(selectedLeads(), { query: q("[data-acq-search]").value, status: q("[data-acq-filter-status]").value, platform: q("[data-acq-filter-platform]").value }), selectedLeadId);
+    if (activeTab === "leads") q("[data-acq-content]").innerHTML = renderAcquisitionLeadRows(filterAcquisitionLeads(selectedLeads(), { query: q("[data-acq-search]").value, status: q("[data-acq-filter-status]").value, platform: q("[data-acq-filter-platform]").value, work: q("[data-acq-filter-work]").value }, followUp), selectedLeadId);
     else if (activeTab === "demands") q("[data-acq-content]").innerHTML = renderDemands(selectedRequirements(), selectedLeads());
     else q("[data-acq-content]").innerHTML = snapshot.activity.length ? `<ol class="acq-log">${snapshot.activity.filter((entry) => !selectedId || entry.campaignId === selectedId).map((entry) => `<li><time>${esc(time(entry.createdAt))}</time><div><strong>${esc(entry.kind)}</strong><p>${esc(text(entry.detail))}</p></div></li>`).join("")}</ol>` : empty("暂无执行记录", "采集、联系、同步及异常都会记录在这里。");
   }
 
   function renderSnapshot() {
     const current = campaign(), leads = selectedLeads(), running = snapshot.runningCampaignIds.includes(selectedId);
+    const workFilter = q("[data-acq-filter-work]"), previous = workFilter.value;
+    workFilter.innerHTML = '<option value="">所有客户</option>' + Object.entries(WORK_LABELS).map(([key, label]) => `<option value="${key}">${label} · ${followUp.groups[key].size} 位</option>`).join("");
+    workFilter.value = previous;
     q("[data-acq-campaign-count]").textContent = snapshot.campaigns.length;
     q("[data-acq-campaigns]").innerHTML = snapshot.campaigns.length ? snapshot.campaigns.map((item) => `<button data-acq-campaign="${esc(item.id)}" class="acq-campaign ${item.id === selectedId ? "is-selected" : ""}"><strong>${esc(item.name)}</strong><span>${item.platforms.map((p) => esc(ACQUISITION_PLATFORMS[p] || p)).join(" · ")}</span><small>${esc(CAMPAIGN_STATUSES[item.status] || item.status)}${item.outreach?.approvedAt ? " · 已批准自动联系" : ""}</small></button>`).join("") : empty("创建首个获客任务", "定义客户条件，开始寻找需求。");
     q("[data-acq-computer]").innerHTML = `<strong><i class="acq-status-dot ${snapshot.computer?.ready ? "is-ready" : ""}"></i>Computer Use</strong><span>${esc(snapshot.computer?.message || "请配置模型，并登录所选平台。")}</span>`;
@@ -152,28 +187,85 @@ export function mountAcquisitionCenter({ root, call, listen }) {
       const next = await call("acquisition_snapshot", { campaignId: selectedId || null });
       if (disposed || version !== loadVersion) return;
       snapshot = { ...snapshot, ...next };
+      followUp = acquisitionFollowUpIndex(next);
       if (!selectedId && snapshot.campaigns.length) selectedId = snapshot.campaigns[0].id;
       renderSnapshot();
-      if (selectedLeadId && visible) await loadDetail(selectedLeadId, false);
+      if (selectedLeadId && visible) await loadDetail(selectedLeadId);
     } catch (error) { if (!disposed && version === loadVersion) report(error); }
   }
 
-  async function loadDetail(leadId, resetComposer = true) {
+  async function loadDetail(leadId) {
+    if (disposed) return;
+    if (leadId !== selectedLeadId) currentDetail = null;
     selectedLeadId = leadId;
     const version = ++detailVersion;
     q("[data-acq-detail]").hidden = false;
-    if (resetComposer) {
-      currentDetail = null;
+    if (!currentDetail) {
       q("[data-acq-detail-content]").innerHTML = empty("正在读取客户档案…");
+      q("[data-acq-composer]").hidden = true;
       q("[data-acq-draft]").value = "";
       q("[data-acq-note]").value = "";
     }
     renderContent();
-    const detail = await call("acquisition_lead_detail", { leadId });
-    if (disposed || selectedLeadId !== leadId || version !== detailVersion) return;
+    let detail;
+    try {
+      detail = await call("acquisition_lead_detail", { leadId });
+      if (disposed || version !== detailVersion) return;
+      if (detail?.lead?.id !== leadId || detail.lead.campaignId !== selectedId) throw new Error("客户档案与当前任务不符。");
+    } catch (error) {
+      if (disposed || version !== detailVersion) return;
+      if (!currentDetail) q("[data-acq-detail-content]").innerHTML = empty("未能读取客户档案") + '<button data-acq-action="close-detail">关闭档案</button>';
+      throw error;
+    }
+    if (!currentDetail) {
+      const entry = edits.get(leadId);
+      q("[data-acq-draft]").value = entry?.draft?.value ?? renderAcquisitionTemplate(campaign()?.outreach?.messageTemplate, detail.lead, campaign());
+      q("[data-acq-note]").value = entry?.note?.value ?? "";
+      q("[data-acq-unsaved]").hidden = !entry;
+      q("[data-acq-composer]").hidden = false;
+    }
     currentDetail = detail;
     q("[data-acq-detail-content]").innerHTML = renderProfile(detail, snapshot.pendingAnalysisIds?.includes(leadId));
-    if (resetComposer) q("[data-acq-draft]").value = renderAcquisitionTemplate(campaign()?.outreach?.messageTemplate, detail.lead, campaign());
+  }
+
+  function rememberEdit(field, value) {
+    if (!currentDetail) return;
+    const entry = edits.get(selectedLeadId) || {};
+    entry[field] = { value };
+    edits.set(selectedLeadId, entry);
+    q("[data-acq-unsaved]").hidden = false;
+  }
+
+  async function saveComposer(field) {
+    const leadId = currentDetail?.lead.id;
+    if (!leadId || leadId !== selectedLeadId) throw new Error("请先打开客户档案。");
+    const input = q(`[data-acq-${field}]`), raw = input.value, body = raw.trim();
+    const isNote = field === "note";
+    if (!body) throw new Error(isNote ? "请先填写客户回复。" : "请先填写私聊内容。");
+    if (isNote && edits.get(leadId)?.note?.value !== raw) rememberEdit("note", raw);
+    const revision = edits.get(leadId)?.[field];
+    const args = { leadId, body };
+    if (isNote) {
+      // A lost acknowledgement can be retried even after the database committed the reply.
+      revision.requestId ??= Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+      args.requestId = revision.requestId;
+    }
+    const result = await call(isNote ? "acquisition_add_note" : "acquisition_draft_message", args);
+    if (disposed) return;
+    // An acknowledgement owns only the submitted revision, never the other field or a later edit.
+    const entry = edits.get(leadId);
+    if (entry?.[field] === revision && input.value === raw && selectedLeadId === leadId) {
+      if (entry) {
+        delete entry[field];
+        if (!entry.draft && !entry.note) edits.delete(leadId);
+      }
+      input.value = "";
+      q("[data-acq-unsaved]").hidden = !edits.has(leadId);
+    }
+    if (isNote) notify(result?.analysisError ? `回复已保存，待补分析：${result.analysisError}` : "回复已记录并分析。", Boolean(result?.analysisError));
+    else if (result?.status && !["draft", "approved"].includes(result.status)) notify(`这条消息已有记录：${MESSAGE_STATUSES[result.status] || result.status}。`);
+    else notify("草稿已保存，审核后可发送。");
+    await refresh();
   }
 
   function editCampaign(value) {
@@ -269,30 +361,30 @@ export function mountAcquisitionCenter({ root, call, listen }) {
         }
         case "confirm-send": {
           if (!pendingMessage) throw new Error("请重新审核待发送消息。");
+          const hold = receiptHold(currentDetail?.messages || []);
+          if (hold) { closeDialog(); throw new Error(hold); }
           const messageId = pendingMessage; closeDialog();
           const result = await call("acquisition_send_message", { messageId });
           await refresh(); notify(result?.status === "sent" ? "消息已发送并记录。" : `发送状态：${MESSAGE_STATUSES[result?.status] || result?.status || "请核对执行记录"}`); break;
         }
         case "analyze": await call("acquisition_analyze_lead", { leadId: selectedLeadId }); await refresh(); notify("用户画像与需求已更新。"); break;
-        case "use-template": q("[data-acq-draft]").value = renderAcquisitionTemplate(campaign()?.outreach?.messageTemplate, currentDetail?.lead, campaign()); break;
-        case "save-draft": {
-          const body = q("[data-acq-draft]").value.trim(); if (!body) throw new Error("请先填写私聊内容。");
-          await call("acquisition_draft_message", { leadId: selectedLeadId, body }); await loadDetail(selectedLeadId, false); notify("草稿已保存，审核后可发送。"); break;
+        case "use-template": {
+          const value = renderAcquisitionTemplate(campaign()?.outreach?.messageTemplate, currentDetail?.lead, campaign());
+          q("[data-acq-draft]").value = value; rememberEdit("draft", value); break;
         }
-        case "save-note": {
-          const body = q("[data-acq-note]").value.trim(); if (!body) throw new Error("请先填写客户回复。");
-          const result = await call("acquisition_add_note", { leadId: selectedLeadId, body }); q("[data-acq-note]").value = ""; await refresh();
-          notify(result?.analysisError ? `回复已保存，待补分析：${result.analysisError}` : "回复已记录并分析。", Boolean(result?.analysisError)); break;
-        }
+        case "save-draft": await saveComposer("draft"); break;
+        case "save-note": await saveComposer("note"); break;
       }
     });
   });
   root.addEventListener("input", (event) => {
+    if (event.target.matches("[data-acq-draft]")) rememberEdit("draft", event.target.value);
+    if (event.target.matches("[data-acq-note]")) rememberEdit("note", event.target.value);
     if (event.target.closest("[data-acq-form]")) { dirty = true; q("[data-acq-dirty]").textContent = "有未保存修改；范围或话术变更后需要重新批准。"; }
     if (event.target.matches("[data-acq-search]")) renderContent();
   });
   root.addEventListener("change", (event) => {
-    if (event.target.matches("[data-acq-filter-status], [data-acq-filter-platform]")) renderContent();
+    if (event.target.matches("[data-acq-filter-status], [data-acq-filter-platform], [data-acq-filter-work]")) renderContent();
     if (event.target.matches("[data-acq-lead-status]")) perform(async () => { await call("acquisition_set_lead_status", { leadId: selectedLeadId, status: event.target.value }); await refresh(); });
   });
   q("[data-acq-dialog]").addEventListener("cancel", () => { pendingApproval = null; pendingMessage = null; });
@@ -306,6 +398,6 @@ export function mountAcquisitionCenter({ root, call, listen }) {
   return {
     refresh,
     setVisible(value) { visible = value; if (value) void refresh(); },
-    dispose() { disposed = true; ++loadVersion; ++detailVersion; clearTimeout(refreshTimer); unlisten?.(); },
+    dispose() { disposed = true; ++loadVersion; ++detailVersion; edits.clear(); clearTimeout(refreshTimer); unlisten?.(); },
   };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderCampaignForm } from "../src/js/acquisition.js";
+import { renderCampaignForm, acquisitionFollowUpIndex, filterAcquisitionLeads } from "../src/js/acquisition.js";
 import { newAcquisitionCampaign, validateAcquisitionCampaign, renderAcquisitionApproval, renderAcquisitionTemplate, renderAcquisitionMessages, renderAcquisitionPlatforms, renderAcquisitionSources } from "../src/js/acquisition.js";
 
 test("approval review and preview preserve the saved text and quote untrusted names", () => {
@@ -22,6 +22,22 @@ test("uncertain message can be reconciled without exposing a send action", () =>
   const html = renderAcquisitionMessages([{ id:"m", direction:"outbound", status:"uncertain", body:"测试" }]);
   assert.ok(html.includes("data-acq-resolve=\"sent\"") && html.includes("data-acq-resolve=\"failed\""));
   assert.ok(!html.includes("data-acq-send="));
+});
+
+test("work queues count distinct customers and intersect with platform and demand evidence", () => {
+  const leads = [{ id:"a", platform:"weibo", status:"qualified" }, { id:"b", platform:"douyin", status:"new" }];
+  const index = acquisitionFollowUpIndex({ messageWork:[{leadId:"a", verifyReceipt:true, reviewDraft:true}, {leadId:"b", reviewDraft:true}], pendingAnalysisIds:["b","b"], requirements:[{leadId:"a", summary:"预约", evidence:"需要 CRM 提醒"}] });
+  assert.equal(index.groups.analyze.size, 1);
+  assert.deepEqual(filterAcquisitionLeads(leads, { work:"reviewDraft", platform:"weibo", query:"crm" }, index), [leads[0]]);
+  assert.deepEqual(filterAcquisitionLeads(leads, { work:"verifyReceipt", status:"new" }, index), []);
+  assert.deepEqual(filterAcquisitionLeads(leads, { work:"analyze" }, index), [leads[1]]);
+});
+
+test("pending receipts block review of sibling drafts, but resolved ones do not", () => {
+  const draft = { id:"d", direction:"outbound", status:"draft", body:"draft" };
+  const html = status => renderAcquisitionMessages([draft, {...draft, id:"other", status}]);
+  for (const state of ["uncertain", "sending"]) assert.match(html(state), /data-acq-send="d" disabled/);
+  for (const state of ["failed", "sent"]) assert.doesNotMatch(html(state), /data-acq-send="d" disabled/);
 });
 
 test("native window control is opt-in and visible in the scope review", () => {

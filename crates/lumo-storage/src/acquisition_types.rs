@@ -10,6 +10,14 @@ pub struct AcquisitionSource {
     pub observed_at: i64,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcquisitionMessageWork {
+    pub lead_id: String,
+    pub review_draft: bool,
+    pub verify_receipt: bool,
+}
+
 #[derive(Debug)]
 pub struct AcquisitionAnalysisBatch {
     pub sources: Vec<String>,

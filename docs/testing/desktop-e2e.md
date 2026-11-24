@@ -25,8 +25,11 @@ The last command requires Chrome/Chromium. Requests are intercepted locally;
 the test checks each platform's page adapter, recipient identity, scoped
 gestures and outbound receipt. A second Chrome case loads the production
 workbench with fixture IPC responses to check lead filtering, demand-to-profile
-navigation, draft review, saving a reply while analysis is offline, clearing the
-pending queue after a retry and manual receipt reconciliation. No credentials,
+navigation, and follow-up queues intersected with demand-evidence searches. It
+switches between customers, overlaps a detail read with a refresh, fails a draft
+write, and edits the next reply while the prior save is pending. It also checks
+that unresolved receipts block sibling draft review, that reconciliation removes
+the customer from that queue, and that offline analysis can be retried. No credentials,
 real recipients or model keys are used. Changes to live platform pages and OS-level control permissions
 require separate validation.
 
